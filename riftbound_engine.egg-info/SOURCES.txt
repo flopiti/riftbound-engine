@@ -5,6 +5,7 @@ riftbound_engine/__main__.py
 riftbound_engine/decks.py
 riftbound_engine/engine.py
 riftbound_engine/fake_fill.py
+riftbound_engine/protocol.py
 riftbound_engine.egg-info/PKG-INFO
 riftbound_engine.egg-info/SOURCES.txt
 riftbound_engine.egg-info/dependency_links.txt
