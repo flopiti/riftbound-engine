@@ -1,0 +1,54 @@
+Metadata-Version: 2.4
+Name: riftbound-engine
+Version: 0.1.0
+Summary: A minimal game engine prototype.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
+# riftbound-engine
+
+A minimal CLI game engine prototype.
+
+## What exists now
+
+- Two hardcoded decks are defined in `riftbound_engine/decks.py`.
+- `GameEngine.start()` first requires deck selection:
+  - Player 1 chooses a deck.
+  - Player 2 chooses a deck.
+- After both decks are selected, normal turn actions begin.
+- Each selected deck always contains:
+  - 3 battlefields
+  - 1 chosen champion
+  - 1 legend
+  - 39 cards
+- CLI prints the full game state and required action every loop.
+
+## Run from CLI
+
+```bash
+python -m riftbound_engine
+```
+
+### Optional: fake fill deck choices
+
+Enable fake fill to auto-select deck choices from `riftbound_engine/fake_fill.py`:
+
+```bash
+FAKE_FILL=true python -m riftbound_engine
+```
+
+If no fake answer exists for the required player, CLI falls back to normal prompts.
+
+You can also use a `.env` file in the project root:
+
+```bash
+FAKE_FILL=true
+```
+
+An example file is included at `.env.example`.
+
+## Run tests
+
+```bash
+python -m pytest
+```

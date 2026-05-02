@@ -190,9 +190,7 @@ def main() -> None:
                 print(f"Auto-filled deck id: {deck_choice}")
             else:
                 deck_choice = input("Choose deck id: ").strip().lower()
-            if deck_choice == "quit":
-                print("Exiting engine.")
-                return
+
             user_input = f"choose_deck:{deck_choice}"
             try:
                 actor = output.required_action.actor
@@ -217,16 +215,9 @@ def main() -> None:
                 print(f"Invalid action: {error}")
             continue
 
-        state = engine.game_state
-        both_decks_selected = state.player_1_deck is not None and state.player_2_deck is not None
-        first_turn_selected = state.first_turn is not None
-        battlefields_pending = both_decks_selected and first_turn_selected and (
-            state.battlefield_1 is None or state.battlefield_2 is None
-        )
-
-        if battlefields_pending:
-            if state.battlefield_1 is None:
-                options = list(state.player_1_deck.battlefields)
+        if output.required_action is not None and output.required_action.name == "choose_battlefields":
+            if output.player_1_options:
+                options = list(output.player_1_options)
                 print(f"Player 1 battlefield options: {', '.join(options)}")
                 fake_battlefield_1 = FAKE_FILL_BATTLEFIELDS.get(RequiredTo.PLAYER_1) if fake_fill_enabled else None
                 if fake_battlefield_1 in options:
@@ -242,10 +233,10 @@ def main() -> None:
                 except ValueError as error:
                     print(f"Invalid action: {error}")
                     continue
+                continue
 
-            state = engine.game_state
-            if state.battlefield_2 is None:
-                options = list(state.player_2_deck.battlefields)
+            if output.player_2_options:
+                options = list(output.player_2_options)
                 print(f"Player 2 battlefield options: {', '.join(options)}")
                 fake_battlefield_2 = FAKE_FILL_BATTLEFIELDS.get(RequiredTo.PLAYER_2) if fake_fill_enabled else None
                 if fake_battlefield_2 in options:
@@ -261,6 +252,7 @@ def main() -> None:
                 except ValueError as error:
                     print(f"Invalid action: {error}")
                     continue
+                continue
 
             continue
 
@@ -326,8 +318,8 @@ def main() -> None:
         if setup_pending:
             continue
 
-        if state.first_turn_choice is not None:
-            print(f"{state.first_turn_choice.value} has first turn choice.")
+        if state.first_turn is not None:
+            print(f"{state.first_turn.value} goes first.")
         print("Game setup complete. No gameplay actions are implemented yet.")
         return
 
