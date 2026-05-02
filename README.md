@@ -1,33 +1,44 @@
 # riftbound-engine
 
-A minimal game engine prototype.
+A minimal CLI game engine prototype.
 
 ## What exists now
 
-- `GameState` model with an integer `counter` that defaults to `0`.
-- `GameEngine` with a `start()` method:
-  - If increment is possible, it increments `counter` and returns the new state.
-  - If increment is not possible, it returns required options for Player 1, Player 2, or both.
-- `EngineOutput` always includes:
-  - `game_state`
-  - `player_1_options`
-  - `player_2_options`
+- Two hardcoded decks are defined in `riftbound_engine/decks.py`.
+- `GameEngine.start()` first requires deck selection:
+  - Player 1 chooses a deck.
+  - Player 2 chooses a deck.
+- After both decks are selected, normal turn actions begin.
+- Each selected deck always contains:
+  - 3 battlefields
+  - 1 chosen champion
+  - 1 legend
+  - 39 cards
+- CLI prints the full game state and required action every loop.
 
-## Quick example
+## Run from CLI
 
-```python
-from riftbound_engine import GameEngine, RequiredTo
-
-engine = GameEngine()
-result = engine.start()
-print(result.game_state.counter)  # 1
-
-blocked_engine = GameEngine(max_counter=0)
-blocked = blocked_engine.start(required_to=RequiredTo.BOTH)
-print(blocked.game_state.counter)    # 0
-print(blocked.player_1_options)      # ["resolve_counter_block"]
-print(blocked.player_2_options)      # ["resolve_counter_block"]
+```bash
+python -m riftbound_engine
 ```
+
+### Optional: fake fill deck choices
+
+Enable fake fill to auto-select deck choices from `riftbound_engine/fake_fill.py`:
+
+```bash
+FAKE_FILL=true python -m riftbound_engine
+```
+
+If no fake answer exists for the required player, CLI falls back to normal prompts.
+
+You can also use a `.env` file in the project root:
+
+```bash
+FAKE_FILL=true
+```
+
+An example file is included at `.env.example`.
 
 ## Run tests
 
