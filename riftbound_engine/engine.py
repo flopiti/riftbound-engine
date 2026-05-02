@@ -93,6 +93,8 @@ class GameState:
     player_2_hand: list[str] | None = None
     player_1_runes: list[Rune] = field(default_factory=list)
     player_2_runes: list[Rune] = field(default_factory=list)
+    player_1_base: str | None = None
+    player_2_base: str | None = None
     current_player: RequiredTo = field(default_factory=lambda: RequiredTo.BOTH)
     started: bool = False
     player_1_deck: Deck | None = None
@@ -157,6 +159,8 @@ class GameEngine:
             player_2_hand=list(self._game_state.player_2_hand) if self._game_state.player_2_hand is not None else None,
             player_1_runes=list(self._game_state.player_1_runes),
             player_2_runes=list(self._game_state.player_2_runes),
+            player_1_base=self._game_state.player_1_base,
+            player_2_base=self._game_state.player_2_base,
             current_player=self._game_state.current_player,
             started=self._game_state.started,
             player_1_deck=self._game_state.player_1_deck,
@@ -343,6 +347,7 @@ class GameEngine:
             if value not in self._game_state.player_1_deck.battlefields:
                 raise ValueError("battlefield_1 must be from player_1 deck battlefields")
             self._game_state.battlefield_1 = value
+            self._game_state.player_1_base = value
             return self.start()
 
         if action.startswith("choose_battlefield_2:"):
@@ -354,6 +359,7 @@ class GameEngine:
             if value not in self._game_state.player_2_deck.battlefields:
                 raise ValueError("battlefield_2 must be from player_2 deck battlefields")
             self._game_state.battlefield_2 = value
+            self._game_state.player_2_base = value
             return self.start()
 
         if action.startswith("mulligan_resolve:"):

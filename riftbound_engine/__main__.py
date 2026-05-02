@@ -27,15 +27,18 @@ def _format_player_runes(runes: list[Rune]) -> str:
 def _player_lines(
     title: str,
     *,
+    base: str | None,
     hand: list[str] | None,
     runes: list[Rune],
     deck,
 ) -> list[str]:
+    base_s = base if base is not None else "pending"
     hand_s = ", ".join(hand) if hand is not None else "pending"
     champion_s = deck.chosen_champion if deck is not None else "pending"
     legend_s = deck.legend if deck is not None else "pending"
     return [
         f"{title}:",
+        f"  base: {base_s}",
         f"  hand: {hand_s}",
         f"  runes: {_format_player_runes(runes)}",
         f"  chosen champion: {champion_s}",
@@ -86,12 +89,14 @@ def _format_game_state(engine: GameEngine) -> str:
                 "",
                 *_player_lines(
                     "Player 1",
+                    base=state.player_1_base,
                     hand=state.player_1_hand,
                     runes=state.player_1_runes,
                     deck=state.player_1_deck,
                 ),
                 *_player_lines(
                     "Player 2",
+                    base=state.player_2_base,
                     hand=state.player_2_hand,
                     runes=state.player_2_runes,
                     deck=state.player_2_deck,
@@ -122,12 +127,14 @@ def _format_game_state(engine: GameEngine) -> str:
             "",
             *_player_lines(
                 "Player 1",
+                base=state.player_1_base,
                 hand=state.player_1_hand,
                 runes=state.player_1_runes,
                 deck=state.player_1_deck,
             ),
             *_player_lines(
                 "Player 2",
+                base=state.player_2_base,
                 hand=state.player_2_hand,
                 runes=state.player_2_runes,
                 deck=state.player_2_deck,

@@ -119,7 +119,9 @@ class GameEngineTests(unittest.TestCase):
         fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
         self.assertEqual(fifth.required_action.name, "choose_battlefields")
         self.assertEqual(fifth.game_state.battlefield_1, fourth.player_1_options[0])
+        self.assertEqual(fifth.game_state.player_1_base, fourth.player_1_options[0])
         self.assertIsNone(fifth.game_state.battlefield_2)
+        self.assertIsNone(fifth.game_state.player_2_base)
 
         sixth = engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
         self.assertEqual(sixth.required_action.name, "choose_mulligan")
@@ -127,6 +129,7 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(len(sixth.player_1_options), 4)
         self.assertEqual(len(sixth.player_2_options), 4)
         self.assertEqual(sixth.game_state.battlefield_2, fifth.player_2_options[0])
+        self.assertEqual(sixth.game_state.player_2_base, fifth.player_2_options[0])
         self.assertFalse(sixth.game_state.is_mulligan_done)
         self.assertEqual(sixth.game_state.counter, 0)
         self.assertFalse(sixth.game_state.started)
