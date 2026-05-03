@@ -58,7 +58,7 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(len(deck.cards), 39)
         self.assertLessEqual(max(deck.cards.count(card) for card in set(deck.cards)), 3)
         self.assertEqual(len(deck.runes), 12)
-        self.assertTrue(all(r.domain == "Calm" for r in deck.runes))
+        self.assertTrue(all(r.domain == "Fury" for r in deck.runes))
 
     def test_tide_wardens_runes_are_six_fury_six_body(self) -> None:
         deck = build_deck_from_id("tide_wardens")
@@ -157,12 +157,13 @@ class GameEngineTests(unittest.TestCase):
             actor=RequiredTo.PLAYER_2,
         )
         self.assertIsNotNone(eighth.required_action)
-        self.assertEqual(eighth.required_action.name, RequiredStep.ABCD)
+        self.assertEqual(eighth.required_action.name, RequiredStep.ACTION_TURN)
         self.assertEqual(eighth.required_action.actor, eighth.game_state.first_turn)
         self.assertTrue(eighth.game_state.is_mulligan_done)
-        self.assertEqual(len(eighth.game_state.player_1_library), 35)
+        # First player’s ABCD runs immediately (including draw): library 35→34, hand 4→5.
+        self.assertEqual(len(eighth.game_state.player_1_library), 34)
         self.assertEqual(len(eighth.game_state.player_2_library), 35)
-        self.assertEqual(len(eighth.game_state.player_1_hand), 4)
+        self.assertEqual(len(eighth.game_state.player_1_hand), 5)
         self.assertEqual(len(eighth.game_state.player_2_hand), 4)
         self.assertEqual(eighth.game_state.counter, 1)
         self.assertTrue(eighth.game_state.started)
@@ -184,34 +185,40 @@ class GameEngineTests(unittest.TestCase):
             action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
             actor=RequiredTo.PLAYER_2,
         )
-        self.assertEqual(after_mulligan.required_action.name, RequiredStep.ABCD)
+        self.assertEqual(after_mulligan.required_action.name, RequiredStep.ACTION_TURN)
         ft = after_mulligan.game_state.first_turn
         self.assertEqual(after_mulligan.game_state.current_player, ft)
 
-        out = after_mulligan
-        for letter in ("a", "b", "c", "d"):
-            self.assertEqual(out.required_action.name, RequiredStep.ABCD)
-            out = engine.apply_action(action=f"abcd:{letter}", actor=out.required_action.actor)
-
-        self.assertEqual(out.required_action.name, RequiredStep.ACTION_TURN)
-        gs = out.game_state
+        gs = after_mulligan.game_state
         self.assertEqual(len(gs.player_1_runes), 2)
         self.assertEqual(len(gs.player_1_rune_library or []), 10)
         self.assertEqual(len(gs.player_1_hand or []), 5)
         self.assertEqual(len(gs.player_1_library or []), 34)
 
         self.assertIn("end_turn", registered_turn_action_verbs())
-        done = engine.apply_action(action="play:end_turn", actor=out.required_action.actor)
-        self.assertEqual(done.required_action.name, RequiredStep.ABCD)
+        done = engine.apply_action(action="play:end_turn", actor=after_mulligan.required_action.actor)
+        self.assertEqual(done.required_action.name, RequiredStep.ACTION_TURN)
         self.assertEqual(done.required_action.actor, RequiredTo.PLAYER_2)
-        self.assertFalse(done.game_state.abcd_a_done)
+        self.assertTrue(done.game_state.abcd_a_done)
         self.assertEqual(done.game_state.player_1_turn_number, 1)
         self.assertEqual(done.game_state.player_2_turn_number, 1)
         self.assertEqual(done.game_state.total_turn_number, 2)
+        self.assertEqual(len(done.game_state.player_2_runes), 3)
+        self.assertEqual(len(done.game_state.player_2_rune_library or []), 9)
 
-    def test_channel_rune_count_is_two_on_first_global_turn_one_after(self) -> None:
-        gs = GameState(total_turn_number=1)
+        end_p2 = engine.apply_action(action="play:end_turn", actor=done.required_action.actor)
+        self.assertEqual(end_p2.required_action.name, RequiredStep.ACTION_TURN)
+        self.assertEqual(end_p2.required_action.actor, RequiredTo.PLAYER_1)
+        self.assertEqual(len(end_p2.game_state.player_1_runes), 4)
+        self.assertEqual(end_p2.game_state.global_channel_count, 3)
+
+    def test_channel_rune_count_follows_first_second_then_two_schedule(self) -> None:
+        gs = GameState(global_channel_count=0)
         engine = GameEngine(game_state=gs)
-        self.assertEqual(engine._channel_rune_count_for_this_turn(), 2)
-        gs.total_turn_number = 2
-        self.assertEqual(engine._channel_rune_count_for_this_turn(), 1)
+        self.assertEqual(engine._channel_rune_count_for_next_channel(), 2)
+        gs.global_channel_count = 1
+        self.assertEqual(engine._channel_rune_count_for_next_channel(), 3)
+        gs.global_channel_count = 2
+        self.assertEqual(engine._channel_rune_count_for_next_channel(), 2)
+        gs.global_channel_count = 99
+        self.assertEqual(engine._channel_rune_count_for_next_channel(), 2)

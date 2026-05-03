@@ -71,6 +71,7 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
         "abcd_b_done": gs.abcd_b_done,
         "abcd_c_done": gs.abcd_c_done,
         "abcd_d_done": gs.abcd_d_done,
+        "global_channel_count": gs.global_channel_count,
     }
 
 
@@ -89,10 +90,10 @@ def _serialize_output(out: EngineOutput) -> dict[str, Any]:
 
 
 def get_snapshot() -> dict[str, Any]:
+    """Always run `start()` so ABCD auto-completion and any logic upgrades apply to every poll."""
     with _engine_lock:
         global _last_output
-        if _last_output is None:
-            _last_output = _engine.start()
+        _last_output = _engine.start()
         return _serialize_output(_last_output)
 
 

@@ -18,9 +18,10 @@ DECK_CARD_COUNT = 39
 DECK_RUNE_COUNT = 12
 MULLIGAN_DRAW_COUNT = 4
 MULLIGAN_MAX_BOTTOM = 2
-# Channel (ABCD — C): first global turn draws this many runes; later turns draw CHANNEL_RUNES_LATER.
-CHANNEL_RUNES_FIRST_TURN = 2
-CHANNEL_RUNES_LATER = 1
+# Channel (ABCD — C): across the whole match, 1st channel = 2 runes, 2nd channel = 3, then 2 forever.
+CHANNEL_RUNES_FIRST_IN_GAME = 2
+CHANNEL_RUNES_SECOND_IN_GAME = 3
+CHANNEL_RUNES_AFTER = 2
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,8 @@ class GameState:
     abcd_b_done: bool = False
     abcd_c_done: bool = False
     abcd_d_done: bool = False
+    #: How many Channel (C) steps have completed this match (both players; orders the 2 → 3 → 2… schedule).
+    global_channel_count: int = 0
 
 
 class RequiredTo(str, Enum):
@@ -210,6 +213,7 @@ class GameEngine:
             abcd_b_done=self._game_state.abcd_b_done,
             abcd_c_done=self._game_state.abcd_c_done,
             abcd_d_done=self._game_state.abcd_d_done,
+            global_channel_count=self._game_state.global_channel_count,
         )
 
     def _can_increment(self) -> bool:
@@ -324,10 +328,13 @@ class GameEngine:
             self._game_state.player_2_turn_number += 1
         self._reset_abcd_flags()
 
-    def _channel_rune_count_for_this_turn(self) -> int:
-        if self._game_state.total_turn_number == 1:
-            return CHANNEL_RUNES_FIRST_TURN
-        return CHANNEL_RUNES_LATER
+    def _channel_rune_count_for_next_channel(self) -> int:
+        k = self._game_state.global_channel_count
+        if k == 0:
+            return CHANNEL_RUNES_FIRST_IN_GAME
+        if k == 1:
+            return CHANNEL_RUNES_SECOND_IN_GAME
+        return CHANNEL_RUNES_AFTER
 
     def _execute_channel(self, actor: RequiredTo) -> None:
         """Channel (C): draw runes from the rune deck into the player's rune pool."""
@@ -341,11 +348,12 @@ class GameEngine:
             raise ValueError("channel requires player_1 or player_2")
         if pile is None:
             raise ValueError("rune deck is not initialized")
-        n = self._channel_rune_count_for_this_turn()
+        n = self._channel_rune_count_for_next_channel()
         if len(pile) < n:
             raise ValueError(f"not enough runes in rune deck to channel ({len(pile)} < {n})")
         for _ in range(n):
             pool.append(pile.pop(0))
+        self._game_state.global_channel_count += 1
 
     def _execute_draw(self, actor: RequiredTo) -> None:
         """Draw (D): draw one card from the main deck (library) into hand."""
@@ -394,6 +402,15 @@ class GameEngine:
             gs.abcd_d_done = True
         else:
             raise ValueError("letter must be a, b, c, or d")
+
+    def _complete_abcd_for_current_player(self) -> None:
+        """Run A→B→C→D for the active player in one shot (no separate client steps)."""
+        gs = self._game_state
+        actor = gs.current_player
+        if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+            raise ValueError("ABCD requires active player_1 or player_2")
+        for letter in ("a", "b", "c", "d"):
+            self._apply_abcd_letter(letter, actor)
 
     def _deck_selection_output(self) -> EngineOutput | None:
         available_decks = list(HARDCODED_DECKS.keys())
@@ -453,10 +470,8 @@ class GameEngine:
 
         if self._game_state.started:
             if not is_abcd_done(self._game_state):
-                return EngineOutput(
-                    game_state=self.game_state,
-                    required_action=_required_action(self._game_state.current_player, RequiredStep.ABCD),
-                )
+                self._complete_abcd_for_current_player()
+                return self.start()
             return EngineOutput(
                 game_state=self.game_state,
                 required_action=_required_action(self._game_state.current_player, RequiredStep.ACTION_TURN),
