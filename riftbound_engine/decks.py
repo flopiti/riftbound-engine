@@ -21,7 +21,7 @@ HARDCODED_DECKS: dict[str, dict[str, object]] = {
             "Volcanic Oath", "Volcanic Oath", "Volcanic Oath",
             "Riftfire Crest", "Riftfire Crest", "Riftfire Crest",
         ],
-        "runes": [{"domain": "Calm"} for _ in range(12)],
+        "runes": [{"domain": "Fury"} for _ in range(12)],
     },
     "tide_wardens": {
         "valid": True,

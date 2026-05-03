@@ -10,5 +10,11 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
