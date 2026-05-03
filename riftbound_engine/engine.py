@@ -18,6 +18,9 @@ DECK_CARD_COUNT = 39
 DECK_RUNE_COUNT = 12
 MULLIGAN_DRAW_COUNT = 4
 MULLIGAN_MAX_BOTTOM = 2
+# Channel (ABCD — C): first global turn draws this many runes; later turns draw CHANNEL_RUNES_LATER.
+CHANNEL_RUNES_FIRST_TURN = 2
+CHANNEL_RUNES_LATER = 1
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,9 @@ class GameState:
     player_2_hand: list[str] | None = None
     player_1_runes: list[Rune] = field(default_factory=list)
     player_2_runes: list[Rune] = field(default_factory=list)
+    #: Shuffled rune deck (remaining); draws from the front. Set when the game starts after mulligan.
+    player_1_rune_library: list[Rune] | None = None
+    player_2_rune_library: list[Rune] | None = None
     player_1_base: str | None = None
     player_2_base: str | None = None
     current_player: RequiredTo = field(default_factory=lambda: RequiredTo.BOTH)
@@ -128,41 +134,15 @@ def is_abcd_done(game_state: GameState) -> bool:
     )
 
 
-def apply_abcd_letter(game_state: GameState, letter: str, *, actor: RequiredTo) -> None:
-    """Advance one ABCD step for the active player. Gameplay for each letter is not implemented yet."""
-    if actor != game_state.current_player:
-        raise ValueError("only the active player may advance ABCD")
-    key = letter.strip().lower()
-    if key == "a":
-        if game_state.abcd_a_done:
-            raise ValueError("A already completed this turn")
-        game_state.abcd_a_done = True
-    elif key == "b":
-        if not game_state.abcd_a_done:
-            raise ValueError("A must be completed before B")
-        if game_state.abcd_b_done:
-            raise ValueError("B already completed this turn")
-        game_state.abcd_b_done = True
-    elif key == "c":
-        if not game_state.abcd_b_done:
-            raise ValueError("B must be completed before C")
-        if game_state.abcd_c_done:
-            raise ValueError("C already completed this turn")
-        game_state.abcd_c_done = True
-    elif key == "d":
-        if not game_state.abcd_c_done:
-            raise ValueError("C must be completed before D")
-        if game_state.abcd_d_done:
-            raise ValueError("D already completed this turn")
-        game_state.abcd_d_done = True
-    else:
-        raise ValueError("letter must be a, b, c, or d")
-
-
 @dataclass
 class RequiredAction:
     actor: RequiredTo
     name: str
+
+
+def _required_action(actor: RequiredTo, step: RequiredStep) -> RequiredAction:
+    """Store stable string names for clients (matches `RequiredStep` values)."""
+    return RequiredAction(actor=actor, name=step.value)
 
 
 @dataclass
@@ -209,6 +189,12 @@ class GameEngine:
             player_2_hand=list(self._game_state.player_2_hand) if self._game_state.player_2_hand is not None else None,
             player_1_runes=list(self._game_state.player_1_runes),
             player_2_runes=list(self._game_state.player_2_runes),
+            player_1_rune_library=list(self._game_state.player_1_rune_library)
+            if self._game_state.player_1_rune_library is not None
+            else None,
+            player_2_rune_library=list(self._game_state.player_2_rune_library)
+            if self._game_state.player_2_rune_library is not None
+            else None,
             player_1_base=self._game_state.player_1_base,
             player_2_base=self._game_state.player_2_base,
             current_player=self._game_state.current_player,
@@ -313,21 +299,114 @@ class GameEngine:
             self._game_state.player_2_turn_number = 1
             self._game_state.player_1_turn_number = 0
         self._reset_abcd_flags()
+        if self._game_state.player_1_deck is not None:
+            r1 = list(self._game_state.player_1_deck.runes)
+            self._rng.shuffle(r1)
+            self._game_state.player_1_rune_library = r1
+        if self._game_state.player_2_deck is not None:
+            r2 = list(self._game_state.player_2_deck.runes)
+            self._rng.shuffle(r2)
+            self._game_state.player_2_rune_library = r2
         if self._can_increment():
             self._game_state.counter += 1
+
+    def _advance_turn(self) -> None:
+        """Switch active player, bump turn counters, reset ABCD and action-turn flags for the new turn."""
+        cp = self._game_state.current_player
+        if cp not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+            raise ValueError("current_player must be player_1 or player_2 during play")
+        nxt = RequiredTo.PLAYER_2 if cp == RequiredTo.PLAYER_1 else RequiredTo.PLAYER_1
+        self._game_state.current_player = nxt
+        self._game_state.total_turn_number += 1
+        if nxt == RequiredTo.PLAYER_1:
+            self._game_state.player_1_turn_number += 1
+        else:
+            self._game_state.player_2_turn_number += 1
+        self._reset_abcd_flags()
+
+    def _channel_rune_count_for_this_turn(self) -> int:
+        if self._game_state.total_turn_number == 1:
+            return CHANNEL_RUNES_FIRST_TURN
+        return CHANNEL_RUNES_LATER
+
+    def _execute_channel(self, actor: RequiredTo) -> None:
+        """Channel (C): draw runes from the rune deck into the player's rune pool."""
+        if actor == RequiredTo.PLAYER_1:
+            pile = self._game_state.player_1_rune_library
+            pool = self._game_state.player_1_runes
+        elif actor == RequiredTo.PLAYER_2:
+            pile = self._game_state.player_2_rune_library
+            pool = self._game_state.player_2_runes
+        else:
+            raise ValueError("channel requires player_1 or player_2")
+        if pile is None:
+            raise ValueError("rune deck is not initialized")
+        n = self._channel_rune_count_for_this_turn()
+        if len(pile) < n:
+            raise ValueError(f"not enough runes in rune deck to channel ({len(pile)} < {n})")
+        for _ in range(n):
+            pool.append(pile.pop(0))
+
+    def _execute_draw(self, actor: RequiredTo) -> None:
+        """Draw (D): draw one card from the main deck (library) into hand."""
+        if actor == RequiredTo.PLAYER_1:
+            library = self._game_state.player_1_library
+            hand = self._game_state.player_1_hand
+        elif actor == RequiredTo.PLAYER_2:
+            library = self._game_state.player_2_library
+            hand = self._game_state.player_2_hand
+        else:
+            raise ValueError("draw requires player_1 or player_2")
+        if library is None or hand is None:
+            raise ValueError("library or hand is not initialized")
+        if not library:
+            raise ValueError("cannot draw: main deck is empty")
+        hand.append(library.pop(0))
+
+    def _apply_abcd_letter(self, letter: str, actor: RequiredTo) -> None:
+        gs = self._game_state
+        if actor != gs.current_player:
+            raise ValueError("only the active player may advance ABCD")
+        key = letter.strip().lower()
+        if key == "a":
+            if gs.abcd_a_done:
+                raise ValueError("A already completed this turn")
+            gs.abcd_a_done = True
+        elif key == "b":
+            if not gs.abcd_a_done:
+                raise ValueError("A must be completed before B")
+            if gs.abcd_b_done:
+                raise ValueError("B already completed this turn")
+            gs.abcd_b_done = True
+        elif key == "c":
+            if not gs.abcd_b_done:
+                raise ValueError("B must be completed before C")
+            if gs.abcd_c_done:
+                raise ValueError("C already completed this turn")
+            self._execute_channel(actor)
+            gs.abcd_c_done = True
+        elif key == "d":
+            if not gs.abcd_c_done:
+                raise ValueError("C must be completed before D")
+            if gs.abcd_d_done:
+                raise ValueError("D already completed this turn")
+            self._execute_draw(actor)
+            gs.abcd_d_done = True
+        else:
+            raise ValueError("letter must be a, b, c, or d")
 
     def _deck_selection_output(self) -> EngineOutput | None:
         available_decks = list(HARDCODED_DECKS.keys())
         if self._game_state.player_1_deck is None:
             return EngineOutput(
                 game_state=self.game_state,
-                required_action=RequiredAction(actor=RequiredTo.PLAYER_1, name=RequiredStep.CHOOSE_DECK),
+                required_action=_required_action(RequiredTo.PLAYER_1, RequiredStep.CHOOSE_DECK),
                 player_1_options=available_decks,
             )
         if self._game_state.player_2_deck is None:
             return EngineOutput(
                 game_state=self.game_state,
-                required_action=RequiredAction(actor=RequiredTo.PLAYER_2, name=RequiredStep.CHOOSE_DECK),
+                required_action=_required_action(RequiredTo.PLAYER_2, RequiredStep.CHOOSE_DECK),
                 player_2_options=available_decks,
             )
         return None
@@ -343,9 +422,9 @@ class GameEngine:
             if self._game_state.first_turn is None:
                 return EngineOutput(
                     game_state=self.game_state,
-                    required_action=RequiredAction(
-                        actor=self._game_state.first_turn_choice or RequiredTo.PLAYER_1,
-                        name=RequiredStep.CHOOSE_FIRST_TURN,
+                    required_action=_required_action(
+                        self._game_state.first_turn_choice or RequiredTo.PLAYER_1,
+                        RequiredStep.CHOOSE_FIRST_TURN,
                     ),
                 )
             if self._game_state.battlefield_1 is None or self._game_state.battlefield_2 is None:
@@ -357,10 +436,7 @@ class GameEngine:
                     player_2_options=(
                         list(self._game_state.player_2_deck.battlefields) if self._game_state.battlefield_2 is None else []
                     ),
-                    required_action=RequiredAction(
-                        actor=RequiredTo.BOTH,
-                        name=RequiredStep.CHOOSE_BATTLEFIELDS,
-                    ),
+                    required_action=_required_action(RequiredTo.BOTH, RequiredStep.CHOOSE_BATTLEFIELDS),
                 )
             if not self._game_state.is_mulligan_done:
                 self._prepare_mulligan_draws()
@@ -371,7 +447,7 @@ class GameEngine:
                         game_state=self.game_state,
                         player_1_options=list(self._game_state.player_1_mulligan_hand or []),
                         player_2_options=list(self._game_state.player_2_mulligan_hand or []),
-                        required_action=RequiredAction(actor=RequiredTo.BOTH, name=RequiredStep.CHOOSE_MULLIGAN),
+                        required_action=_required_action(RequiredTo.BOTH, RequiredStep.CHOOSE_MULLIGAN),
                     )
                 self._finalize_setup_after_mulligan()
 
@@ -379,8 +455,12 @@ class GameEngine:
             if not is_abcd_done(self._game_state):
                 return EngineOutput(
                     game_state=self.game_state,
-                    required_action=RequiredAction(actor=self._game_state.current_player, name=RequiredStep.ABCD),
+                    required_action=_required_action(self._game_state.current_player, RequiredStep.ABCD),
                 )
+            return EngineOutput(
+                game_state=self.game_state,
+                required_action=_required_action(self._game_state.current_player, RequiredStep.ACTION_TURN),
+            )
 
         return EngineOutput(
             game_state=self.game_state,
@@ -388,6 +468,10 @@ class GameEngine:
         )
 
     def apply_action(self, action: str, actor: RequiredTo) -> EngineOutput:
+        action = action.strip()
+        if not action:
+            raise ValueError("action must not be empty")
+
         if action.startswith(apply_prefix(ApplyVerb.CHOOSE_DECK)):
             deck_selection = self._deck_selection_output()
             if deck_selection is None:
@@ -487,7 +571,13 @@ class GameEngine:
             if not self._game_state.started:
                 raise ValueError("game has not started yet")
             letter = action.split(":", 1)[1]
-            apply_abcd_letter(self._game_state, letter, actor=actor)
+            self._apply_abcd_letter(letter, actor)
+            return self.start()
+
+        if action.startswith(apply_prefix(ApplyVerb.PLAY)):
+            from .action_turn.registry import dispatch_turn_play
+
+            dispatch_turn_play(self, actor, action)
             return self.start()
 
         raise ValueError("unknown action")

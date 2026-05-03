@@ -1,6 +1,13 @@
 import unittest
 
-from riftbound_engine import GameEngine, GameState, RequiredStep, RequiredTo, build_deck_from_id
+from riftbound_engine import (
+    GameEngine,
+    GameState,
+    RequiredStep,
+    RequiredTo,
+    build_deck_from_id,
+    registered_turn_action_verbs,
+)
 
 
 class GameEngineTests(unittest.TestCase):
@@ -163,7 +170,7 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(eighth.game_state.player_1_turn_number, 1)
         self.assertEqual(eighth.game_state.player_2_turn_number, 0)
 
-    def test_after_abcd_complete_engine_requires_nothing_until_you_define_next_phase(self) -> None:
+    def test_after_abcd_action_turn_play_end_turn_advances_to_next_player_abcd(self) -> None:
         rolls = iter([6, 2])
         engine = GameEngine(dice_roller=lambda: next(rolls))
         first = engine.start()
@@ -186,7 +193,25 @@ class GameEngineTests(unittest.TestCase):
             self.assertEqual(out.required_action.name, RequiredStep.ABCD)
             out = engine.apply_action(action=f"abcd:{letter}", actor=out.required_action.actor)
 
-        self.assertIsNone(out.required_action)
-        self.assertEqual(out.game_state.player_1_turn_number, 1)
-        self.assertEqual(out.game_state.player_2_turn_number, 0)
-        self.assertEqual(out.game_state.total_turn_number, 1)
+        self.assertEqual(out.required_action.name, RequiredStep.ACTION_TURN)
+        gs = out.game_state
+        self.assertEqual(len(gs.player_1_runes), 2)
+        self.assertEqual(len(gs.player_1_rune_library or []), 10)
+        self.assertEqual(len(gs.player_1_hand or []), 5)
+        self.assertEqual(len(gs.player_1_library or []), 34)
+
+        self.assertIn("end_turn", registered_turn_action_verbs())
+        done = engine.apply_action(action="play:end_turn", actor=out.required_action.actor)
+        self.assertEqual(done.required_action.name, RequiredStep.ABCD)
+        self.assertEqual(done.required_action.actor, RequiredTo.PLAYER_2)
+        self.assertFalse(done.game_state.abcd_a_done)
+        self.assertEqual(done.game_state.player_1_turn_number, 1)
+        self.assertEqual(done.game_state.player_2_turn_number, 1)
+        self.assertEqual(done.game_state.total_turn_number, 2)
+
+    def test_channel_rune_count_is_two_on_first_global_turn_one_after(self) -> None:
+        gs = GameState(total_turn_number=1)
+        engine = GameEngine(game_state=gs)
+        self.assertEqual(engine._channel_rune_count_for_this_turn(), 2)
+        gs.total_turn_number = 2
+        self.assertEqual(engine._channel_rune_count_for_this_turn(), 1)

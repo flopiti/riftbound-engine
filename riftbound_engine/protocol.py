@@ -16,6 +16,8 @@ class RequiredStep(StrEnum):
     CHOOSE_BATTLEFIELDS = "choose_battlefields"
     CHOOSE_MULLIGAN = "choose_mulligan"
     ABCD = "abcd"
+    #: Discretionary plays after ABCD (`play:<verb>:`); use `play:end_turn` when done.
+    ACTION_TURN = "action_turn"
 
 
 class ApplyVerb(StrEnum):
@@ -27,6 +29,7 @@ class ApplyVerb(StrEnum):
     CHOOSE_BATTLEFIELD_2 = "choose_battlefield_2"
     MULLIGAN_RESOLVE = "mulligan_resolve"
     ABCD = "abcd"
+    PLAY = "play"
 
 
 def apply_prefix(verb: ApplyVerb) -> str:

@@ -13,6 +13,7 @@ from riftbound_engine import (
     RequiredStep,
     RequiredTo,
     Rune,
+    registered_turn_action_verbs,
 )
 from riftbound_engine.fake_fill import (
     FAKE_FILL_BATTLEFIELDS,
@@ -316,17 +317,53 @@ def _cli_choose_mulligan(engine: GameEngine, output: EngineOutput, fake_fill_ena
     return output
 
 
+def _normalize_cli_play_command(raw: str) -> str:
+    """Engine wire format is always `play:<verb>:…`. Accept bare shortcuts for end_turn in the CLI."""
+    s = raw.strip()
+    if not s or s.startswith(f"{ApplyVerb.PLAY.value}:"):
+        return s
+    word = s.lower().split(None, 1)[0]
+    if word in {"end_turn", "end", "eot"}:
+        return f"{ApplyVerb.PLAY.value}:end_turn"
+    return s
+
+
+def _cli_action_turn(engine: GameEngine, output: EngineOutput, fake_fill_enabled: bool) -> CliStepResult:
+    del fake_fill_enabled
+    ra = output.required_action
+    assert ra is not None
+    verbs = ", ".join(sorted(registered_turn_action_verbs()))
+    print(
+        f"Action turn — engine uses `play:<verb>` (see verbs: {verbs}). "
+        "You can type end_turn or play:end_turn.\n"
+        "  end_turn — end your turn; opponent starts their ABCD."
+    )
+    raw = input("Command (play:end_turn, end_turn, …), or quit: ").strip()
+    if raw.lower() == "quit":
+        print("Exiting engine.")
+        return None
+    action = _normalize_cli_play_command(raw)
+    if not action:
+        print("Empty command — use end_turn or play:end_turn.")
+        return output
+    try:
+        return engine.apply_action(action=action, actor=ra.actor)
+    except ValueError as error:
+        print(f"Invalid action: {error}")
+        return output
+
+
 def _cli_abcd(engine: GameEngine, output: EngineOutput, fake_fill_enabled: bool) -> CliStepResult:
     del fake_fill_enabled
     ra = output.required_action
     assert ra is not None
-    print("Resolve ABCD in order (a → b → c → d). Letter effects are not implemented yet — flags only.")
-    letter = input("abcd letter (a/b/c/d), or quit: ").strip().lower()
-    if letter == "quit":
-        print("Exiting engine.")
-        return None
+    actor = ra.actor
+    print("Applying ABCD automatically (no decisions in these steps yet).")
     try:
-        return engine.apply_action(action=f"{ApplyVerb.ABCD.value}:{letter}", actor=ra.actor)
+        current = output
+        for letter in ("a", "b", "c", "d"):
+            current = engine.apply_action(action=f"{ApplyVerb.ABCD.value}:{letter}", actor=actor)
+        return current
     except ValueError as error:
         print(f"Invalid action: {error}")
         return output
@@ -338,6 +375,7 @@ _CLI_STEP_HANDLERS: dict[RequiredStep, Callable[[GameEngine, EngineOutput, bool]
     RequiredStep.CHOOSE_BATTLEFIELDS: _cli_choose_battlefields,
     RequiredStep.CHOOSE_MULLIGAN: _cli_choose_mulligan,
     RequiredStep.ABCD: _cli_abcd,
+    RequiredStep.ACTION_TURN: _cli_action_turn,
 }
 
 
@@ -350,12 +388,15 @@ def _dispatch_required_cli_step(
     ra = output.required_action
     if ra is None:
         return ("tail", output)
+    raw_step = getattr(ra.name, "value", ra.name)
     try:
-        step = RequiredStep(ra.name)
+        step = RequiredStep(str(raw_step))
     except ValueError:
+        print(f"CLI: unknown required_action.name {ra.name!r} — add a RequiredStep / handler mapping.")
         return ("tail", output)
     handler = _CLI_STEP_HANDLERS.get(step)
     if handler is None:
+        print(f"CLI: no handler for step {step.value!r}.")
         return ("tail", output)
     next_output = handler(engine, output, fake_fill_enabled)
     if next_output is None:
@@ -407,7 +448,7 @@ def main() -> None:
             continue
 
         if state.started and output.required_action is None:
-            print("ABCD complete for this turn. No further required actions are defined.")
+            print("No required engine step (action turn ended or not applicable).")
             return
 
         print(f"Unhandled required_action: {output.required_action!r}")
