@@ -2,6 +2,7 @@ README.md
 pyproject.toml
 riftbound_engine/__init__.py
 riftbound_engine/__main__.py
+riftbound_engine/csv_data.py
 riftbound_engine/decks.py
 riftbound_engine/engine.py
 riftbound_engine/fake_fill.py

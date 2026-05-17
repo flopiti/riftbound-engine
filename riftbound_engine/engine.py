@@ -337,7 +337,11 @@ class GameEngine:
         return CHANNEL_RUNES_AFTER
 
     def _execute_channel(self, actor: RequiredTo) -> None:
-        """Channel (C): draw runes from the rune deck into the player's rune pool."""
+        """Channel (C): draw runes from the rune deck into the player's rune pool.
+
+        Requests a scheduled count; if fewer remain, channels all remaining (e.g. wanted 2 but 1
+        left → channel 1; none left → channel none). Always completes the Channel step.
+        """
         if actor == RequiredTo.PLAYER_1:
             pile = self._game_state.player_1_rune_library
             pool = self._game_state.player_1_runes
@@ -348,9 +352,8 @@ class GameEngine:
             raise ValueError("channel requires player_1 or player_2")
         if pile is None:
             raise ValueError("rune deck is not initialized")
-        n = self._channel_rune_count_for_next_channel()
-        if len(pile) < n:
-            raise ValueError(f"not enough runes in rune deck to channel ({len(pile)} < {n})")
+        requested = self._channel_rune_count_for_next_channel()
+        n = min(requested, len(pile))
         for _ in range(n):
             pool.append(pile.pop(0))
         self._game_state.global_channel_count += 1

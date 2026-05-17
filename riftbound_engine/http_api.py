@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -11,16 +12,106 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .engine import Deck, EngineOutput, GameEngine, GameState, RequiredTo
+from .fake_fill import (
+    FAKE_FILL_BATTLEFIELDS,
+    FAKE_FILL_CHOICES,
+    FAKE_FILL_FIRST_TURN,
+    FAKE_FILL_MULLIGAN_BOTTOM,
+)
+from .protocol import ApplyVerb, RequiredStep
 
 _engine_lock = threading.Lock()
 _engine: GameEngine = GameEngine()
 _last_output: EngineOutput | None = None
 
 
+def _load_dotenv() -> None:
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.is_file():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+def _fake_fill_enabled() -> bool:
+    return os.getenv("FAKE_FILL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _auto_fake_fill(engine: GameEngine, output: EngineOutput) -> EngineOutput:
+    if not _fake_fill_enabled():
+        return output
+
+    for _ in range(64):
+        ra = output.required_action
+        if ra is None:
+            break
+
+        step = ra.name
+        actor = ra.actor
+
+        if step == RequiredStep.CHOOSE_DECK:
+            deck_id = FAKE_FILL_CHOICES.get(actor)
+            if deck_id is None:
+                break
+            output = engine.apply_action(action=f"{ApplyVerb.CHOOSE_DECK.value}:{deck_id}", actor=actor)
+            continue
+
+        if step == RequiredStep.CHOOSE_FIRST_TURN:
+            output = engine.apply_action(
+                action=f"{ApplyVerb.CHOOSE_FIRST_TURN.value}:{FAKE_FILL_FIRST_TURN.value}",
+                actor=actor,
+            )
+            continue
+
+        if step == RequiredStep.CHOOSE_BATTLEFIELDS:
+            gs = output.game_state
+            if gs.battlefield_1 is None:
+                bf = FAKE_FILL_BATTLEFIELDS[RequiredTo.PLAYER_1]
+                output = engine.apply_action(
+                    action=f"{ApplyVerb.CHOOSE_BATTLEFIELD_1.value}:{bf}",
+                    actor=RequiredTo.PLAYER_1,
+                )
+                continue
+            if gs.battlefield_2 is None:
+                bf = FAKE_FILL_BATTLEFIELDS[RequiredTo.PLAYER_2]
+                output = engine.apply_action(
+                    action=f"{ApplyVerb.CHOOSE_BATTLEFIELD_2.value}:{bf}",
+                    actor=RequiredTo.PLAYER_2,
+                )
+                continue
+            break
+
+        if step == RequiredStep.CHOOSE_MULLIGAN:
+            gs = output.game_state
+            bottom = FAKE_FILL_MULLIGAN_BOTTOM.strip()
+            if not gs.mulligan_player_1_resolved:
+                output = engine.apply_action(
+                    action=f"{ApplyVerb.MULLIGAN_RESOLVE.value}:{RequiredTo.PLAYER_1.value}:{bottom}",
+                    actor=RequiredTo.PLAYER_1,
+                )
+                continue
+            if not gs.mulligan_player_2_resolved:
+                output = engine.apply_action(
+                    action=f"{ApplyVerb.MULLIGAN_RESOLVE.value}:{RequiredTo.PLAYER_2.value}:{bottom}",
+                    actor=RequiredTo.PLAYER_2,
+                )
+                continue
+            break
+
+        break
+
+    return output
+
+
 def reset_engine() -> EngineOutput:
     global _engine, _last_output
     _engine = GameEngine()
     _last_output = _engine.start()
+    _last_output = _auto_fake_fill(_engine, _last_output)
     return _last_output
 
 
@@ -94,6 +185,7 @@ def get_snapshot() -> dict[str, Any]:
     with _engine_lock:
         global _last_output
         _last_output = _engine.start()
+        _last_output = _auto_fake_fill(_engine, _last_output)
         return _serialize_output(_last_output)
 
 
@@ -116,6 +208,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _startup() -> None:
+        _load_dotenv()
         reset_engine()
 
     @app.get("/health")
@@ -146,6 +239,7 @@ def create_app() -> FastAPI:
                 _last_output = _engine.start()
             try:
                 _last_output = _engine.apply_action(action=body.action, actor=actor)
+                _last_output = _auto_fake_fill(_engine, _last_output)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
             return _serialize_output(_last_output)

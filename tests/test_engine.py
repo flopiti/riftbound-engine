@@ -8,6 +8,7 @@ from riftbound_engine import (
     build_deck_from_id,
     registered_turn_action_verbs,
 )
+from riftbound_engine.csv_data import csv_cards
 
 
 class GameEngineTests(unittest.TestCase):
@@ -52,6 +53,7 @@ class GameEngineTests(unittest.TestCase):
 
     def test_deck_builder_enforces_required_shape(self) -> None:
         deck = build_deck_from_id("ember_vanguard")
+        catalog_names = {card.name for card in csv_cards()}
         self.assertEqual(len(deck.battlefields), 3)
         self.assertTrue(deck.chosen_champion)
         self.assertTrue(deck.legend)
@@ -59,6 +61,10 @@ class GameEngineTests(unittest.TestCase):
         self.assertLessEqual(max(deck.cards.count(card) for card in set(deck.cards)), 3)
         self.assertEqual(len(deck.runes), 12)
         self.assertTrue(all(r.domain == "Fury" for r in deck.runes))
+        self.assertTrue(all(name in catalog_names for name in deck.cards))
+        self.assertIn(deck.chosen_champion, catalog_names)
+        self.assertIn(deck.legend, catalog_names)
+        self.assertTrue(all(bf in catalog_names for bf in deck.battlefields))
 
     def test_tide_wardens_runes_are_six_fury_six_body(self) -> None:
         deck = build_deck_from_id("tide_wardens")

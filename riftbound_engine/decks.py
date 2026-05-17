@@ -1,49 +1,45 @@
 from __future__ import annotations
 
-HARDCODED_DECKS: dict[str, dict[str, object]] = {
-    "ember_vanguard": {
-        "valid": True,
-        "battlefields": ["Scorch Ridge", "Ashfall Bastion", "Cinder Gate"],
-        "chosen_champion": "Kael, Ember Warden",
-        "legend": "The Eternal Spark",
-        "cards": [
-            "Blazing Advance", "Blazing Advance", "Blazing Advance",
-            "Cinder Spear", "Cinder Spear", "Cinder Spear",
-            "Ashen Guard", "Ashen Guard", "Ashen Guard",
-            "Magma Burst", "Magma Burst", "Magma Burst",
-            "Flare Ritual", "Flare Ritual", "Flare Ritual",
-            "Forge Sentinel", "Forge Sentinel", "Forge Sentinel",
-            "Inferno Tactician", "Inferno Tactician", "Inferno Tactician",
-            "Scorching Volley", "Scorching Volley", "Scorching Volley",
-            "Pyre Channeler", "Pyre Channeler", "Pyre Channeler",
-            "Kindle Resolve", "Kindle Resolve", "Kindle Resolve",
-            "Ember Scout", "Ember Scout", "Ember Scout",
-            "Volcanic Oath", "Volcanic Oath", "Volcanic Oath",
-            "Riftfire Crest", "Riftfire Crest", "Riftfire Crest",
-        ],
-        "runes": [{"domain": "Fury"} for _ in range(12)],
-    },
-    "tide_wardens": {
-        "valid": True,
-        "battlefields": ["Moonwake Shore", "Coral Keep", "Tideglass Harbor"],
-        "chosen_champion": "Nyra, Wavecaller",
-        "legend": "Song of the Deep",
-        "cards": [
-            "Tidal Insight", "Tidal Insight", "Tidal Insight",
-            "Coral Bastion", "Coral Bastion", "Coral Bastion",
-            "Riptide Lancer", "Riptide Lancer", "Riptide Lancer",
-            "Depthcall Adept", "Depthcall Adept", "Depthcall Adept",
-            "Moonwake Barrier", "Moonwake Barrier", "Moonwake Barrier",
-            "Harbor Skirmisher", "Harbor Skirmisher", "Harbor Skirmisher",
-            "Undertow Snare", "Undertow Snare", "Undertow Snare",
-            "Pearl Navigator", "Pearl Navigator", "Pearl Navigator",
-            "Foamblade Duelist", "Foamblade Duelist", "Foamblade Duelist",
-            "Current Shepherd", "Current Shepherd", "Current Shepherd",
-            "Siren's Warning", "Siren's Warning", "Siren's Warning",
-            "Stormglass Oracle", "Stormglass Oracle", "Stormglass Oracle",
-            "Abyssal Accord", "Abyssal Accord", "Abyssal Accord",
-        ],
-        "runes": [{"domain": "Fury"} for _ in range(6)] + [{"domain": "Body"} for _ in range(6)],
-    },
-}
+from .csv_data import (
+    build_csv_deck_profile,
+    deck_battlefields_for_key,
+)
 
+
+def _build_hardcoded_deck(
+    key: str,
+    *,
+    domains: frozenset[str],
+    rune_counts: list[tuple[str, int]],
+    seed: int,
+) -> dict[str, object]:
+    profile = build_csv_deck_profile(
+        key,
+        domains=domains,
+        rune_counts=rune_counts,
+        seed=seed,
+    )
+    return {
+        "valid": True,
+        "battlefields": list(deck_battlefields_for_key(key)),
+        "chosen_champion": profile.chosen_champion,
+        "legend": profile.legend,
+        "cards": list(profile.cards),
+        "runes": profile.runes,
+    }
+
+
+HARDCODED_DECKS: dict[str, dict[str, object]] = {
+    "ember_vanguard": _build_hardcoded_deck(
+        "ember_vanguard",
+        domains=frozenset({"Fury"}),
+        rune_counts=[("Fury", 12)],
+        seed=42_001,
+    ),
+    "tide_wardens": _build_hardcoded_deck(
+        "tide_wardens",
+        domains=frozenset({"Fury", "Body"}),
+        rune_counts=[("Fury", 6), ("Body", 6)],
+        seed=42_002,
+    ),
+}
