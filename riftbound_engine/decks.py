@@ -5,6 +5,19 @@ from .csv_data import (
     deck_battlefields_for_key,
 )
 
+DECK_SPECS: dict[str, dict[str, object]] = {
+    "ember_vanguard": {
+        "domains": frozenset({"Fury"}),
+        "rune_counts": [("Fury", 12)],
+        "seed": 42_001,
+    },
+    "tide_wardens": {
+        "domains": frozenset({"Fury", "Body"}),
+        "rune_counts": [("Fury", 6), ("Body", 6)],
+        "seed": 42_002,
+    },
+}
+
 
 def _build_hardcoded_deck(
     key: str,
@@ -29,17 +42,18 @@ def _build_hardcoded_deck(
     }
 
 
-HARDCODED_DECKS: dict[str, dict[str, object]] = {
-    "ember_vanguard": _build_hardcoded_deck(
-        "ember_vanguard",
-        domains=frozenset({"Fury"}),
-        rune_counts=[("Fury", 12)],
-        seed=42_001,
-    ),
-    "tide_wardens": _build_hardcoded_deck(
-        "tide_wardens",
-        domains=frozenset({"Fury", "Body"}),
-        rune_counts=[("Fury", 6), ("Body", 6)],
-        seed=42_002,
-    ),
-}
+def deck_data_for_id(deck_id: str) -> dict[str, object]:
+    """Build deck contents from CSV on each call (always matches current card DB)."""
+    if deck_id not in DECK_SPECS:
+        raise ValueError(f"unknown deck id '{deck_id}'")
+    spec = DECK_SPECS[deck_id]
+    return _build_hardcoded_deck(
+        deck_id,
+        domains=spec["domains"],  # type: ignore[arg-type]
+        rune_counts=spec["rune_counts"],  # type: ignore[arg-type]
+        seed=spec["seed"],  # type: ignore[arg-type]
+    )
+
+
+# Preset ids exposed to clients (contents are built lazily via `deck_data_for_id`).
+HARDCODED_DECKS: dict[str, dict[str, object]] = {deck_id: {"valid": True} for deck_id in DECK_SPECS}

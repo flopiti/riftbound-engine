@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .decks import HARDCODED_DECKS
+from .csv_data import deck_battlefields_for_key
 from .engine import RequiredTo
 
 # Preset choices to speed up local iteration when FAKE_FILL is enabled.
@@ -11,8 +11,8 @@ FAKE_FILL_CHOICES: dict[RequiredTo, str] = {
 
 
 def _default_battlefield(deck_key: str) -> str:
-    battlefields = HARDCODED_DECKS[deck_key]["battlefields"]
-    if isinstance(battlefields, list) and battlefields:
+    battlefields = deck_battlefields_for_key(deck_key)
+    if battlefields:
         return str(battlefields[0])
     return "Altar to Unity"
 

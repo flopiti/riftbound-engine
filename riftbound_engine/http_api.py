@@ -209,6 +209,10 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _startup() -> None:
         _load_dotenv()
+        from .decks import deck_data_for_id
+
+        sample = deck_data_for_id("ember_vanguard")["cards"][0]
+        print(f"[riftbound-engine] CSV decks loaded (e.g. ember_vanguard → {sample!r})")
         reset_engine()
 
     @app.get("/health")

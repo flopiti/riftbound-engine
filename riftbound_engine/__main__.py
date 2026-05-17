@@ -9,7 +9,7 @@ from riftbound_engine import (
     ApplyVerb,
     EngineOutput,
     GameEngine,
-    HARDCODED_DECKS,
+    DECK_SPECS,
     RequiredStep,
     RequiredTo,
     Rune,
@@ -77,12 +77,8 @@ def _format_game_state(engine: GameEngine) -> str:
     state = engine.game_state
     player_1_deck_name = state.player_1_deck_id or "not selected"
     player_2_deck_name = state.player_2_deck_id or "not selected"
-    player_1_valid = (
-        bool(HARDCODED_DECKS[state.player_1_deck_id].get("valid", False)) if state.player_1_deck_id else False
-    )
-    player_2_valid = (
-        bool(HARDCODED_DECKS[state.player_2_deck_id].get("valid", False)) if state.player_2_deck_id else False
-    )
+    player_1_valid = state.player_1_deck_id in DECK_SPECS if state.player_1_deck_id else False
+    player_2_valid = state.player_2_deck_id in DECK_SPECS if state.player_2_deck_id else False
 
     if not state.started:
         return "\n".join(
