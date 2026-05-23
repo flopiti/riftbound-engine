@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
-from .decks import DECK_SPECS, deck_data_for_id
+from .deck_files import deck_data_for_id, list_deck_ids
 from .protocol import ApplyVerb, RequiredStep, apply_prefix
 
 
@@ -67,8 +67,9 @@ def build_default_deck(player_name: str) -> Deck:
 
 
 def build_deck_from_id(deck_id: str) -> Deck:
-    if deck_id not in DECK_SPECS:
-        raise ValueError(f"unknown deck id '{deck_id}'")
+    available = list_deck_ids()
+    if deck_id not in available:
+        raise ValueError(f"unknown deck id '{deck_id}' (available: {', '.join(available)})")
     deck_data = deck_data_for_id(deck_id)
     runes_raw = deck_data["runes"]
     return Deck(
@@ -416,7 +417,7 @@ class GameEngine:
             self._apply_abcd_letter(letter, actor)
 
     def _deck_selection_output(self) -> EngineOutput | None:
-        available_decks = list(DECK_SPECS.keys())
+        available_decks = list(list_deck_ids())
         if self._game_state.player_1_deck is None:
             return EngineOutput(
                 game_state=self.game_state,

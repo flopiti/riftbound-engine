@@ -1,0 +1,57 @@
+# Auto-generated starter — tide_wardens
+
+Legend:
+1 Mechanized Menace
+
+Champion:
+1 Sentinel Adept
+
+MainDeck:
+1 Armed Assailant
+1 Blighted Battleaxe
+1 Carnivorous Snapvine
+1 Challenge
+1 Cithria of Cloudfield
+1 Cleave
+1 Confront
+1 Crackshot Corsair
+1 Disposal Order
+1 Doran's Blade
+1 Draven, Showboat
+1 First Mate
+1 Grim Resolve
+1 Highlander
+1 Hunter's Machete
+1 Incinerate
+1 Inferna
+1 Jaull-Fish
+1 Jax, Unrelenting
+1 Katarina, Reckless
+1 Lord Broadmane
+1 Nilah, Joyful Ascetic
+1 Pakaa Cub
+1 Perched Grimwyrm
+1 Piercing Light
+1 Pit Rookie
+1 Poppy, Paragon
+1 Red Brambleback
+1 Rengar, Unseen
+1 Sabotage
+1 Seal of Strength
+1 Smite
+1 Stare Down
+1 Tibbers
+1 Trinity Force
+1 Vi, Destructive
+1 Void Seeker
+1 Xerath, Freed
+1 Yone, Blademaster
+
+Battlefields:
+1 Brush
+1 Power Nexus
+1 Void Gate
+
+Runes:
+6 Fury Rune
+6 Body Rune

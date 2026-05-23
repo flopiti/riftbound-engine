@@ -211,8 +211,15 @@ def create_app() -> FastAPI:
         _load_dotenv()
         from .decks import deck_data_for_id
 
-        sample = deck_data_for_id("ember_vanguard")["cards"][0]
-        print(f"[riftbound-engine] CSV decks loaded (e.g. ember_vanguard → {sample!r})")
+        from .deck_files import list_deck_ids
+
+        deck_ids = list_deck_ids()
+        if deck_ids:
+            sample_id = deck_ids[0]
+            sample = deck_data_for_id(sample_id)["cards"][0]
+            print(f"[riftbound-engine] Deck files loaded ({len(deck_ids)} decks, e.g. {sample_id} → {sample!r})")
+        else:
+            print("[riftbound-engine] No deck files in riftbound-engine/decks/*.txt")
         reset_engine()
 
     @app.get("/health")
