@@ -48,6 +48,13 @@ def parse_play_command(action: str) -> tuple[str, str]:
     return rest[:idx], rest[idx + 1 :]
 
 
+#: Verbs the OPPONENT (non-active player) is allowed to send. Most action-turn
+#: plays are gated to ``current_player``, but a few are interactive responses
+#: (e.g. passing during a showdown) and must accept the opponent as actor.
+#: Handlers in this set are responsible for their own actor validation.
+_OPPONENT_OK_VERBS: frozenset[str] = frozenset({"pass_showdown"})
+
+
 def dispatch_turn_play(engine, actor, action: str) -> None:
     """Validate phase/actor and run the handler for `play:*`."""
     from ..engine import RequiredTo as RT
@@ -59,7 +66,7 @@ def dispatch_turn_play(engine, actor, action: str) -> None:
     if not is_abcd_done(gs):
         raise ValueError("ABCD must be finished before the action turn")
     verb, payload = parse_play_command(action)
-    if actor != gs.current_player:
+    if verb not in _OPPONENT_OK_VERBS and actor != gs.current_player:
         raise ValueError("only the active player may take action-turn plays")
     if actor not in (RT.PLAYER_1, RT.PLAYER_2):
         raise ValueError("action turn requires player_1 or player_2")

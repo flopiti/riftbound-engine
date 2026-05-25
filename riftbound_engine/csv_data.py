@@ -84,6 +84,174 @@ def card_matches_domains(domain_field: str, allowed: frozenset[str]) -> bool:
 
 
 @lru_cache(maxsize=1)
+def _csv_card_type_index() -> dict[str, str]:
+    """Lowercased card name → CSV `Card Type` (e.g. 'Unit', 'Spell', 'Gear', 'Battlefield', 'Rune', 'Legend')."""
+    out: dict[str, str] = {}
+    for card in csv_cards():
+        key = card.name.strip().lower()
+        if key and key not in out:
+            out[key] = card.card_type
+    return out
+
+
+def card_type_of(name: str) -> str | None:
+    """Look up the Card Type for a card by name (case-insensitive).
+
+    Mirrors :func:`riftbound_engine.deck_files.resolve_card_name` so the engine
+    matches whatever form the deck file used: tries the full name first, then
+    the suffix after the first ', ' (handles "Miss Fortune, Bounty Hunter" →
+    CSV name "Bounty Hunter"). Returns ``None`` if the card isn't in the CSV.
+    """
+    if not name:
+        return None
+    index = _csv_card_type_index()
+    direct = index.get(name.strip().lower())
+    if direct is not None:
+        return direct
+    sep = name.find(", ")
+    if sep >= 0:
+        return index.get(name[sep + 2 :].strip().lower())
+    return None
+
+
+@lru_cache(maxsize=1)
+def _csv_card_energy_index() -> dict[str, int]:
+    """Lowercased card name → CSV `Energy` cost as an integer.
+
+    Names whose ``Energy`` cell is blank or non-numeric are skipped; non-playable
+    types like Battlefield/Rune/Legend usually have no Energy. Use
+    :func:`card_energy_of` to look up by name with the same fallback rules as
+    :func:`card_type_of`.
+    """
+    rows = _csv_rows_raw()
+    if len(rows) < 2:
+        return {}
+    header = rows[0]
+    i_name = _header_index(header, "Name")
+    i_energy = _header_index(header, "Energy")
+    if i_name is None or i_energy is None:
+        return {}
+    out: dict[str, int] = {}
+    for parts in rows[1:]:
+        if len(parts) <= max(i_name, i_energy):
+            continue
+        name = parts[i_name].strip().lower()
+        energy_raw = parts[i_energy].strip()
+        if not name or not energy_raw:
+            continue
+        try:
+            value = int(energy_raw)
+        except ValueError:
+            continue
+        if name not in out:
+            out[name] = value
+    return out
+
+
+def card_energy_of(name: str) -> int | None:
+    """Look up the Energy (cost) for a card by name (case-insensitive).
+
+    Returns ``None`` if the card isn't in the CSV or has no numeric Energy
+    (e.g. Battlefield rows). Uses the same name-resolution fallback as
+    :func:`card_type_of` so "Miss Fortune, Bounty Hunter" matches the CSV
+    row "Bounty Hunter".
+    """
+    if not name:
+        return None
+    index = _csv_card_energy_index()
+    direct = index.get(name.strip().lower())
+    if direct is not None:
+        return direct
+    sep = name.find(", ")
+    if sep >= 0:
+        return index.get(name[sep + 2 :].strip().lower())
+    return None
+
+
+@lru_cache(maxsize=1)
+def _csv_card_power_index() -> dict[str, int]:
+    """Lowercased card name → CSV ``Power`` cost as an integer.
+
+    The Power column is the number of domain-Power pips the card requires
+    in addition to Energy. Cards with a blank or non-numeric Power cell are
+    skipped (they have no Power requirement).
+    """
+    rows = _csv_rows_raw()
+    if len(rows) < 2:
+        return {}
+    header = rows[0]
+    i_name = _header_index(header, "Name")
+    i_power = _header_index(header, "Power")
+    if i_name is None or i_power is None:
+        return {}
+    out: dict[str, int] = {}
+    for parts in rows[1:]:
+        if len(parts) <= max(i_name, i_power):
+            continue
+        name = parts[i_name].strip().lower()
+        power_raw = parts[i_power].strip()
+        if not name or not power_raw:
+            continue
+        try:
+            value = int(power_raw)
+        except ValueError:
+            continue
+        if name not in out:
+            out[name] = value
+    return out
+
+
+def card_power_of(name: str) -> int | None:
+    """Look up the Power (cost) for a card by name (case-insensitive).
+
+    Returns ``None`` if the card isn't in the CSV or has no numeric Power
+    (most cards have no Power requirement — only Energy). Uses the same
+    name-resolution fallback as :func:`card_type_of`.
+    """
+    if not name:
+        return None
+    index = _csv_card_power_index()
+    direct = index.get(name.strip().lower())
+    if direct is not None:
+        return direct
+    sep = name.find(", ")
+    if sep >= 0:
+        return index.get(name[sep + 2 :].strip().lower())
+    return None
+
+
+@lru_cache(maxsize=1)
+def _csv_card_domain_index() -> dict[str, str]:
+    """Lowercased card name → raw CSV ``Domain`` field (may be 'Fury, Chaos')."""
+    out: dict[str, str] = {}
+    for card in csv_cards():
+        key = card.name.strip().lower()
+        if key and key not in out:
+            out[key] = card.domain
+    return out
+
+
+def card_domains_of(name: str) -> tuple[str, ...]:
+    """Parsed list of domains the card belongs to (case-insensitive lookup).
+
+    Returns ``()`` if the card isn't in the CSV or has no Domain field.
+    Uses the same name-resolution fallback as :func:`card_type_of` so
+    "Miss Fortune, Bounty Hunter" matches the CSV row "Bounty Hunter".
+    """
+    if not name:
+        return ()
+    index = _csv_card_domain_index()
+    raw = index.get(name.strip().lower())
+    if raw is None:
+        sep = name.find(", ")
+        if sep >= 0:
+            raw = index.get(name[sep + 2 :].strip().lower())
+    if raw is None:
+        return ()
+    return parse_domains(raw)
+
+
+@lru_cache(maxsize=1)
 def battlefield_names_unique() -> tuple[str, ...]:
     seen: set[str] = set()
     out: list[str] = []

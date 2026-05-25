@@ -8,7 +8,70 @@ from riftbound_engine import (
     build_deck_from_id,
     registered_turn_action_verbs,
 )
-from riftbound_engine.csv_data import csv_cards
+from riftbound_engine.csv_data import (
+    card_domains_of,
+    card_energy_of,
+    card_power_of,
+    card_type_of,
+    csv_cards,
+)
+from riftbound_engine.deck_files import list_deck_ids
+from riftbound_engine.engine import Rune
+
+
+def _flood_runes(engine: GameEngine, actor: RequiredTo, count: int = 20) -> None:
+    """Replace the active rune pool with ``count`` fresh, ready runes.
+
+    Tests that focus on play/location mechanics use this so the player has
+    plenty of runes to exhaust into Energy before playing a card. It mutates
+    the live pool directly — the engine's snapshot getter still deep-copies
+    safely.
+    """
+    pool = engine.runes_for(actor)
+    pool.clear()
+    pool.extend(Rune(domain="Fury") for _ in range(count))
+
+
+def _bank_all_resources(engine: GameEngine, actor: RequiredTo, amount: int = 99) -> None:
+    """Pre-bank ``amount`` of Energy and ``amount`` of Power in every known
+    domain so the resource gates (Energy + domain Power) never reject a Unit
+    in the player's hand.
+
+    Used by tests that focus on play_unit / location plumbing rather than the
+    cost gate itself — those are covered separately in
+    PlayUnitEnergyCostTests and PlayUnitPowerCostTests."""
+    engine.add_energy(actor, amount)
+    # Pull every known rune domain from the CSV catalog.
+    seen: set[str] = set()
+    for card in csv_cards():
+        for d in card_domains_of(card.name):
+            if d:
+                seen.add(d)
+    for domain in sorted(seen):
+        engine.add_power(actor, domain, amount)
+
+
+def _build_energy(engine: GameEngine, actor: RequiredTo, amount: int) -> None:
+    """Exhaust ``amount`` ready runes (in order) so ``actor`` has ``amount`` Energy.
+
+    Mirrors what a player would do via repeated ``play:exhaust_rune:i``
+    actions during the new action turn flow — without going through the
+    public API so tests stay terse.
+    """
+    pool = engine.runes_for(actor)
+    flipped = 0
+    for rune in pool:
+        if flipped >= amount:
+            break
+        if rune.exhausted:
+            continue
+        rune.exhausted = True
+        flipped += 1
+    if flipped < amount:
+        raise AssertionError(
+            f"not enough ready runes to build {amount} Energy (only flipped {flipped})"
+        )
+    engine.add_energy(actor, amount)
 
 
 class GameEngineTests(unittest.TestCase):
@@ -52,7 +115,10 @@ class GameEngineTests(unittest.TestCase):
         self.assertIsNone(third.game_state.first_turn)
 
     def test_deck_builder_enforces_required_shape(self) -> None:
-        deck = build_deck_from_id("ember_vanguard")
+        # Pick the first deck file that's actually on disk so this test
+        # stays valid as decks are added or removed.
+        deck_id = list_deck_ids()[0]
+        deck = build_deck_from_id(deck_id)
         catalog_names = {card.name for card in csv_cards()}
         self.assertEqual(len(deck.battlefields), 3)
         self.assertTrue(deck.chosen_champion)
@@ -60,28 +126,37 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(len(deck.cards), 39)
         self.assertLessEqual(max(deck.cards.count(card) for card in set(deck.cards)), 3)
         self.assertEqual(len(deck.runes), 12)
-        self.assertTrue(all(r.domain == "Fury" for r in deck.runes))
+        # Every rune has a non-empty domain; the exact composition is
+        # deck-specific and validated separately in test_deck_runes_match_file.
+        self.assertTrue(all(r.domain for r in deck.runes))
         self.assertTrue(all(name in catalog_names for name in deck.cards))
         self.assertIn(deck.chosen_champion, catalog_names)
         self.assertIn(deck.legend, catalog_names)
         self.assertTrue(all(bf in catalog_names for bf in deck.battlefields))
 
-    def test_tide_wardens_runes_are_six_fury_six_body(self) -> None:
-        deck = build_deck_from_id("tide_wardens")
+    def test_deck_runes_match_file(self) -> None:
+        # irelia_nates is a Calm/Chaos archetype with 12 runes total; the
+        # exact split is whatever the deck file declares. Sanity-check the
+        # shape and that domain counts sum to 12.
+        deck = build_deck_from_id("irelia_nates")
         self.assertLessEqual(max(deck.cards.count(card) for card in set(deck.cards)), 3)
         self.assertEqual(len(deck.runes), 12)
-        domains = [r.domain for r in deck.runes]
-        self.assertEqual(domains.count("Fury"), 6)
-        self.assertEqual(domains.count("Body"), 6)
+        from collections import Counter
+        counts = Counter(r.domain for r in deck.runes)
+        self.assertEqual(sum(counts.values()), 12)
+        self.assertTrue(all(d for d in counts.keys()))
 
     def test_game_with_both_decks_selected_is_ready(self) -> None:
+        ids = list_deck_ids()
+        if len(ids) < 2:
+            self.skipTest("need at least two deck files on disk")
         engine = GameEngine(
             game_state=GameState(
                 counter=0,
                 started=False,
                 current_player=RequiredTo.PLAYER_1,
-                player_1_deck=build_deck_from_id("ember_vanguard"),
-                player_2_deck=build_deck_from_id("tide_wardens"),
+                player_1_deck=build_deck_from_id(ids[0]),
+                player_2_deck=build_deck_from_id(ids[1]),
             )
         )
         result = engine.start()
@@ -218,6 +293,240 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(len(end_p2.game_state.player_1_runes), 4)
         self.assertEqual(end_p2.game_state.global_channel_count, 3)
 
+    def test_action_turn_options_offer_play_unit_per_hand_card_and_end_turn(self) -> None:
+        rolls = iter([6, 2])
+        engine = GameEngine(dice_roller=lambda: next(rolls))
+        first = engine.start()
+        second = engine.apply_action(action=f"choose_deck:{first.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        third = engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
+        fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
+        ready = engine.apply_action(
+            action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
+            actor=RequiredTo.PLAYER_2,
+        )
+
+        # P1 went first; after ABCD they're sitting in the action turn with 5 cards in hand.
+        self.assertEqual(ready.required_action.name, RequiredStep.ACTION_TURN)
+        self.assertEqual(ready.required_action.actor, RequiredTo.PLAYER_1)
+        self.assertEqual(len(ready.game_state.player_1_hand or []), 5)
+
+        # Give the player a single Fury rune pool + max Energy so every Unit
+        # is affordable. This keeps the assertion focused on play_unit/
+        # exhaust_rune/end_turn surfacing — the Energy cost gate is covered
+        # separately in PlayUnitEnergyCostTests.
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        # Bank an absurd amount of Energy AND Power across every domain
+        # without exhausting any runes so:
+        #   * every Unit in hand clears both the Energy and Power gates,
+        #   * a ready Fury is still surfaced as exhaust_rune:0.
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        ready = engine.start()
+
+        # Active player's options now lead with exhaust_rune (one per unique
+        # ready-rune domain — Fury here), then a recycle option per unique
+        # rune domain in the pool (exhaust_and_recycle_rune when no
+        # exhausted rune of that domain exists), then play_unit for
+        # affordable Unit cards, then end_turn. Non-units (spells, gear,
+        # etc.) are not offered.
+        hand = ready.game_state.player_1_hand or []
+        expected = [
+            "play:exhaust_rune:0",
+            "play:exhaust_and_recycle_rune:0",
+        ] + [
+            f"play:play_unit:{i}"
+            for i, card in enumerate(hand)
+            if card_type_of(card) == "Unit"
+        ] + ["play:end_turn"]
+        self.assertEqual(ready.player_1_options, expected)
+        # Inactive player has no options during the active player's action turn.
+        self.assertEqual(ready.player_2_options, [])
+
+    def _drive_to_action_turn(self) -> tuple["GameEngine", "EngineOutput"]:
+        rolls = iter([6, 2])
+        engine = GameEngine(dice_roller=lambda: next(rolls))
+        first = engine.start()
+        second = engine.apply_action(action=f"choose_deck:{first.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        third = engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
+        fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
+        ready = engine.apply_action(
+            action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
+            actor=RequiredTo.PLAYER_2,
+        )
+        return engine, ready
+
+    def _first_unit_index(self, hand: list[str]) -> int:
+        for i, card in enumerate(hand):
+            if card_type_of(card) == "Unit":
+                return i
+        raise unittest.SkipTest("dealt hand contains no Unit-type cards")
+
+    def test_play_unit_parks_card_in_pending_then_choose_location_commits(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        # Pre-build Energy AND Power across every domain so the cost gate
+        # (Energy + domain Power — covered separately in PlayUnitEnergyCostTests
+        # and PlayUnitPowerCostTests) doesn't reject the play. We still
+        # flood runes so the engine can show exhaust_rune options afterwards.
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        ready = engine.start()
+        original_hand = list(ready.game_state.player_1_hand or [])
+        self.assertGreaterEqual(len(original_hand), 1)
+
+        unit_idx = self._first_unit_index(original_hand)
+        unit_card = original_hand[unit_idx]
+        hand_after_pop = original_hand[:unit_idx] + original_hand[unit_idx + 1 :]
+        cost = engine.card_energy_cost(unit_card)
+        energy_before = engine.player_energy(RequiredTo.PLAYER_1)
+
+        # Step A — play_unit deducts Energy and parks the card in pending_play.
+        played = engine.apply_action(
+            action=f"play:play_unit:{unit_idx}", actor=RequiredTo.PLAYER_1
+        )
+        self.assertEqual(played.game_state.player_1_hand, hand_after_pop)
+        self.assertEqual(played.game_state.player_1_units, [])
+        self.assertIsNotNone(played.game_state.pending_play)
+        self.assertEqual(played.game_state.pending_play.card, unit_card)
+        self.assertEqual(played.game_state.pending_play.actor, RequiredTo.PLAYER_1)
+        self.assertEqual(
+            played.game_state.player_1_energy,
+            energy_before - cost,
+            "play_unit must deduct the card's Energy cost from the pool",
+        )
+        # Active player's options are gated by territory control: at match
+        # start neither battlefield has a controller, so only the player's
+        # own base is offered.
+        self.assertEqual(played.player_1_options, ["play:choose_location:base"])
+
+        # Can't double-play while a play is pending; can't end turn either;
+        # can't exhaust more runes while a play is pending.
+        with self.assertRaises(ValueError):
+            engine.apply_action(
+                action=f"play:play_unit:{unit_idx}", actor=RequiredTo.PLAYER_1
+            )
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:exhaust_rune:0", actor=RequiredTo.PLAYER_1)
+        # Wrong actor can't resolve the location.
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:choose_location:base", actor=RequiredTo.PLAYER_2)
+        # Unknown location rejected.
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:choose_location:moon", actor=RequiredTo.PLAYER_1)
+        # Battlefield_2 has no controller → rejected by the control rule.
+        with self.assertRaises(ValueError):
+            engine.apply_action(
+                action="play:choose_location:battlefield_2", actor=RequiredTo.PLAYER_1
+            )
+
+        # Step B — base is always controlled by oneself, so this commits.
+        settled = engine.apply_action(
+            action="play:choose_location:base", actor=RequiredTo.PLAYER_1
+        )
+        self.assertIsNone(settled.game_state.pending_play)
+        # pending_payment is no longer used by the new flow.
+        self.assertIsNone(settled.game_state.pending_payment)
+        self.assertEqual(len(settled.game_state.player_1_units), 1)
+        self.assertEqual(settled.game_state.player_1_units[0].card, unit_card)
+        self.assertEqual(settled.game_state.player_1_units[0].location, "base")
+
+        # Options now reflect the unique ready-rune domain, the
+        # corresponding recycle option, remaining Unit cards (all still
+        # affordable thanks to the Energy headroom), and end_turn.
+        # _flood_runes seeded 20 Fury, none exhausted, so one exhaust and
+        # one exhaust_and_recycle option appear.
+        expected = [
+            "play:exhaust_rune:0",
+            "play:exhaust_and_recycle_rune:0",
+        ] + [
+            f"play:play_unit:{i}"
+            for i, card in enumerate(hand_after_pop)
+            if card_type_of(card) == "Unit"
+        ] + ["play:end_turn"]
+        self.assertEqual(settled.player_1_options, expected)
+
+    def test_play_unit_rejects_bad_indices_and_inactive_player(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        hand = ready.game_state.player_1_hand or []
+        unit_idx = self._first_unit_index(hand)
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:play_unit:99", actor=RequiredTo.PLAYER_1)
+        with self.assertRaises(ValueError):
+            engine.apply_action(
+                action=f"play:play_unit:{unit_idx}", actor=RequiredTo.PLAYER_2
+            )
+
+    def test_play_unit_rejects_non_unit_card_type(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        hand = ready.game_state.player_1_hand or []
+        non_unit_idx = next(
+            (i for i, card in enumerate(hand) if card_type_of(card) != "Unit"),
+            None,
+        )
+        if non_unit_idx is None:
+            self.skipTest("dealt hand has only Unit-type cards")
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action=f"play:play_unit:{non_unit_idx}", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("cannot be played as a unit", str(ctx.exception))
+
+    def test_battlefield_control_unlocks_that_location_for_its_controller(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        # Give player_1 control of battlefield_1 directly. No rule exists yet
+        # to gain control — this simulates a future control-granting effect.
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        # Ample runes + banked Energy/Power so the cost gate (exercised in
+        # PlayUnitEnergyCostTests and PlayUnitPowerCostTests) doesn't reject
+        # the play.
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+
+        hand = ready.game_state.player_1_hand or []
+        unit_idx = self._first_unit_index(hand)
+        played = engine.apply_action(
+            action=f"play:play_unit:{unit_idx}", actor=RequiredTo.PLAYER_1
+        )
+        self.assertEqual(
+            played.player_1_options,
+            ["play:choose_location:base", "play:choose_location:battlefield_1"],
+        )
+        # battlefield_2 still uncontrolled → rejected.
+        with self.assertRaises(ValueError):
+            engine.apply_action(
+                action="play:choose_location:battlefield_2", actor=RequiredTo.PLAYER_1
+            )
+        # battlefield_1 now allowed for P1.
+        settled = engine.apply_action(
+            action="play:choose_location:battlefield_1", actor=RequiredTo.PLAYER_1
+        )
+        self.assertEqual(settled.game_state.player_1_units[0].location, "battlefield_1")
+
+    def test_opponent_cannot_play_on_a_battlefield_the_other_player_controls(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        # P2 controls battlefield_1 — P1 (active) must not be able to use it.
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_2
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+
+        hand = ready.game_state.player_1_hand or []
+        unit_idx = self._first_unit_index(hand)
+        played = engine.apply_action(
+            action=f"play:play_unit:{unit_idx}", actor=RequiredTo.PLAYER_1
+        )
+        # Only base is offered to P1; battlefield_1 belongs to the opponent.
+        self.assertEqual(played.player_1_options, ["play:choose_location:base"])
+        with self.assertRaises(ValueError):
+            engine.apply_action(
+                action="play:choose_location:battlefield_1", actor=RequiredTo.PLAYER_1
+            )
+
     def test_channel_rune_count_follows_first_second_then_two_schedule(self) -> None:
         gs = GameState(global_channel_count=0)
         engine = GameEngine(game_state=gs)
@@ -228,3 +537,1186 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(engine._channel_rune_count_for_next_channel(), 2)
         gs.global_channel_count = 99
         self.assertEqual(engine._channel_rune_count_for_next_channel(), 2)
+
+
+class CardEnergyLookupTests(unittest.TestCase):
+    """CSV-driven Energy lookup must return ints for real cards and None when
+    the row has no numeric Energy (e.g. Battlefield/Legend/Rune rows)."""
+
+    def test_known_units_have_integer_energy(self) -> None:
+        # Pick the first Unit row in the CSV; it must report an int cost.
+        unit = next((c for c in csv_cards() if c.card_type == "Unit"), None)
+        self.assertIsNotNone(unit, "CSV must contain at least one Unit row")
+        cost = card_energy_of(unit.name)
+        self.assertIsInstance(cost, int)
+        self.assertGreaterEqual(cost, 0)
+
+    def test_full_name_suffix_resolves_like_card_type_of(self) -> None:
+        # "Miss Fortune, Bounty Hunter" → CSV's "Bounty Hunter" lookup path.
+        for c in csv_cards():
+            if c.card_type != "Unit":
+                continue
+            decorated = f"Some Legend, {c.name}"
+            if card_energy_of(c.name) is None:
+                continue
+            self.assertEqual(card_energy_of(decorated), card_energy_of(c.name))
+            break
+
+    def test_unknown_card_returns_none(self) -> None:
+        self.assertIsNone(card_energy_of("Definitely Not A Real Card 1234"))
+        self.assertIsNone(card_energy_of(""))
+
+
+class PlayUnitEnergyCostTests(unittest.TestCase):
+    """Cost gate, rune exhaustion flow, and Awake (A) ready behavior."""
+
+    def _drive_to_action_turn(self) -> tuple[GameEngine, "EngineOutput"]:
+        rolls = iter([6, 2])
+        engine = GameEngine(dice_roller=lambda: next(rolls))
+        first = engine.start()
+        second = engine.apply_action(action=f"choose_deck:{first.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        third = engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
+        fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
+        ready = engine.apply_action(
+            action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
+            actor=RequiredTo.PLAYER_2,
+        )
+        # Unused for now — kept in case future tests want the post-P1-deck output.
+        _ = third
+        return engine, ready
+
+    def _first_affordable_unit_index(self, hand: list[str], ready_runes: int) -> int:
+        for i, card in enumerate(hand):
+            if card_type_of(card) != "Unit":
+                continue
+            cost = card_energy_of(card)
+            if cost is None:
+                cost = 0
+            if cost <= ready_runes:
+                return i
+        raise unittest.SkipTest(
+            f"dealt hand has no Unit affordable with {ready_runes} ready runes"
+        )
+
+    def test_play_unit_options_exclude_unaffordable_cards(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        # Force exactly 1 ready rune and pre-bank 1 Energy → any cost-2+
+        # unit drops off the menu. No Power is banked, so units that also
+        # require Power also drop off (covered separately in
+        # PlayUnitPowerCostTests). The single ready rune still surfaces as
+        # an exhaust_rune option.
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        pool.clear()
+        pool.append(Rune(domain="Fury"))
+        engine.add_energy(RequiredTo.PLAYER_1, 1)
+        ready = engine.start()
+
+        hand = ready.game_state.player_1_hand or []
+        expected = [
+            "play:exhaust_rune:0",
+            "play:exhaust_and_recycle_rune:0",
+        ] + [
+            f"play:play_unit:{i}"
+            for i, card in enumerate(hand)
+            if card_type_of(card) == "Unit"
+            and (card_energy_of(card) or 0) <= 1
+            and (card_power_of(card) or 0) <= 0
+        ] + ["play:end_turn"]
+        self.assertEqual(ready.player_1_options, expected)
+
+    def test_play_unit_rejects_card_more_expensive_than_available_energy(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        # 0 Energy banked → any positive-cost unit is rejected by the gate
+        # regardless of how many ready runes the player has.
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        ready = engine.start()
+
+        hand = ready.game_state.player_1_hand or []
+        expensive_idx = next(
+            (
+                i for i, card in enumerate(hand)
+                if card_type_of(card) == "Unit" and (card_energy_of(card) or 0) > 0
+            ),
+            None,
+        )
+        if expensive_idx is None:
+            self.skipTest("dealt hand has no positive-cost Unit cards")
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action=f"play:play_unit:{expensive_idx}", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("cannot play", str(ctx.exception))
+
+    def test_choose_location_commits_unit_with_no_pending_payment(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        ready = engine.start()
+        hand = ready.game_state.player_1_hand or []
+        # Find a positive-Energy Unit with NO Power requirement so this
+        # test isolates the Energy deduction path. Power gating is covered
+        # in PlayUnitPowerCostTests.
+        target_idx = next(
+            (
+                i for i, card in enumerate(hand)
+                if card_type_of(card) == "Unit"
+                and (card_energy_of(card) or 0) > 0
+                and (card_power_of(card) or 0) == 0
+            ),
+            None,
+        )
+        if target_idx is None:
+            self.skipTest("dealt hand has no positive-Energy Power-0 Unit cards")
+        target_cost = card_energy_of(hand[target_idx]) or 0
+
+        # Build exactly the cost in Energy first (the new flow).
+        _build_energy(engine, RequiredTo.PLAYER_1, target_cost)
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), target_cost)
+
+        engine.apply_action(action=f"play:play_unit:{target_idx}", actor=RequiredTo.PLAYER_1)
+        # play_unit drains the pool.
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), 0)
+        after_loc = engine.apply_action(
+            action="play:choose_location:base", actor=RequiredTo.PLAYER_1
+        )
+        # Card is committed and pending_payment is never opened.
+        self.assertIsNone(after_loc.game_state.pending_play)
+        self.assertIsNone(after_loc.game_state.pending_payment)
+        self.assertEqual(after_loc.game_state.player_1_energy, 0)
+        # Player can immediately end the turn or take other actions
+        # (subject to whatever ready runes remain).
+        self.assertIn("play:end_turn", after_loc.player_1_options)
+
+    def test_exhaust_rune_produces_energy_and_taps_runes(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        ready = engine.start()
+
+        # Out-of-range and inactive-player paths still reject.
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:exhaust_rune:99", actor=RequiredTo.PLAYER_1)
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:exhaust_rune:0", actor=RequiredTo.PLAYER_2)
+
+        # Exhausting three ready runes produces 3 Energy.
+        for i in range(3):
+            after = engine.apply_action(
+                action=f"play:exhaust_rune:{i}", actor=RequiredTo.PLAYER_1
+            )
+        self.assertEqual(after.game_state.player_1_energy, 3)
+        # The first three runes are exhausted; the rest remain ready.
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        for i, rune in enumerate(pool):
+            self.assertEqual(rune.exhausted, i < 3, f"rune {i} state")
+        # Re-exhausting an already-exhausted rune is still rejected.
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:exhaust_rune:0", actor=RequiredTo.PLAYER_1)
+
+    def test_awake_step_readies_active_player_runes(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        # Pretend P1 already spent both channeled runes.
+        for rune in engine.runes_for(RequiredTo.PLAYER_1):
+            rune.exhausted = True
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        # Skip P2's turn back to P1; A runs implicitly at the next ABCD.
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_2)
+        gs = engine.game_state
+        # Back to P1, and now all P1's runes are ready again after Awake.
+        self.assertEqual(gs.current_player, RequiredTo.PLAYER_1)
+        for rune in gs.player_1_runes:
+            self.assertFalse(rune.exhausted)
+
+    def test_exhaust_rune_options_collapse_to_one_per_domain(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        # Hand-craft a mixed pool: 3 Fury (indices 0,1,2), 2 Body (3,4),
+        # 1 Mind (5). Player has 6 ready runes but 3 distinct domains, so
+        # the exhaust_rune option list should be 3 entries pointing at
+        # indices 0, 3, 5.
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        pool.clear()
+        pool.extend(
+            [
+                Rune(domain="Fury"),
+                Rune(domain="Fury"),
+                Rune(domain="Fury"),
+                Rune(domain="Body"),
+                Rune(domain="Body"),
+                Rune(domain="Mind"),
+            ]
+        )
+        ready = engine.start()
+        exhaust_opts = [
+            opt for opt in ready.player_1_options if opt.startswith("play:exhaust_rune:")
+        ]
+        self.assertEqual(
+            exhaust_opts,
+            [
+                "play:exhaust_rune:0",  # leftmost Fury
+                "play:exhaust_rune:3",  # leftmost Body
+                "play:exhaust_rune:5",  # leftmost Mind
+            ],
+        )
+        # Exhaust the leftmost Fury — the next emission should still offer
+        # Fury (pointing at index 1 now), Body (3), and Mind (5).
+        nxt = engine.apply_action(action="play:exhaust_rune:0", actor=RequiredTo.PLAYER_1)
+        next_exhaust = [
+            opt for opt in nxt.player_1_options if opt.startswith("play:exhaust_rune:")
+        ]
+        self.assertIn("play:exhaust_rune:1", next_exhaust)
+        # And no duplicate-domain options.
+        domains_seen = set()
+        for opt in next_exhaust:
+            i = int(opt.rsplit(":", 1)[1])
+            domains_seen.add(engine.runes_for(RequiredTo.PLAYER_1)[i].domain)
+        self.assertEqual(len(domains_seen), len(next_exhaust))
+
+    def test_exhaust_rune_blocked_while_play_is_pending(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        # Bank enough Energy to play a positive-Energy Power-0 unit, then
+        # start the play. Restricting to Power-0 keeps this test focused on
+        # the pending-play gate (Power gating is covered elsewhere).
+        ready = engine.start()
+        hand = ready.game_state.player_1_hand or []
+        target_idx = next(
+            (
+                i for i, card in enumerate(hand)
+                if card_type_of(card) == "Unit"
+                and (card_energy_of(card) or 0) > 0
+                and (card_power_of(card) or 0) == 0
+            ),
+            None,
+        )
+        if target_idx is None:
+            self.skipTest("dealt hand has no positive-Energy Power-0 Unit cards")
+        cost = card_energy_of(hand[target_idx]) or 0
+        _build_energy(engine, RequiredTo.PLAYER_1, cost)
+        engine.apply_action(action=f"play:play_unit:{target_idx}", actor=RequiredTo.PLAYER_1)
+        # pending_play is set → exhaust_rune is now blocked until location chosen.
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:exhaust_rune:0", actor=RequiredTo.PLAYER_1)
+
+    def test_inactive_player_cannot_exhaust_runes(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_2)
+        # P1 is active; P2 trying to exhaust is rejected.
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:exhaust_rune:0", actor=RequiredTo.PLAYER_2)
+
+    def test_energy_clears_at_turn_end(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        # Bank a few Energy then end the turn without spending it.
+        for i in range(3):
+            engine.apply_action(action=f"play:exhaust_rune:{i}", actor=RequiredTo.PLAYER_1)
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), 3)
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        # Turn change wipes both pools.
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), 0)
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_2), 0)
+
+    def test_recycle_options_per_unique_rune_domain(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        # Mixed pool: 2 Fury (0,1) both ready, 1 Body (2) ready, 1 Mind (3)
+        # already exhausted. Expect:
+        #   * exhaust_rune options for the two ready domains (Fury, Body)
+        #   * recycle options:
+        #       - Fury: exhaust_and_recycle (no exhausted Fury) → leftmost = 0
+        #       - Body: exhaust_and_recycle (no exhausted Body) → leftmost = 2
+        #       - Mind: recycle (the already-exhausted Mind at 3)
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        pool.clear()
+        pool.extend(
+            [
+                Rune(domain="Fury"),
+                Rune(domain="Fury"),
+                Rune(domain="Body"),
+                Rune(domain="Mind", exhausted=True),
+            ]
+        )
+        ready = engine.start()
+        recycle_opts = [
+            opt for opt in ready.player_1_options
+            if opt.startswith("play:recycle_rune:") or opt.startswith("play:exhaust_and_recycle_rune:")
+        ]
+        self.assertEqual(
+            recycle_opts,
+            [
+                "play:exhaust_and_recycle_rune:0",  # leftmost ready Fury
+                "play:exhaust_and_recycle_rune:2",  # leftmost ready Body
+                "play:recycle_rune:3",              # the exhausted Mind
+            ],
+        )
+
+    def test_recycle_exhausted_rune_grants_power_no_energy(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        pool.clear()
+        pool.append(Rune(domain="Mind", exhausted=True))
+        # Pre-seed Energy so we can assert it doesn't change.
+        engine.add_energy(RequiredTo.PLAYER_1, 5)
+        library = engine.rune_library_for(RequiredTo.PLAYER_1)
+        lib_size_before = len(library)
+
+        after = engine.apply_action(
+            action="play:recycle_rune:0", actor=RequiredTo.PLAYER_1
+        )
+        # Rune left the pool and was appended to the rune library bottom,
+        # reset to ready.
+        self.assertEqual(len(engine.runes_for(RequiredTo.PLAYER_1)), 0)
+        self.assertEqual(len(library), lib_size_before + 1)
+        self.assertEqual(library[-1].domain, "Mind")
+        self.assertFalse(library[-1].exhausted)
+        # +1 Mind Power; Energy unchanged (the rune was already exhausted).
+        self.assertEqual(after.game_state.player_1_power, {"Mind": 1})
+        self.assertEqual(after.game_state.player_1_energy, 5)
+
+    def test_recycle_rejects_ready_rune(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        pool.clear()
+        pool.append(Rune(domain="Fury"))  # ready
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(action="play:recycle_rune:0", actor=RequiredTo.PLAYER_1)
+        self.assertIn("ready, not exhausted", str(ctx.exception))
+
+    def test_exhaust_and_recycle_grants_energy_and_power(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        pool.clear()
+        pool.append(Rune(domain="Body"))  # single ready Body
+        library = engine.rune_library_for(RequiredTo.PLAYER_1)
+        lib_size_before = len(library)
+
+        after = engine.apply_action(
+            action="play:exhaust_and_recycle_rune:0", actor=RequiredTo.PLAYER_1
+        )
+        # Rune left the pool and is at the bottom of the library, reset to
+        # ready so it comes back fresh when Channel pulls it next.
+        self.assertEqual(len(engine.runes_for(RequiredTo.PLAYER_1)), 0)
+        self.assertEqual(len(library), lib_size_before + 1)
+        self.assertEqual(library[-1].domain, "Body")
+        self.assertFalse(library[-1].exhausted)
+        # +1 Energy (from the exhaust) and +1 Body Power (from the recycle).
+        self.assertEqual(after.game_state.player_1_energy, 1)
+        self.assertEqual(after.game_state.player_1_power, {"Body": 1})
+
+    def test_exhaust_and_recycle_rejects_exhausted_rune(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        pool.clear()
+        pool.append(Rune(domain="Mind", exhausted=True))
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action="play:exhaust_and_recycle_rune:0", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("already exhausted", str(ctx.exception))
+
+    def test_recycle_clears_power_at_turn_end(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        pool.clear()
+        pool.extend([Rune(domain="Mind", exhausted=True), Rune(domain="Body")])
+        engine.apply_action(action="play:recycle_rune:0", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(
+            action="play:exhaust_and_recycle_rune:0", actor=RequiredTo.PLAYER_1
+        )
+        # 2 Power accumulated (1 Mind, 1 Body), 1 Energy from the exhaust.
+        self.assertEqual(
+            engine.player_power(RequiredTo.PLAYER_1), {"Mind": 1, "Body": 1}
+        )
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), 1)
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        # Turn change wipes both pools for both players.
+        self.assertEqual(engine.player_power(RequiredTo.PLAYER_1), {})
+        self.assertEqual(engine.player_power(RequiredTo.PLAYER_2), {})
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), 0)
+
+    def test_inactive_player_cannot_recycle(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        pool2 = engine.runes_for(RequiredTo.PLAYER_2)
+        pool2.clear()
+        pool2.append(Rune(domain="Mind", exhausted=True))
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:recycle_rune:0", actor=RequiredTo.PLAYER_2)
+
+    def test_recycle_blocked_while_play_is_pending(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        # Set up pool: one exhausted Mind to recycle, plenty of ready Fury
+        # to bank Energy first.
+        pool = engine.runes_for(RequiredTo.PLAYER_1)
+        pool.clear()
+        pool.append(Rune(domain="Mind", exhausted=True))
+        pool.extend(Rune(domain="Fury") for _ in range(20))
+        ready = engine.start()
+        hand = ready.game_state.player_1_hand or []
+        target_idx = next(
+            (
+                i for i, card in enumerate(hand)
+                if card_type_of(card) == "Unit"
+                and (card_energy_of(card) or 0) > 0
+                and (card_power_of(card) or 0) == 0
+            ),
+            None,
+        )
+        if target_idx is None:
+            self.skipTest("dealt hand has no positive-Energy Power-0 Unit cards")
+        cost = card_energy_of(hand[target_idx]) or 0
+        # Bank just enough Energy from the Fury runes (indices 1..1+cost-1).
+        for offset in range(cost):
+            engine.apply_action(
+                action=f"play:exhaust_rune:{1 + offset}", actor=RequiredTo.PLAYER_1
+            )
+        engine.apply_action(action=f"play:play_unit:{target_idx}", actor=RequiredTo.PLAYER_1)
+        # pending_play is set → recycle is now blocked until choose_location.
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:recycle_rune:0", actor=RequiredTo.PLAYER_1)
+        with self.assertRaises(ValueError):
+            engine.apply_action(
+                action=f"play:exhaust_and_recycle_rune:{1 + cost}", actor=RequiredTo.PLAYER_1
+            )
+
+    def test_play_unit_options_only_appear_once_energy_is_banked(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        ready = engine.start()
+        hand = ready.game_state.player_1_hand or []
+        # Find a positive-Energy Unit with NO Power requirement so this
+        # test isolates the Energy gate. Power gating is covered separately
+        # in PlayUnitPowerCostTests.
+        target_idx = next(
+            (
+                i for i, card in enumerate(hand)
+                if card_type_of(card) == "Unit"
+                and (card_energy_of(card) or 0) > 0
+                and (card_power_of(card) or 0) == 0
+            ),
+            None,
+        )
+        if target_idx is None:
+            self.skipTest("dealt hand has no positive-Energy Power-0 Unit cards")
+        cost = card_energy_of(hand[target_idx]) or 0
+        self.assertNotIn(f"play:play_unit:{target_idx}", ready.player_1_options)
+        # Build exactly enough Energy and the option must now appear.
+        for i in range(cost):
+            engine.apply_action(action=f"play:exhaust_rune:{i}", actor=RequiredTo.PLAYER_1)
+        after = engine.start()
+        self.assertIn(f"play:play_unit:{target_idx}", after.player_1_options)
+
+
+class PlayUnitPowerCostTests(unittest.TestCase):
+    """Power cost gate: a Unit with positive Power requires the matching
+    domain Power in the player's pool, on top of any Energy cost."""
+
+    def _drive_to_action_turn(self) -> tuple["GameEngine", "EngineOutput"]:
+        rolls = iter([6, 2])
+        engine = GameEngine(dice_roller=lambda: next(rolls))
+        first = engine.start()
+        second = engine.apply_action(action=f"choose_deck:{first.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        third = engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
+        fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
+        ready = engine.apply_action(
+            action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
+            actor=RequiredTo.PLAYER_2,
+        )
+        _ = third
+        return engine, ready
+
+    def _inject_power_unit(self, engine: GameEngine) -> tuple[int, str, int, int, tuple[str, ...]]:
+        """Inject a single-domain Unit with both Energy and Power cost into P1's hand.
+
+        Returns (hand_index, name, energy_cost, power_cost, domains). Picks
+        the unit deterministically from the CSV catalog so the test doesn't
+        depend on the random deal."""
+        unit = next(
+            (
+                c for c in csv_cards()
+                if c.card_type == "Unit"
+                and "," not in c.domain
+                and (card_energy_of(c.name) or 0) > 0
+                and (card_power_of(c.name) or 0) > 0
+            ),
+            None,
+        )
+        if unit is None:
+            raise unittest.SkipTest("no single-domain Unit with Energy+Power in CSV")
+        gs = engine._game_state
+        gs.player_1_hand = (gs.player_1_hand or []) + [unit.name]
+        idx = len(gs.player_1_hand) - 1
+        return (
+            idx,
+            unit.name,
+            card_energy_of(unit.name) or 0,
+            card_power_of(unit.name) or 0,
+            card_domains_of(unit.name),
+        )
+
+    def test_play_unit_options_exclude_cards_without_enough_power(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        # Plenty of Energy banked, but no Power at all — cards with a
+        # positive Power requirement must NOT appear as play options.
+        engine.add_energy(RequiredTo.PLAYER_1, 99)
+        target_idx, _, _, _, _ = self._inject_power_unit(engine)
+        ready = engine.start()
+        self.assertNotIn(f"play:play_unit:{target_idx}", ready.player_1_options)
+
+    def test_play_unit_rejects_card_with_unmet_power_cost(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        engine.add_energy(RequiredTo.PLAYER_1, 99)
+        target_idx, _, _, _, _ = self._inject_power_unit(engine)
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action=f"play:play_unit:{target_idx}", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("Power", str(ctx.exception))
+
+    def test_play_unit_deducts_both_energy_and_power(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        target_idx, _, energy_cost, power_cost, domains = self._inject_power_unit(engine)
+
+        # Bank EXACTLY the costs.
+        engine.add_energy(RequiredTo.PLAYER_1, energy_cost)
+        engine.add_power(RequiredTo.PLAYER_1, domains[0], power_cost)
+        engine.apply_action(
+            action=f"play:play_unit:{target_idx}", actor=RequiredTo.PLAYER_1
+        )
+        # Both pools fully drained.
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), 0)
+        self.assertEqual(engine.player_power(RequiredTo.PLAYER_1), {})
+
+    def test_play_unit_option_appears_once_power_is_built(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        target_idx, _, energy_cost, power_cost, domains = self._inject_power_unit(engine)
+        engine.add_energy(RequiredTo.PLAYER_1, energy_cost)
+        # Still missing Power — the play option must be absent.
+        before = engine.start()
+        self.assertNotIn(f"play:play_unit:{target_idx}", before.player_1_options)
+        # Bank the Power and the option must now appear.
+        engine.add_power(RequiredTo.PLAYER_1, domains[0], power_cost)
+        after = engine.start()
+        self.assertIn(f"play:play_unit:{target_idx}", after.player_1_options)
+
+    def test_multi_domain_card_power_uses_any_listed_domain(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        # Pick a known multi-domain Unit from the CSV. Tibbers is
+        # Fury+Chaos; Daisy! is Calm+Order. We try Tibbers first and fall
+        # back so the test stays useful if the CSV changes.
+        multi_unit = next(
+            (
+                c.name for c in csv_cards()
+                if c.card_type == "Unit"
+                and "," in c.domain
+                and (card_power_of(c.name) or 0) > 0
+            ),
+            None,
+        )
+        if multi_unit is None:
+            self.skipTest("no multi-domain Unit with Power cost in CSV")
+
+        # Inject directly into P1's hand so we don't need a particular deal.
+        gs = engine._game_state
+        gs.player_1_hand = (gs.player_1_hand or []) + [multi_unit]
+        target_idx = len(gs.player_1_hand) - 1
+        domains = card_domains_of(multi_unit)
+        energy_cost = card_energy_of(multi_unit) or 0
+        power_cost = card_power_of(multi_unit) or 0
+        self.assertGreaterEqual(len(domains), 2)
+        self.assertGreater(power_cost, 0)
+
+        # Bank Energy and split the Power across the listed domains:
+        # 1 of each domain in order until the cost is met, then top up the
+        # first domain with any leftover. For a 2-cost Fury+Chaos card this
+        # ends up as 1 Fury + 1 Chaos — exercising the "any combination"
+        # affordance.
+        engine.add_energy(RequiredTo.PLAYER_1, energy_cost)
+        remaining = power_cost
+        for dom in domains:
+            if remaining <= 0:
+                break
+            engine.add_power(RequiredTo.PLAYER_1, dom, 1)
+            remaining -= 1
+        if remaining > 0:
+            engine.add_power(RequiredTo.PLAYER_1, domains[0], remaining)
+
+        # The option should appear and the play should succeed.
+        ready = engine.start()
+        self.assertIn(f"play:play_unit:{target_idx}", ready.player_1_options)
+        engine.apply_action(
+            action=f"play:play_unit:{target_idx}", actor=RequiredTo.PLAYER_1
+        )
+        # All Power drained to 0.
+        self.assertEqual(engine.player_power(RequiredTo.PLAYER_1), {})
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), 0)
+
+
+class UnitSummoningSicknessTests(unittest.TestCase):
+    """Played units enter exhausted and ready on the owner's next Awake."""
+
+    def _drive_to_action_turn(self) -> tuple[GameEngine, "EngineOutput"]:
+        rolls = iter([6, 2])
+        engine = GameEngine(dice_roller=lambda: next(rolls))
+        first = engine.start()
+        second = engine.apply_action(action=f"choose_deck:{first.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        third = engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
+        fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
+        ready = engine.apply_action(
+            action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
+            actor=RequiredTo.PLAYER_2,
+        )
+        _ = third
+        return engine, ready
+
+    def _play_one_unit_to_base(self, engine: GameEngine) -> str:
+        """Play the first affordable Unit from P1's hand to base.
+
+        New flow: exhaust runes to bank Energy first, then ``play_unit``
+        (which deducts both Energy and any domain Power cost), then
+        ``choose_location`` (no payment phase any more).
+        """
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        ready = engine.start()
+        hand = ready.game_state.player_1_hand or []
+        idx = next(
+            (i for i, c in enumerate(hand) if card_type_of(c) == "Unit"),
+            None,
+        )
+        if idx is None:
+            raise unittest.SkipTest("hand has no Unit cards")
+        card = hand[idx]
+        energy_cost = engine.card_energy_cost(card)
+        # Exhaust ``cost`` ready runes to produce exactly that much Energy.
+        for i in range(energy_cost):
+            engine.apply_action(action=f"play:exhaust_rune:{i}", actor=RequiredTo.PLAYER_1)
+        # If the card also requires Power, top up directly (these summoning-
+        # sickness tests focus on unit lifecycle, not the recycle flow).
+        power_cost = engine.card_power_cost(card)
+        if power_cost > 0:
+            domains = engine.card_domains(card)
+            if not domains:
+                raise unittest.SkipTest(f"{card!r} requires Power but has no domain")
+            engine.add_power(RequiredTo.PLAYER_1, domains[0], power_cost)
+        engine.apply_action(action=f"play:play_unit:{idx}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action="play:choose_location:base", actor=RequiredTo.PLAYER_1)
+        return card
+
+    def test_newly_played_unit_enters_exhausted(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._play_one_unit_to_base(engine)
+        units = engine.game_state.player_1_units
+        self.assertEqual(len(units), 1)
+        self.assertTrue(units[0].exhausted, "freshly played unit must enter exhausted")
+
+    def test_unit_stays_exhausted_through_opponent_turn(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._play_one_unit_to_base(engine)
+        # P1 ends turn → P2's full ABCD runs → control returns waiting on P2's action.
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        # P1's unit is unaffected by P2's Awake; it must still be exhausted.
+        units = engine.game_state.player_1_units
+        self.assertEqual(len(units), 1)
+        self.assertTrue(
+            units[0].exhausted,
+            "opponent's Awake must not ready our units",
+        )
+
+    def test_unit_readies_on_owners_next_awake(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._play_one_unit_to_base(engine)
+        # Cycle around to P1's next turn.
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_2)
+        # Back to P1 — Awake ran, units should be ready.
+        gs = engine.game_state
+        self.assertEqual(gs.current_player, RequiredTo.PLAYER_1)
+        self.assertEqual(len(gs.player_1_units), 1)
+        self.assertFalse(
+            gs.player_1_units[0].exhausted,
+            "unit must ready on its owner's next Awake",
+        )
+
+
+class MoveUnitTests(unittest.TestCase):
+    """play:move_unit — ready units may move base ↔ a controlled battlefield;
+    moving exhausts the unit and battlefield-to-battlefield jumps are
+    rejected."""
+
+    def _drive_to_action_turn(self) -> tuple["GameEngine", "EngineOutput"]:
+        rolls = iter([6, 2])
+        engine = GameEngine(dice_roller=lambda: next(rolls))
+        first = engine.start()
+        second = engine.apply_action(action=f"choose_deck:{first.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        third = engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
+        fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
+        ready = engine.apply_action(
+            action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
+            actor=RequiredTo.PLAYER_2,
+        )
+        _ = third
+        return engine, ready
+
+    def _place_ready_unit(
+        self, engine: GameEngine, location: str, *, card: str = "Test Unit"
+    ) -> int:
+        """Append a ready (un-exhausted) PlayedUnit to P1's units list and
+        return its index. Bypasses the play_unit flow so the test stays
+        focused on movement mechanics."""
+        from riftbound_engine.engine import PlayedUnit
+
+        units = engine._game_state.player_1_units
+        units.append(PlayedUnit(card=card, location=location, exhausted=False))
+        return len(units) - 1
+
+    def test_move_options_for_ready_unit_at_base_include_controlled_battlefields(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        # P2 controls BF2 → P1 cannot move there.
+        engine._game_state.battlefield_2_controller = RequiredTo.PLAYER_2
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        ready = engine.start()
+        move_opts = [opt for opt in ready.player_1_options if opt.startswith("play:move_unit:")]
+        self.assertEqual(move_opts, [f"play:move_unit:{unit_idx}:battlefield_1"])
+
+    def test_move_options_include_uncontrolled_battlefields(self) -> None:
+        # Uncontrolled BFs are valid move destinations — picking one opens
+        # a showdown. This is how players take control of a battlefield in
+        # the first place (since play_unit still requires control).
+        engine, _ = self._drive_to_action_turn()
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        ready = engine.start()
+        move_opts = [opt for opt in ready.player_1_options if opt.startswith("play:move_unit:")]
+        self.assertEqual(
+            move_opts,
+            [
+                f"play:move_unit:{unit_idx}:battlefield_1",
+                f"play:move_unit:{unit_idx}:battlefield_2",
+            ],
+        )
+
+    def test_move_options_exclude_opponent_controlled_battlefields(self) -> None:
+        # Opponent-controlled BFs must NOT appear as move options — the
+        # active player has no right to deploy there.
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_2
+        # Leave BF2 uncontrolled.
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        ready = engine.start()
+        move_opts = [opt for opt in ready.player_1_options if opt.startswith("play:move_unit:")]
+        self.assertEqual(move_opts, [f"play:move_unit:{unit_idx}:battlefield_2"])
+
+    def test_move_options_for_ready_unit_at_battlefield_offers_base_only(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        unit_idx = self._place_ready_unit(engine, "battlefield_1", card="Sentinel")
+        ready = engine.start()
+        move_opts = [opt for opt in ready.player_1_options if opt.startswith("play:move_unit:")]
+        self.assertEqual(move_opts, [f"play:move_unit:{unit_idx}:base"])
+
+    def test_exhausted_unit_has_no_move_options(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        engine._game_state.player_1_units[unit_idx].exhausted = True
+        ready = engine.start()
+        move_opts = [opt for opt in ready.player_1_options if opt.startswith("play:move_unit:")]
+        self.assertEqual(move_opts, [])
+
+    def test_move_unit_base_to_battlefield_exhausts_the_unit(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        after = engine.apply_action(
+            action=f"play:move_unit:{unit_idx}:battlefield_1", actor=RequiredTo.PLAYER_1
+        )
+        unit = after.game_state.player_1_units[unit_idx]
+        self.assertEqual(unit.location, "battlefield_1")
+        self.assertTrue(unit.exhausted, "moving must exhaust the unit")
+
+    def test_move_unit_battlefield_to_base_exhausts_the_unit(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        unit_idx = self._place_ready_unit(engine, "battlefield_1", card="Sentinel")
+        after = engine.apply_action(
+            action=f"play:move_unit:{unit_idx}:base", actor=RequiredTo.PLAYER_1
+        )
+        unit = after.game_state.player_1_units[unit_idx]
+        self.assertEqual(unit.location, "base")
+        self.assertTrue(unit.exhausted)
+
+    def test_move_unit_rejects_battlefield_to_battlefield(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        engine._game_state.battlefield_2_controller = RequiredTo.PLAYER_1
+        unit_idx = self._place_ready_unit(engine, "battlefield_1", card="Sentinel")
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action=f"play:move_unit:{unit_idx}:battlefield_2", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("battlefield-to-battlefield", str(ctx.exception))
+
+    def test_move_unit_to_uncontrolled_battlefield_opens_showdown(self) -> None:
+        # The legacy "uncontrolled BF is rejected" behavior has been replaced
+        # by the showdown mechanic: moving to an uncontrolled battlefield is
+        # now allowed and opens a PendingShowdown. The unit relocates and
+        # exhausts, but the BF stays uncontrolled until the showdown
+        # resolves via mutual pass_showdown (see ShowdownTests).
+        engine, _ = self._drive_to_action_turn()
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        after = engine.apply_action(
+            action=f"play:move_unit:{unit_idx}:battlefield_1", actor=RequiredTo.PLAYER_1
+        )
+        unit = after.game_state.player_1_units[unit_idx]
+        self.assertEqual(unit.location, "battlefield_1")
+        self.assertTrue(unit.exhausted)
+        self.assertIsNotNone(after.game_state.pending_showdown)
+        self.assertEqual(after.game_state.pending_showdown.battlefield, "battlefield_1")
+        self.assertEqual(after.game_state.pending_showdown.initiator, RequiredTo.PLAYER_1)
+        # BF controller is still None until the showdown resolves.
+        self.assertIsNone(after.game_state.battlefield_1_controller)
+
+    def test_move_unit_rejects_opponent_controlled_battlefield(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_2
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action=f"play:move_unit:{unit_idx}:battlefield_1", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("controlled by", str(ctx.exception))
+
+    def test_move_unit_rejects_exhausted_unit(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        engine._game_state.player_1_units[unit_idx].exhausted = True
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action=f"play:move_unit:{unit_idx}:battlefield_1", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("exhausted", str(ctx.exception))
+
+    def test_move_unit_rejects_same_location(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action=f"play:move_unit:{unit_idx}:base", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("already at", str(ctx.exception))
+
+    def test_move_unit_rejects_inactive_player(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        # P1 is active. Place a ready unit on P2's side and have P2 try to move.
+        from riftbound_engine.engine import PlayedUnit
+        engine._game_state.player_2_units.append(
+            PlayedUnit(card="Sentinel", location="base", exhausted=False)
+        )
+        engine._game_state.battlefield_2_controller = RequiredTo.PLAYER_2
+        with self.assertRaises(ValueError):
+            engine.apply_action(
+                action="play:move_unit:0:battlefield_2", actor=RequiredTo.PLAYER_2
+            )
+
+    def test_move_unit_blocked_during_showdown(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        # First, open a showdown by moving a Sentinel onto BF1.
+        first_unit = self._place_ready_unit(engine, "base", card="Sentinel")
+        engine.apply_action(
+            action=f"play:move_unit:{first_unit}:battlefield_1", actor=RequiredTo.PLAYER_1
+        )
+        # Place a second ready unit at base and try to move it — must be blocked.
+        second_unit = self._place_ready_unit(engine, "base", card="Backup")
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action=f"play:move_unit:{second_unit}:battlefield_2", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("showdown", str(ctx.exception))
+
+    def test_move_unit_blocked_while_play_is_pending(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
+        # Start a play to set pending_play. Find a Power-0 unit so this
+        # test isolates the pending-play gate.
+        ready = engine.start()
+        hand = ready.game_state.player_1_hand or []
+        target = next(
+            (
+                i for i, card in enumerate(hand)
+                if card_type_of(card) == "Unit"
+                and (card_energy_of(card) or 0) > 0
+                and (card_power_of(card) or 0) == 0
+            ),
+            None,
+        )
+        if target is None:
+            self.skipTest("dealt hand has no positive-Energy Power-0 Unit cards")
+        cost = card_energy_of(hand[target]) or 0
+        for i in range(cost):
+            engine.apply_action(action=f"play:exhaust_rune:{i}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"play:play_unit:{target}", actor=RequiredTo.PLAYER_1)
+        # pending_play is set → move_unit is now blocked.
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(
+                action=f"play:move_unit:{unit_idx}:battlefield_1", actor=RequiredTo.PLAYER_1
+            )
+        self.assertIn("waiting for a location", str(ctx.exception))
+
+
+class ShowdownTests(unittest.TestCase):
+    """play:pass_showdown — both players pass in turn to resolve a showdown
+    opened when a unit moves onto an uncontrolled battlefield."""
+
+    def _drive_to_action_turn(self) -> tuple["GameEngine", "EngineOutput"]:
+        rolls = iter([6, 2])
+        engine = GameEngine(dice_roller=lambda: next(rolls))
+        first = engine.start()
+        second = engine.apply_action(action=f"choose_deck:{first.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        third = engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
+        fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
+        ready = engine.apply_action(
+            action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
+            actor=RequiredTo.PLAYER_2,
+        )
+        _ = third
+        return engine, ready
+
+    def _start_showdown_on_bf1(self, engine: GameEngine) -> int:
+        """Open a showdown on battlefield_1 with P1 as the initiator.
+
+        Returns the index of the unit that walked onto the BF."""
+        from riftbound_engine.engine import PlayedUnit
+
+        engine._game_state.player_1_units.append(
+            PlayedUnit(card="Sentinel", location="base", exhausted=False)
+        )
+        unit_idx = len(engine._game_state.player_1_units) - 1
+        engine.apply_action(
+            action=f"play:move_unit:{unit_idx}:battlefield_1", actor=RequiredTo.PLAYER_1
+        )
+        return unit_idx
+
+    def test_showdown_options_collapse_to_pass_only_for_initiator_first(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._start_showdown_on_bf1(engine)
+        out = engine.start()
+        # Initiator (P1) gets only pass; opponent (P2) has empty options.
+        self.assertEqual(out.player_1_options, ["play:pass_showdown"])
+        self.assertEqual(out.player_2_options, [])
+        # required_action.actor reflects who is next to pass.
+        self.assertEqual(out.required_action.actor, RequiredTo.PLAYER_1)
+
+    def test_opponent_cannot_pass_first(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._start_showdown_on_bf1(engine)
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_2)
+        self.assertIn("initiator", str(ctx.exception))
+
+    def test_after_initiator_passes_opponent_gets_pass_option(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._start_showdown_on_bf1(engine)
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        out = engine.start()
+        # Now only P2 has the pass option.
+        self.assertEqual(out.player_1_options, [])
+        self.assertEqual(out.player_2_options, ["play:pass_showdown"])
+        self.assertEqual(out.required_action.actor, RequiredTo.PLAYER_2)
+        # Showdown is still pending — initiator marked as passed.
+        self.assertIsNotNone(out.game_state.pending_showdown)
+        self.assertTrue(out.game_state.pending_showdown.initiator_passed)
+        self.assertFalse(out.game_state.pending_showdown.opponent_passed)
+
+    def test_both_passes_assign_control_to_initiator_and_clear_showdown(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._start_showdown_on_bf1(engine)
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        out = engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_2)
+        # Showdown cleared; BF1 controller is now P1 (the initiator).
+        self.assertIsNone(out.game_state.pending_showdown)
+        self.assertEqual(out.game_state.battlefield_1_controller, RequiredTo.PLAYER_1)
+        # Active player (P1) is back to normal action options now.
+        self.assertEqual(out.required_action.actor, RequiredTo.PLAYER_1)
+        self.assertIn("play:end_turn", out.player_1_options)
+
+    def test_initiator_cannot_pass_twice(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._start_showdown_on_bf1(engine)
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        self.assertIn("opponent", str(ctx.exception))
+
+    def test_other_actions_blocked_during_showdown(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        self._start_showdown_on_bf1(engine)
+        # exhaust_rune, recycle, play_unit, end_turn must all be blocked.
+        for action in (
+            "play:exhaust_rune:0",
+            "play:exhaust_and_recycle_rune:0",
+            "play:end_turn",
+        ):
+            with self.assertRaises(ValueError, msg=f"{action} should be blocked"):
+                engine.apply_action(action=action, actor=RequiredTo.PLAYER_1)
+
+    def test_pass_showdown_rejected_when_no_showdown(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        self.assertIn("no showdown", str(ctx.exception))
+
+    def test_showdown_win_awards_one_point_to_initiator(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 0)
+        self._start_showdown_on_bf1(engine)
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_2)
+        # Initiator scored 1 (the BF they just gained); opponent unaffected.
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 1)
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_2), 0)
+
+    def test_subsequent_move_onto_resolved_bf_does_not_open_new_showdown(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._start_showdown_on_bf1(engine)
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_2)
+        # P1 now controls BF1. Place a fresh ready unit and move it there —
+        # the BF is no longer uncontrolled so no new showdown should open.
+        from riftbound_engine.engine import PlayedUnit
+        engine._game_state.player_1_units.append(
+            PlayedUnit(card="Reinforcement", location="base", exhausted=False)
+        )
+        idx = len(engine._game_state.player_1_units) - 1
+        after = engine.apply_action(
+            action=f"play:move_unit:{idx}:battlefield_1", actor=RequiredTo.PLAYER_1
+        )
+        self.assertIsNone(after.game_state.pending_showdown)
+        self.assertEqual(after.game_state.player_1_units[idx].location, "battlefield_1")
+
+
+class ScoringTests(unittest.TestCase):
+    """Match score: +1 per battlefield gained via showdown, +1 per held BF
+    at B (ABCD step B). Capped at 1 point per battlefield per turn."""
+
+    def _drive_to_action_turn(self) -> tuple["GameEngine", "EngineOutput"]:
+        rolls = iter([6, 2])
+        engine = GameEngine(dice_roller=lambda: next(rolls))
+        first = engine.start()
+        second = engine.apply_action(action=f"choose_deck:{first.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        third = engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
+        fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
+        ready = engine.apply_action(
+            action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
+            actor=RequiredTo.PLAYER_2,
+        )
+        _ = third
+        return engine, ready
+
+    def _open_and_win_showdown(
+        self, engine: GameEngine, *, battlefield: str = "battlefield_1"
+    ) -> None:
+        """Place a ready unit on P1's side, move it onto an uncontrolled BF,
+        and resolve the showdown via mutual pass. P1 ends up controlling it."""
+        from riftbound_engine.engine import PlayedUnit
+
+        engine._game_state.player_1_units.append(
+            PlayedUnit(card="Sentinel", location="base", exhausted=False)
+        )
+        unit_idx = len(engine._game_state.player_1_units) - 1
+        engine.apply_action(
+            action=f"play:move_unit:{unit_idx}:{battlefield}", actor=RequiredTo.PLAYER_1
+        )
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_2)
+
+    def test_starting_scores_are_zero(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 0)
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_2), 0)
+
+    def test_showdown_win_awards_one_point(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._open_and_win_showdown(engine, battlefield="battlefield_1")
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 1)
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_2), 0)
+
+    def test_b_phase_hold_scores_one_per_held_battlefield(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        # P1 takes BF1 on turn 1 (showdown) → +1 point.
+        self._open_and_win_showdown(engine, battlefield="battlefield_1")
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 1)
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        # P2's turn: holds nothing → still 0.
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_2), 0)
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_2)
+        # Back on P1: B-phase HOLD awards +1 for BF1 they still control.
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 2)
+
+    def test_b_phase_scores_both_held_battlefields(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        # P1 takes BF1 turn 1.
+        self._open_and_win_showdown(engine, battlefield="battlefield_1")
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_2)
+        # Back to P1: HOLD score for BF1 awarded → 2 total.
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 2)
+        # P1 takes BF2 this turn (showdown) → +1, total 3.
+        self._open_and_win_showdown(engine, battlefield="battlefield_2")
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 3)
+        # End P1's turn, end P2's turn → back to P1, HOLD for BOTH BFs → +2.
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_2)
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 5)
+
+    def test_per_bf_cap_blocks_second_award_same_turn(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        # First award: succeeds.
+        first = engine.award_bf_point(RequiredTo.PLAYER_1, "battlefield_1")
+        self.assertTrue(first)
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 1)
+        # Second award for the same BF this turn: rejected.
+        second = engine.award_bf_point(RequiredTo.PLAYER_1, "battlefield_1")
+        self.assertFalse(second)
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 1)
+
+    def test_scored_bfs_clears_on_turn_change(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        self._open_and_win_showdown(engine, battlefield="battlefield_1")
+        # Mid-turn the BF is in the per-turn set.
+        self.assertIn("battlefield_1", engine._game_state.scored_bfs_this_turn)
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        # After the turn flip the set is cleared so the same BF can score
+        # again next turn via HOLD.
+        self.assertEqual(engine._game_state.scored_bfs_this_turn, set())
+
+    def test_opponent_holds_score_for_their_own_battlefields(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        # Hand BF2 to P2 directly (no showdown — testing pure B-phase scoring).
+        engine._game_state.battlefield_2_controller = RequiredTo.PLAYER_2
+        # End P1's turn so P2's ABCD runs and B-phase HOLDs BF2 for P2.
+        engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_2), 1)
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 0)

@@ -12,6 +12,7 @@ _ENGINE_ROOT = Path(__file__).resolve().parent.parent
 DECKS_DIR = _ENGINE_ROOT / "decks"
 
 _SECTION_ALIASES: dict[str, str] = {
+    # canonical
     "legend": "legend",
     "champion": "champion",
     "maindeck": "main_deck",
@@ -19,6 +20,17 @@ _SECTION_ALIASES: dict[str, str] = {
     "battlefields": "battlefields",
     "runes": "runes",
     "sideboard": "sideboard",
+    # synonyms commonly produced by deck builders / pasted from other tools
+    "legends": "legend",
+    "champions": "champion",
+    "main": "main_deck",
+    "deck": "main_deck",
+    "battlefield": "battlefields",
+    "rune pool": "runes",
+    "runepool": "runes",
+    "rune": "runes",
+    "side": "sideboard",
+    "side board": "sideboard",
 }
 
 _LINE_RE = re.compile(r"^(\d+)\s+(.+)$")

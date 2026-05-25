@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
+from .csv_data import card_domains_of, card_energy_of, card_power_of, card_type_of
 from .deck_files import deck_data_for_id, list_deck_ids
 from .protocol import ApplyVerb, RequiredStep, apply_prefix
 
@@ -24,9 +25,21 @@ CHANNEL_RUNES_SECOND_IN_GAME = 3
 CHANNEL_RUNES_AFTER = 2
 
 
-@dataclass(frozen=True)
+@dataclass
 class Rune:
+    """A rune in a player's rune pool.
+
+    A rune is ``ready`` (face up / vertical) until it's spent to pay an Energy
+    cost, at which point it becomes ``exhausted`` (tapped / horizontal). All
+    of the active player's exhausted runes ready again during step A (Awake)
+    of their next turn.
+
+    Note: this dataclass is intentionally **mutable** (not frozen) so the
+    engine can flip `exhausted` in place. Equality is still by value.
+    """
+
     domain: str
+    exhausted: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,6 +94,75 @@ def build_deck_from_id(deck_id: str) -> Deck:
     )
 
 
+#: Legal destinations for a played unit. The engine accepts only these strings.
+UNIT_LOCATIONS: tuple[str, ...] = ("base", "battlefield_1", "battlefield_2")
+
+
+@dataclass
+class PlayedUnit:
+    """A card that has been played as a unit and committed to a location.
+
+    Newly played units enter ``exhausted=True`` (summoning sickness), and
+    are readied along with the player's runes during step A (Awake) of the
+    owner's next turn. Other gameplay effects may also exhaust a unit later
+    in the match.
+    """
+
+    card: str
+    #: One of UNIT_LOCATIONS.
+    location: str
+    exhausted: bool = True
+
+
+@dataclass
+class PendingPlay:
+    """A play that has been started but is waiting for the active player to pick a location.
+
+    The card has already been removed from `hand` when this is set — it lives
+    in pending_play until choose_location commits it to units (or is rolled
+    back, which we don't support yet).
+    """
+
+    actor: RequiredTo
+    card: str
+
+
+@dataclass
+class PendingShowdown:
+    """An active showdown over an uncontrolled battlefield.
+
+    Opened when the active player moves a unit onto a battlefield with no
+    controller. While set, both players' options collapse to a single
+    ``play:pass_showdown`` action — first the initiator passes, then the
+    opponent. When both have passed the showdown resolves: the battlefield's
+    controller is set to whoever still has units remaining on it (in the
+    current minimal model that's just the initiator), and this field is
+    cleared.
+    """
+
+    battlefield: str  # "battlefield_1" or "battlefield_2"
+    initiator: RequiredTo
+    initiator_passed: bool = False
+    opponent_passed: bool = False
+
+
+@dataclass
+class PendingPayment:
+    """A unit has been committed to a location and is now waiting for the
+    active player to pick which ready runes to exhaust to pay its Energy cost.
+
+    Wire format: each pick is ``play:exhaust_rune:<index>`` where ``index`` is
+    the position of the rune in the active player's rune pool. Picks must be
+    of currently ready runes (already-exhausted runes are rejected).
+
+    When ``remaining`` reaches 0 the payment is complete and the field is
+    cleared, returning the player to normal action-turn options.
+    """
+
+    actor: RequiredTo
+    remaining: int
+
+
 @dataclass
 class GameState:
     counter: int = 0
@@ -97,8 +179,39 @@ class GameState:
     mulligan_player_2_resolved: bool = False
     player_1_hand: list[str] | None = None
     player_2_hand: list[str] | None = None
+    #: Cards played as units this match, in play order, each tagged with its location.
+    player_1_units: list[PlayedUnit] = field(default_factory=list)
+    player_2_units: list[PlayedUnit] = field(default_factory=list)
+    #: Set while a `play:play_unit:*` is waiting for `play:choose_location:*`.
+    pending_play: PendingPlay | None = None
+    #: Set after a play has been committed to a location but the active player
+    #: still owes ``remaining`` Energy in exhausted runes (cost > 0). Cleared
+    #: when the last rune is exhausted.
+    pending_payment: PendingPayment | None = None
+    #: Set when the active player moves a unit onto an uncontrolled battlefield.
+    #: While set, both players' options are limited to ``play:pass_showdown`` —
+    #: first the initiator passes, then the opponent. See PendingShowdown.
+    pending_showdown: PendingShowdown | None = None
+    #: Who controls each contested territory. None ⇒ uncontrolled (nobody may
+    #: play units there yet). Each player always controls their own `base`,
+    #: which is not tracked here.
+    battlefield_1_controller: RequiredTo | None = None
+    battlefield_2_controller: RequiredTo | None = None
     player_1_runes: list[Rune] = field(default_factory=list)
     player_2_runes: list[Rune] = field(default_factory=list)
+    #: Energy a player has produced this turn by exhausting runes. Each
+    #: ``play:exhaust_rune:*`` adds 1; each ``play:play_unit:*`` deducts the
+    #: card's Energy cost. The pool is reset to 0 when the player's turn
+    #: ends (it does NOT persist across turns).
+    player_1_energy: int = 0
+    player_2_energy: int = 0
+    #: Power a player has produced this turn by recycling runes — keyed by
+    #: rune ``domain`` (e.g. {"Mind": 1, "Fury": 2}). Each ``play:recycle_rune:*``
+    #: (already-exhausted rune) and ``play:exhaust_and_recycle_rune:*`` (ready
+    #: rune, also producing 1 Energy) adds 1 of the rune's domain. Like
+    #: Energy, Power resets at turn end — it does NOT persist across turns.
+    player_1_power: dict[str, int] = field(default_factory=dict)
+    player_2_power: dict[str, int] = field(default_factory=dict)
     #: Shuffled rune deck (remaining); draws from the front. Set when the game starts after mulligan.
     player_1_rune_library: list[Rune] | None = None
     player_2_rune_library: list[Rune] | None = None
@@ -110,6 +223,17 @@ class GameState:
     player_2_deck: Deck | None = None
     player_1_deck_id: str | None = None
     player_2_deck_id: str | None = None
+    #: Match score per player. Players score by gaining control of a
+    #: battlefield (winning a showdown) and by HOLDing a battlefield at
+    #: the start of B (ABCD step B). The per-turn cap is enforced by
+    #: ``scored_bfs_this_turn`` below: at most one point per battlefield
+    #: per turn, regardless of the source.
+    player_1_score: int = 0
+    player_2_score: int = 0
+    #: Battlefields that have already awarded a point this turn (e.g. via
+    #: B-phase HOLD or a showdown win). Cleared on ``_advance_turn`` so
+    #: each new turn starts fresh.
+    scored_bfs_this_turn: set[str] = field(default_factory=set)
     #: Counts each time a player begins their turn (first active turn after setup = 1).
     total_turn_number: int = 0
     #: How many turns this player has started (e.g. 5 = that player's 5th turn).
@@ -191,14 +315,63 @@ class GameEngine:
             mulligan_player_2_resolved=self._game_state.mulligan_player_2_resolved,
             player_1_hand=list(self._game_state.player_1_hand) if self._game_state.player_1_hand is not None else None,
             player_2_hand=list(self._game_state.player_2_hand) if self._game_state.player_2_hand is not None else None,
-            player_1_runes=list(self._game_state.player_1_runes),
-            player_2_runes=list(self._game_state.player_2_runes),
-            player_1_rune_library=list(self._game_state.player_1_rune_library)
-            if self._game_state.player_1_rune_library is not None
-            else None,
-            player_2_rune_library=list(self._game_state.player_2_rune_library)
-            if self._game_state.player_2_rune_library is not None
-            else None,
+            player_1_units=[
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted)
+                for u in self._game_state.player_1_units
+            ],
+            player_2_units=[
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted)
+                for u in self._game_state.player_2_units
+            ],
+            pending_play=(
+                None
+                if self._game_state.pending_play is None
+                else PendingPlay(
+                    actor=self._game_state.pending_play.actor,
+                    card=self._game_state.pending_play.card,
+                )
+            ),
+            pending_payment=(
+                None
+                if self._game_state.pending_payment is None
+                else PendingPayment(
+                    actor=self._game_state.pending_payment.actor,
+                    remaining=self._game_state.pending_payment.remaining,
+                )
+            ),
+            pending_showdown=(
+                None
+                if self._game_state.pending_showdown is None
+                else PendingShowdown(
+                    battlefield=self._game_state.pending_showdown.battlefield,
+                    initiator=self._game_state.pending_showdown.initiator,
+                    initiator_passed=self._game_state.pending_showdown.initiator_passed,
+                    opponent_passed=self._game_state.pending_showdown.opponent_passed,
+                )
+            ),
+            battlefield_1_controller=self._game_state.battlefield_1_controller,
+            battlefield_2_controller=self._game_state.battlefield_2_controller,
+            # Deep-copy Rune instances — Rune is mutable so exhausted-state
+            # mutations on the engine's runes must not bleed into snapshots.
+            player_1_runes=[Rune(domain=r.domain, exhausted=r.exhausted) for r in self._game_state.player_1_runes],
+            player_2_runes=[Rune(domain=r.domain, exhausted=r.exhausted) for r in self._game_state.player_2_runes],
+            player_1_energy=self._game_state.player_1_energy,
+            player_2_energy=self._game_state.player_2_energy,
+            player_1_power=dict(self._game_state.player_1_power),
+            player_2_power=dict(self._game_state.player_2_power),
+            player_1_score=self._game_state.player_1_score,
+            player_2_score=self._game_state.player_2_score,
+            scored_bfs_this_turn=set(self._game_state.scored_bfs_this_turn),
+            player_1_rune_library=(
+                [Rune(domain=r.domain, exhausted=r.exhausted) for r in self._game_state.player_1_rune_library]
+                if self._game_state.player_1_rune_library is not None
+                else None
+            ),
+            player_2_rune_library=(
+                [Rune(domain=r.domain, exhausted=r.exhausted) for r in self._game_state.player_2_rune_library]
+                if self._game_state.player_2_rune_library is not None
+                else None
+            ),
             player_1_base=self._game_state.player_1_base,
             player_2_base=self._game_state.player_2_base,
             current_player=self._game_state.current_player,
@@ -305,11 +478,13 @@ class GameEngine:
             self._game_state.player_1_turn_number = 0
         self._reset_abcd_flags()
         if self._game_state.player_1_deck is not None:
-            r1 = list(self._game_state.player_1_deck.runes)
+            # Fresh Rune instances so later mutations (exhausted/ready)
+            # don't leak into the deck tuple, which other snapshots reference.
+            r1 = [Rune(domain=r.domain) for r in self._game_state.player_1_deck.runes]
             self._rng.shuffle(r1)
             self._game_state.player_1_rune_library = r1
         if self._game_state.player_2_deck is not None:
-            r2 = list(self._game_state.player_2_deck.runes)
+            r2 = [Rune(domain=r.domain) for r in self._game_state.player_2_deck.runes]
             self._rng.shuffle(r2)
             self._game_state.player_2_rune_library = r2
         if self._can_increment():
@@ -320,6 +495,19 @@ class GameEngine:
         cp = self._game_state.current_player
         if cp not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
             raise ValueError("current_player must be player_1 or player_2 during play")
+        if self._game_state.pending_play is not None:
+            raise ValueError("cannot end the turn while a play is waiting for a location")
+        if self._game_state.pending_showdown is not None:
+            raise ValueError("cannot end the turn while a showdown is in progress")
+        # Energy and Power are per-turn: clear both players' pools so nothing
+        # carries into the next turn.
+        self._game_state.player_1_energy = 0
+        self._game_state.player_2_energy = 0
+        self._game_state.player_1_power = {}
+        self._game_state.player_2_power = {}
+        # The per-BF scoring cap is also per-turn: clear the set so each
+        # battlefield can score again on the new turn (if conditions hold).
+        self._game_state.scored_bfs_this_turn = set()
         nxt = RequiredTo.PLAYER_2 if cp == RequiredTo.PLAYER_1 else RequiredTo.PLAYER_1
         self._game_state.current_player = nxt
         self._game_state.total_turn_number += 1
@@ -328,6 +516,34 @@ class GameEngine:
         else:
             self._game_state.player_2_turn_number += 1
         self._reset_abcd_flags()
+
+    @staticmethod
+    def opponent_of(actor: RequiredTo) -> RequiredTo:
+        """The other player in a head-to-head match (raises for ``BOTH``)."""
+        if actor == RequiredTo.PLAYER_1:
+            return RequiredTo.PLAYER_2
+        if actor == RequiredTo.PLAYER_2:
+            return RequiredTo.PLAYER_1
+        raise ValueError("opponent_of requires player_1 or player_2")
+
+    def _locations_controlled_by(self, actor: RequiredTo) -> list[str]:
+        """Locations where `actor` may currently place a unit.
+
+        - Each player always controls their own `base`.
+        - A battlefield is available only if `<bf>_controller == actor`.
+          When no one controls a battlefield (the default at match start),
+          it is unavailable to both players.
+        """
+        out: list[str] = ["base"]
+        if self._game_state.battlefield_1_controller == actor:
+            out.append("battlefield_1")
+        if self._game_state.battlefield_2_controller == actor:
+            out.append("battlefield_2")
+        return out
+
+    def player_controls_location(self, actor: RequiredTo, location: str) -> bool:
+        """Public predicate used by the choose_location handler."""
+        return location in self._locations_controlled_by(actor)
 
     def _channel_rune_count_for_next_channel(self) -> int:
         k = self._game_state.global_channel_count
@@ -375,6 +591,209 @@ class GameEngine:
             raise ValueError("cannot draw: main deck is empty")
         hand.append(library.pop(0))
 
+    def runes_for(self, actor: RequiredTo) -> list[Rune]:
+        """Active rune pool for ``actor`` (the live list — caller may mutate)."""
+        if actor == RequiredTo.PLAYER_1:
+            return self._game_state.player_1_runes
+        if actor == RequiredTo.PLAYER_2:
+            return self._game_state.player_2_runes
+        raise ValueError("runes_for requires player_1 or player_2")
+
+    def ready_rune_count(self, actor: RequiredTo) -> int:
+        """How many of ``actor``'s runes are currently ready (not exhausted)."""
+        return sum(1 for r in self.runes_for(actor) if not r.exhausted)
+
+    def exhausted_rune_count(self, actor: RequiredTo) -> int:
+        """How many of ``actor``'s runes are currently exhausted (tapped)."""
+        return sum(1 for r in self.runes_for(actor) if r.exhausted)
+
+    def player_energy(self, actor: RequiredTo) -> int:
+        """Energy ``actor`` has produced this turn (cleared on turn change)."""
+        if actor == RequiredTo.PLAYER_1:
+            return self._game_state.player_1_energy
+        if actor == RequiredTo.PLAYER_2:
+            return self._game_state.player_2_energy
+        raise ValueError("player_energy requires player_1 or player_2")
+
+    def add_energy(self, actor: RequiredTo, amount: int) -> None:
+        """Add ``amount`` to ``actor``'s energy pool (amount may be negative to spend)."""
+        if actor == RequiredTo.PLAYER_1:
+            new_value = self._game_state.player_1_energy + amount
+            if new_value < 0:
+                raise ValueError("energy pool cannot go negative")
+            self._game_state.player_1_energy = new_value
+        elif actor == RequiredTo.PLAYER_2:
+            new_value = self._game_state.player_2_energy + amount
+            if new_value < 0:
+                raise ValueError("energy pool cannot go negative")
+            self._game_state.player_2_energy = new_value
+        else:
+            raise ValueError("add_energy requires player_1 or player_2")
+
+    def player_score(self, actor: RequiredTo) -> int:
+        """Match score for ``actor``."""
+        if actor == RequiredTo.PLAYER_1:
+            return self._game_state.player_1_score
+        if actor == RequiredTo.PLAYER_2:
+            return self._game_state.player_2_score
+        raise ValueError("player_score requires player_1 or player_2")
+
+    def add_score(self, actor: RequiredTo, amount: int) -> None:
+        """Add ``amount`` to ``actor``'s match score."""
+        if actor == RequiredTo.PLAYER_1:
+            self._game_state.player_1_score += amount
+        elif actor == RequiredTo.PLAYER_2:
+            self._game_state.player_2_score += amount
+        else:
+            raise ValueError("add_score requires player_1 or player_2")
+
+    def award_bf_point(self, actor: RequiredTo, battlefield: str) -> bool:
+        """Award ``actor`` 1 point for ``battlefield`` if it hasn't already
+        scored this turn. Returns ``True`` when a point was awarded, ``False``
+        when the per-BF-per-turn cap suppressed it.
+
+        Used by both B-phase HOLD scoring and showdown wins so the cap is
+        enforced uniformly regardless of source.
+        """
+        if battlefield in self._game_state.scored_bfs_this_turn:
+            return False
+        self._game_state.scored_bfs_this_turn.add(battlefield)
+        self.add_score(actor, 1)
+        return True
+
+    def player_power(self, actor: RequiredTo) -> dict[str, int]:
+        """Power ``actor`` has produced this turn, keyed by rune domain (live dict)."""
+        if actor == RequiredTo.PLAYER_1:
+            return self._game_state.player_1_power
+        if actor == RequiredTo.PLAYER_2:
+            return self._game_state.player_2_power
+        raise ValueError("player_power requires player_1 or player_2")
+
+    def add_power(self, actor: RequiredTo, domain: str, amount: int = 1) -> None:
+        """Add ``amount`` to ``actor``'s power pool for ``domain``."""
+        if not domain:
+            raise ValueError("domain must not be empty")
+        pool = self.player_power(actor)
+        new_value = pool.get(domain, 0) + amount
+        if new_value < 0:
+            raise ValueError(f"power pool for {domain!r} cannot go negative")
+        if new_value == 0:
+            pool.pop(domain, None)
+        else:
+            pool[domain] = new_value
+
+    def rune_library_for(self, actor: RequiredTo) -> list[Rune]:
+        """Live rune library list for ``actor`` (recycling appends to the bottom)."""
+        if actor == RequiredTo.PLAYER_1:
+            lib = self._game_state.player_1_rune_library
+        elif actor == RequiredTo.PLAYER_2:
+            lib = self._game_state.player_2_rune_library
+        else:
+            raise ValueError("rune_library_for requires player_1 or player_2")
+        if lib is None:
+            raise ValueError("rune library is not initialized yet")
+        return lib
+
+    def card_energy_cost(self, card: str) -> int:
+        """Energy cost for ``card`` from CSV, falling back to 0 when the CSV has
+        no numeric Energy for that name (e.g. test fixtures, unknown cards).
+
+        Returning 0 on missing data keeps tests and unknown-card paths working;
+        anything in the actual CSV has an integer cost.
+        """
+        value = card_energy_of(card)
+        return value if value is not None else 0
+
+    def card_power_cost(self, card: str) -> int:
+        """Power cost for ``card`` from CSV (0 when blank/missing).
+
+        Power is paid out of the active player's Power pool. The card's
+        Domain field determines which Power domains may be used to satisfy
+        the cost — see :meth:`card_domains` and :meth:`can_afford_power_cost`.
+        """
+        value = card_power_of(card)
+        return value if value is not None else 0
+
+    def card_domains(self, card: str) -> tuple[str, ...]:
+        """Domains the card belongs to (e.g. ``("Fury",)`` or ``("Fury", "Chaos")``)."""
+        return card_domains_of(card)
+
+    def can_afford_power_cost(self, actor: RequiredTo, card: str) -> bool:
+        """True iff ``actor`` has enough Power across the card's listed domains.
+
+        - Power cost 0 → always affordable (this method just returns True).
+        - Single-domain card → needs ``cost`` Power of that exact domain.
+        - Multi-domain card (e.g. "Fury, Chaos") → Power may come from any
+          combination of the listed domains; we just sum the available
+          Power across those domains and compare to the cost.
+        - Card with positive Power cost but no known domain (e.g. unknown
+          fixture) → unplayable.
+        """
+        cost = self.card_power_cost(card)
+        if cost <= 0:
+            return True
+        domains = self.card_domains(card)
+        if not domains:
+            return False
+        pool = self.player_power(actor)
+        available = sum(pool.get(d, 0) for d in domains)
+        return available >= cost
+
+    def _deduct_power_cost(self, actor: RequiredTo, card: str) -> None:
+        """Consume the card's Power cost from ``actor``'s Power pool.
+
+        Greedy: spends Power in the order the card's domains are listed in
+        the CSV. For a single-domain card this just drains that domain. For
+        a multi-domain card it drains the first listed domain dry, then the
+        second, and so on. Caller must verify affordability with
+        :meth:`can_afford_power_cost` first — this raises if it runs out.
+        """
+        remaining = self.card_power_cost(card)
+        if remaining <= 0:
+            return
+        pool = self.player_power(actor)
+        for domain in self.card_domains(card):
+            if remaining <= 0:
+                break
+            have = pool.get(domain, 0)
+            if have <= 0:
+                continue
+            take = min(have, remaining)
+            self.add_power(actor, domain, -take)
+            remaining -= take
+        if remaining > 0:
+            raise ValueError(
+                f"internal error: still {remaining} Power short after deducting from "
+                f"{', '.join(self.card_domains(card)) or '<no domains>'}"
+            )
+
+    def _ready_all_runes(self, actor: RequiredTo) -> None:
+        """Step A (Awake): flip every exhausted rune in the active player's pool back to ready."""
+        if actor == RequiredTo.PLAYER_1:
+            pool = self._game_state.player_1_runes
+        elif actor == RequiredTo.PLAYER_2:
+            pool = self._game_state.player_2_runes
+        else:
+            return
+        for rune in pool:
+            rune.exhausted = False
+
+    def _ready_all_units(self, actor: RequiredTo) -> None:
+        """Step A (Awake): flip every exhausted unit owned by ``actor`` back to ready.
+
+        Units enter the battlefield exhausted (summoning sickness) and ready
+        here on the owner's next turn. Effects that exhaust a unit later in
+        a match are likewise cleared here.
+        """
+        if actor == RequiredTo.PLAYER_1:
+            units = self._game_state.player_1_units
+        elif actor == RequiredTo.PLAYER_2:
+            units = self._game_state.player_2_units
+        else:
+            return
+        for unit in units:
+            unit.exhausted = False
+
     def _apply_abcd_letter(self, letter: str, actor: RequiredTo) -> None:
         gs = self._game_state
         if actor != gs.current_player:
@@ -383,12 +802,23 @@ class GameEngine:
         if key == "a":
             if gs.abcd_a_done:
                 raise ValueError("A already completed this turn")
+            # A = Awake: ready all the active player's exhausted runes and units.
+            self._ready_all_runes(actor)
+            self._ready_all_units(actor)
             gs.abcd_a_done = True
         elif key == "b":
             if not gs.abcd_a_done:
                 raise ValueError("A must be completed before B")
             if gs.abcd_b_done:
                 raise ValueError("B already completed this turn")
+            # HOLD scoring: at the start of B, score 1 point per battlefield
+            # the active player currently controls. The per-BF-per-turn cap
+            # is enforced via award_bf_point — same cap applies if the same
+            # battlefield later changes hands and scores via showdown.
+            if gs.battlefield_1_controller == actor:
+                self.award_bf_point(actor, "battlefield_1")
+            if gs.battlefield_2_controller == actor:
+                self.award_bf_point(actor, "battlefield_2")
             gs.abcd_b_done = True
         elif key == "c":
             if not gs.abcd_b_done:
@@ -476,9 +906,158 @@ class GameEngine:
             if not is_abcd_done(self._game_state):
                 self._complete_abcd_for_current_player()
                 return self.start()
+            active = self._game_state.current_player
+            showdown = self._game_state.pending_showdown
+            if showdown is not None:
+                # Mid-showdown: collapse both players' menus to a single
+                # pass_showdown for whichever side is next on the clock
+                # (initiator first, then opponent). All other actions are
+                # suppressed until the showdown resolves.
+                if not showdown.initiator_passed:
+                    next_actor = showdown.initiator
+                else:
+                    next_actor = self.opponent_of(showdown.initiator)
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=(
+                        ["play:pass_showdown"] if next_actor == RequiredTo.PLAYER_1 else []
+                    ),
+                    player_2_options=(
+                        ["play:pass_showdown"] if next_actor == RequiredTo.PLAYER_2 else []
+                    ),
+                    required_action=_required_action(next_actor, RequiredStep.ACTION_TURN),
+                )
+
+            pending = self._game_state.pending_play
+            if pending is not None and pending.actor == active:
+                # Mid-play: the active player must pick a location before doing
+                # anything else. End turn and other plays are suppressed.
+                # Only the locations the active player controls are offered —
+                # base is always self-controlled, battlefields only when their
+                # controller matches the active player.
+                options = [
+                    f"play:choose_location:{loc}"
+                    for loc in self._locations_controlled_by(active)
+                ]
+            else:
+                active_hand = (
+                    self._game_state.player_1_hand
+                    if active == RequiredTo.PLAYER_1
+                    else self._game_state.player_2_hand
+                )
+                # New order:
+                #  1) ``play:exhaust_rune:<i>`` per unique ready-rune
+                #     domain — exhausting a rune produces 1 Energy that
+                #     persists for the rest of this turn.
+                #  2) Recycle options per unique rune domain in the pool:
+                #       - ``play:recycle_rune:<i>`` when an exhausted rune
+                #         of that domain exists (the already-tapped one is
+                #         recycled — no double Energy).
+                #       - ``play:exhaust_and_recycle_rune:<i>`` otherwise —
+                #         the leftmost ready rune of that domain is both
+                #         exhausted (+1 Energy) and recycled.
+                #     Either way the rune leaves the pool for the bottom
+                #     of the rune library and yields 1 domain Power.
+                #  3) ``play:play_unit:<i>`` for each Unit in hand whose
+                #     Energy cost is ≤ the player's current Energy pool.
+                #  4) ``play:end_turn``.
+                # Same-domain runes are functionally identical, so the menu
+                # is collapsed to one option per unique domain (pointing at
+                # the leftmost ready rune of that domain, or in the recycle
+                # case the leftmost exhausted rune when one exists).
+                options = []
+                seen_ready: set[str] = set()
+                for i, rune in enumerate(self.runes_for(active)):
+                    if rune.exhausted:
+                        continue
+                    if rune.domain in seen_ready:
+                        continue
+                    seen_ready.add(rune.domain)
+                    options.append(f"play:exhaust_rune:{i}")
+
+                # Recycle: one option per unique rune domain in the pool
+                # (ready or exhausted). Prefer the leftmost *exhausted* rune
+                # of that domain if any — recycling it costs no Energy
+                # (the rune's Energy was already produced when it was first
+                # exhausted). Otherwise the action exhausts + recycles a
+                # ready rune.
+                pool = self.runes_for(active)
+                exhausted_idx_by_domain: dict[str, int] = {}
+                ready_idx_by_domain: dict[str, int] = {}
+                for i, rune in enumerate(pool):
+                    if rune.exhausted:
+                        exhausted_idx_by_domain.setdefault(rune.domain, i)
+                    else:
+                        ready_idx_by_domain.setdefault(rune.domain, i)
+                # Stable order across emissions: walk the pool left-to-right
+                # and emit each domain once on first sighting.
+                seen_recycle: set[str] = set()
+                for rune in pool:
+                    if rune.domain in seen_recycle:
+                        continue
+                    seen_recycle.add(rune.domain)
+                    if rune.domain in exhausted_idx_by_domain:
+                        options.append(
+                            f"play:recycle_rune:{exhausted_idx_by_domain[rune.domain]}"
+                        )
+                    else:
+                        options.append(
+                            f"play:exhaust_and_recycle_rune:{ready_idx_by_domain[rune.domain]}"
+                        )
+
+                # Only Unit-type cards can be played via play_unit (see
+                # action_turn/builtins.py::_play_unit). Non-units stay in hand
+                # and are simply not offered as play options. Affordability is
+                # gated by BOTH the player's current Energy pool AND domain
+                # Power pool — the handler repeats both checks as last-line
+                # defense for clients that bypass the options list.
+                energy = self.player_energy(active)
+                options.extend(
+                    f"play:play_unit:{i}"
+                    for i, card in enumerate(active_hand or [])
+                    if card_type_of(card) == "Unit"
+                    and self.card_energy_cost(card) <= energy
+                    and self.can_afford_power_cost(active, card)
+                )
+
+                # Movement: each READY unit owned by the active player can
+                # move base ↔ a battlefield, as long as the destination
+                # isn't controlled by the opponent. Moving onto an
+                # uncontrolled battlefield opens a showdown (see
+                # PendingShowdown); moving onto our own controlled
+                # battlefield just relocates. BF ↔ BF is not allowed.
+                # Moving always exhausts the unit — see
+                # action_turn/builtins.py::_move_unit.
+                active_units = (
+                    self._game_state.player_1_units
+                    if active == RequiredTo.PLAYER_1
+                    else self._game_state.player_2_units
+                )
+                bf_controllers = {
+                    "battlefield_1": self._game_state.battlefield_1_controller,
+                    "battlefield_2": self._game_state.battlefield_2_controller,
+                }
+                for unit_idx, unit in enumerate(active_units):
+                    if unit.exhausted:
+                        continue
+                    if unit.location == "base":
+                        # Base → any BF not controlled by the opponent
+                        # (uncontrolled BFs are allowed; they trigger a
+                        # showdown when the move resolves).
+                        for dest in ("battlefield_1", "battlefield_2"):
+                            controller = bf_controllers[dest]
+                            if controller is None or controller == active:
+                                options.append(f"play:move_unit:{unit_idx}:{dest}")
+                    else:
+                        # Battlefield → base only. (BF ↔ BF rejected.)
+                        options.append(f"play:move_unit:{unit_idx}:base")
+
+                options.append("play:end_turn")
             return EngineOutput(
                 game_state=self.game_state,
-                required_action=_required_action(self._game_state.current_player, RequiredStep.ACTION_TURN),
+                player_1_options=options if active == RequiredTo.PLAYER_1 else [],
+                player_2_options=options if active == RequiredTo.PLAYER_2 else [],
+                required_action=_required_action(active, RequiredStep.ACTION_TURN),
             )
 
         return EngineOutput(
