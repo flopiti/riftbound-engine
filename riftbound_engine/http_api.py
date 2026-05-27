@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import threading
@@ -24,10 +25,102 @@ from .fake_fill import (
     update_config as update_fake_fill_config,
 )
 from .protocol import ApplyVerb, RequiredStep
+from .shortcuts import compute_play_intents, serialize_play_intent
 
-_engine_lock = threading.Lock()
+# Reentrant: several of the endpoint handlers acquire this lock and then call
+# helpers that internally re-acquire it (e.g. /branch handlers wrap
+# _serialize_branch -> get_snapshot, and get_snapshot does its own `with
+# _engine_lock`). A plain Lock would deadlock the whole worker thread; RLock
+# lets the same thread re-enter freely.
+_engine_lock = threading.RLock()
 _engine: GameEngine = GameEngine()
 _last_output: EngineOutput | None = None
+
+# Saved game states for the branch tree, parallel to `_branch_path`.
+# `_branch_states[i]` is a deep copy of the GameState produced AFTER the
+# action recorded in `_branch_path[i]` was applied. /branch/back restores
+# `_branch_states[len(new_path) - 1]` (or `_initial_state` when trimming
+# the path all the way back to empty) so the engine actually moves back
+# to that step's exact game state — same library shuffle, same hand, same
+# pending_play, etc. — without ever calling /reset.
+#
+# Why path-indexed instead of counter-indexed:
+#   The engine's `counter` field is incremented exactly once per game
+#   (during _finalize_setup_after_mulligan), NOT once per action. Keying
+#   saved states by counter therefore collapses every post-setup state
+#   onto the same slot — every /branch/forward overwrites the previous
+#   save, and /goto-by-counter restores whichever state was most recently
+#   written. This is the bug that made "go back to Play X unit and the
+#   Place option disappears" — backward navigation was silently restoring
+#   the deepest state instead of the intended step.
+#
+# Forking: when the user trims and then extends, the trailing states get
+# truncated alongside `_branch_path`, so the freshly-overwritten slot
+# matches the new fork. The visited set still remembers prefixes from
+# discarded branches for connector-line highlighting.
+_initial_state: GameState | None = None
+_branch_states: list[GameState] = []
+
+# ---------------------------------------------------------------------------
+# Branch-tree state (server-authoritative).
+#
+# The /branch UI is a "branch exploration tool" — the user clicks options to
+# advance the game, then can navigate backward to inspect earlier states or
+# fork into a different sub-tree. We keep ALL of that state here on the
+# server so:
+#   1. Reloading the browser preserves the exact tree position (the frontend
+#      simply re-polls /branch on mount and rehydrates from the response).
+#   2. Backward navigation actually moves the engine (via /goto). The Control
+#      board, which renders straight from the engine snapshot, follows along
+#      because both views read from the same underlying state.
+#
+# The path is a single linear sequence — when the user navigates back and
+# then picks a different forward option, the old future branch is discarded
+# (matches the "real branch tree" semantics the user picked). The visited
+# set still remembers every prefix that's been walked so the UI can paint
+# already-explored connector lines in purple.
+# ---------------------------------------------------------------------------
+
+# One step in the visible branch-tree path. Stores enough to (a) re-render
+# the node on the client and (b) rewind the engine via /goto to any earlier
+# step's counter. We keep the entry as a plain dict (not a dataclass) so it
+# JSON-roundtrips trivially — the client treats it as opaque.
+BranchStep = dict[str, Any]
+
+_branch_path: list[BranchStep] = []
+# Set of pathKey strings ("actor|action||actor|action||...") representing
+# every prefix the user has ever walked this session. Survives backward
+# navigation so the connector lines for previously-explored branches stay
+# highlighted even after the user trims back past them.
+_branch_visited: set[str] = set()
+# Monotonic counter — total forward clicks in this session, independent of
+# rewinds. Powers the "Visited N" header chip.
+_branch_nodes_visited: int = 0
+
+
+def _branch_path_key(steps: list[BranchStep]) -> str:
+    """Stable, comparable key for a path prefix. Matches the client-side
+    pathKey() format in BranchApp.tsx so the visited set stays mutually
+    intelligible between the two sides."""
+    return "||".join(f"{s.get('actor', '')}|{s.get('action', '')}" for s in steps)
+
+
+def _reset_branch_tree() -> None:
+    """Wipe the branch-tree state. Called whenever the engine itself is
+    reset (the path's saved counters would be stale references to a game
+    that no longer exists)."""
+    global _branch_path, _branch_visited, _branch_nodes_visited
+    _branch_path = []
+    _branch_visited = set()
+    _branch_nodes_visited = 0
+
+
+def _capture_state() -> GameState:
+    """Return a deep copy of the current engine state, isolated from future
+    engine mutations. The `_engine.game_state` property is already a partial
+    copy (re-creates lists, etc.) but Rune/PendingPlay/PendingPayment are
+    nested mutables on its result, so we deep-copy once more for safety."""
+    return copy.deepcopy(_engine.game_state)
 
 
 def _load_dotenv() -> None:
@@ -197,10 +290,15 @@ def _serialize_fake_fill(cfg: FakeFillConfig) -> dict[str, Any]:
 
 
 def reset_engine() -> EngineOutput:
-    global _engine, _last_output
+    global _engine, _last_output, _initial_state, _branch_states
     _engine = GameEngine()
     _last_output = _engine.start()
     _last_output = _auto_fake_fill(_engine, _last_output)
+    # Snapshot the post-fake-fill state. /branch/back uses this to restore
+    # the engine when the user trims the path all the way back to empty.
+    _initial_state = _capture_state()
+    _branch_states = []
+    _reset_branch_tree()
     return _last_output
 
 
@@ -265,6 +363,8 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
             {"card": u.card, "location": u.location, "exhausted": u.exhausted}
             for u in gs.player_2_units
         ],
+        "player_1_spells": [{"card": s.card} for s in gs.player_1_spells],
+        "player_2_spells": [{"card": s.card} for s in gs.player_2_spells],
         "pending_play": (
             None
             if gs.pending_play is None
@@ -320,10 +420,22 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
 
 def _serialize_output(out: EngineOutput) -> dict[str, Any]:
     ra = out.required_action
+    # Play intents = the tier-1 "play this card from hand" picker. One
+    # entry per playable hand card carrying the PRINTED cost and every
+    # valid rune-payment combo. The client renders single-card chips
+    # from these; single-combo intents auto-skip to the chain on click,
+    # multi-combo intents drop into the tier-2 disambiguation column.
+    # Returns [] for any player who isn't the active actor or whose
+    # state is mid-resolution (pending_play / pending_payment /
+    # showdown).
+    p1_intents = [serialize_play_intent(i) for i in compute_play_intents(_engine, RequiredTo.PLAYER_1)]
+    p2_intents = [serialize_play_intent(i) for i in compute_play_intents(_engine, RequiredTo.PLAYER_2)]
     return {
         "state": _serialize_state(out.game_state),
         "player_1_options": list(out.player_1_options),
         "player_2_options": list(out.player_2_options),
+        "player_1_intents": p1_intents,
+        "player_2_intents": p2_intents,
         "required_action": (
             None
             if ra is None
@@ -341,9 +453,96 @@ def get_snapshot() -> dict[str, Any]:
         return _serialize_output(_last_output)
 
 
+def _serialize_branch() -> dict[str, Any]:
+    """Bundle the live engine snapshot together with the branch-tree path /
+    visited set / nodes-visited counter. This is the single payload the
+    /branch GET endpoint returns — the client hydrates ALL of its UI state
+    from it on every poll, including initial mount after a page refresh.
+
+    The snapshot is computed via get_snapshot() so it includes the same
+    start() + fake-fill auto-advance the regular /state endpoint runs."""
+    return {
+        "path": [dict(step) for step in _branch_path],
+        "visited": sorted(_branch_visited),
+        "nodes_visited": _branch_nodes_visited,
+        "snapshot": get_snapshot(),
+    }
+
+
+def _restore_state(state: GameState) -> EngineOutput:
+    """Rebuild the engine on a deep copy of `state`. Used by /branch/back
+    to point the engine at an earlier path step's snapshot without ever
+    calling /reset (which would reshuffle the deck).
+
+    Deep-copying the source isolates our saved entry from any subsequent
+    engine mutations — if the user re-walks the same branch later we need
+    to be able to restore from the same entry again without it having
+    drifted along with the engine's continued play."""
+    global _engine, _last_output
+    _engine = GameEngine(game_state=copy.deepcopy(state))
+    # start() recomputes the EngineOutput's option list and required_action
+    # from the freshly-installed state. Idempotent for an already-started
+    # state — for mid-play snapshots (pending_play set) it returns the
+    # location-choice options, which is exactly what the user expects to
+    # see after stepping back to a play_unit node.
+    _last_output = _engine.start()
+    return _last_output
+
+
 class ActionBody(BaseModel):
     actor: str = Field(..., description="player_1, player_2, or both")
     action: str = Field(..., min_length=1)
+
+
+class BranchChainStep(BaseModel):
+    """One engine action in a multi-step "shortcut" chain. The /branch
+    endpoint expects shortcuts pre-expanded into the raw actions the engine
+    accepts — the server doesn't run the shortcut-planning logic itself."""
+
+    actor: str = Field(..., description="player_1, player_2, or both")
+    action: str = Field(..., min_length=1)
+
+
+class BranchForwardBody(BaseModel):
+    """Append one step to the branch-tree path.
+
+    Three flavours of forward-click are routed through this endpoint:
+
+    * Regular engine action — `chain` is empty (or one entry equal to
+      {actor, action}); the server applies {actor, action} and snapshots
+      the resulting GameState into `_branch_states[new_path_length - 1]`
+      so /branch/back can restore the engine to this exact point later.
+    * Shortcut / combo — `chain` carries the pre-planned sequence of rune
+      actions and the final play_unit/play_spell. The server applies them
+      in order; only ONE state is snapshotted (the final one).
+    * UI-only intent (`intent_only: True`) — no engine work; the step is
+      recorded and the snapshot is just the current state (unchanged).
+      Used by the two-tier shortcut picker between "I chose this card"
+      and "I picked a specific combo".
+    """
+
+    actor: str = Field(..., description="actor that owns the displayed option")
+    action: str = Field(..., min_length=1, description="raw or synthetic action string")
+    label: str = Field(..., description="human-readable label captured client-side")
+    intent_only: bool = Field(default=False, description="True for UI-only intent picks")
+    chain: list[BranchChainStep] = Field(
+        default_factory=list,
+        description="pre-expanded engine actions to apply in order; empty for plain {actor,action}",
+    )
+    # Opaque metadata passed through verbatim. The client uses `shortcut`
+    # and `intent` to keep its rendering rich (icons, costs, disambiguation
+    # combos). The server treats them as a black box.
+    shortcut: dict[str, Any] | None = None
+    intent: dict[str, Any] | None = None
+
+
+class BranchBackBody(BaseModel):
+    """Trim the tail of the branch path and roll the engine back to the new
+    tip. `steps=1` undoes the most recent click; `steps=len(path)` walks
+    all the way back to the start screen (path becomes empty, engine sits
+    at the initial post-fake-fill counter)."""
+
+    steps: int = Field(..., gt=0, description="number of path entries to remove")
 
 
 class FakeFillUpdateBody(BaseModel):
@@ -489,7 +688,142 @@ def create_app() -> FastAPI:
                 _last_output = _auto_fake_fill(_engine, _last_output)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
+            # NOTE: /action is the Control board's path; it does NOT touch the
+            # branch-tree state because actions taken there are outside the
+            # exploration model. If you need a branch-tree-aware action use
+            # /branch/forward instead.
             return _serialize_output(_last_output)
+
+    # ---------------- Branch-tree (server-authoritative) ----------------
+
+    @app.get("/branch")
+    def branch_get() -> dict[str, Any]:
+        """Return the current branch-tree path + visited set + nodes-visited
+        counter alongside the live engine snapshot. The frontend polls this
+        instead of caching path state locally, which is what lets a page
+        refresh restore the exact same tree position."""
+        with _engine_lock:
+            return _serialize_branch()
+
+    @app.post("/branch/forward")
+    def branch_forward(body: BranchForwardBody) -> dict[str, Any]:
+        """Append one step to the branch-tree path.
+
+        Forking is handled implicitly: by the time the client calls this
+        endpoint it has already called /branch/back to trim the path back
+        to the fork point, so /branch/forward only ever extends the live
+        tail. The discarded future branch is wiped from `_branch_path`
+        AND from `_branch_states`, but the visited set keeps every
+        prefix the user has ever walked so the connector lines for
+        already-explored options keep their "visited" highlight.
+        """
+        global _branch_path, _branch_states, _branch_visited, _branch_nodes_visited, _last_output
+        with _engine_lock:
+            if not body.intent_only:
+                # Validate actor up-front so a bad client payload doesn't
+                # half-apply a chain. Per-step actors validated inside the
+                # loop the same way.
+                try:
+                    main_actor = RequiredTo(body.actor)
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=400, detail=f"invalid actor: {body.actor}"
+                    ) from e
+
+                if body.chain:
+                    steps_to_run: list[tuple[RequiredTo, str]] = []
+                    for s in body.chain:
+                        try:
+                            steps_to_run.append((RequiredTo(s.actor), s.action))
+                        except ValueError as e:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"invalid actor in chain: {s.actor}",
+                            ) from e
+                else:
+                    steps_to_run = [(main_actor, body.action)]
+
+                try:
+                    for actor, action in steps_to_run:
+                        _last_output = _engine.apply_action(action=action, actor=actor)
+                    _last_output = _auto_fake_fill(_engine, _last_output)
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e)) from e
+
+            # Snapshot AFTER the action(s) (or AFTER no-op for intent_only).
+            # _branch_states is parallel to _branch_path, so the new state
+            # gets appended right alongside the step we're about to record.
+            saved = _capture_state()
+
+            step: BranchStep = {
+                "actor": body.actor,
+                "action": body.action,
+                "label": body.label,
+                "intent_only": body.intent_only,
+                "shortcut": body.shortcut,
+                "intent": body.intent,
+            }
+            _branch_path = [*_branch_path, step]
+            _branch_states = [*_branch_states, saved]
+
+            # Visited set: mark every prefix of the new path so its
+            # connector line stays highlighted even if the user later
+            # forks past this point and discards the suffix.
+            for i in range(1, len(_branch_path) + 1):
+                _branch_visited.add(_branch_path_key(_branch_path[:i]))
+
+            _branch_nodes_visited += 1
+            return _serialize_branch()
+
+    @app.post("/branch/back")
+    def branch_back(body: BranchBackBody) -> dict[str, Any]:
+        """Trim the tail of the path and restore the engine to the new
+        tip's saved state. `steps` must be in [1, len(path)]; trimming
+        all the way to `[]` rolls the engine back to the initial state
+        captured at reset_engine time (post-fake-fill).
+
+        This is what makes the Control board follow when the user
+        navigates backward in the branch tree: both views read from the
+        live engine snapshot, and rebuilding the engine on the saved
+        GameState means the snapshot the next poll returns reflects the
+        earlier game state — same library shuffle, same hand, same
+        pending_play, no deck reshuffle."""
+        global _branch_path, _branch_states
+        with _engine_lock:
+            if body.steps > len(_branch_path):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"cannot rewind {body.steps} steps from a path of length "
+                        f"{len(_branch_path)}"
+                    ),
+                )
+
+            new_len = len(_branch_path) - body.steps
+            # Target state: the snapshot taken after the (new) tip's
+            # action, or the starting state when we trim back to empty.
+            if new_len > 0:
+                target_state = _branch_states[new_len - 1]
+            elif _initial_state is not None:
+                target_state = _initial_state
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail="no saved starting state to rewind to; please reset the engine",
+                )
+
+            _restore_state(target_state)
+            _branch_path = _branch_path[:new_len]
+            _branch_states = _branch_states[:new_len]
+            return _serialize_branch()
+
+    @app.post("/branch/reset")
+    def branch_reset_endpoint() -> dict[str, Any]:
+        """Clear the path + visited set WITHOUT touching the engine. Use
+        /reset for a full game restart that also reshuffles the deck."""
+        with _engine_lock:
+            _reset_branch_tree()
+            return _serialize_branch()
 
     return app
 

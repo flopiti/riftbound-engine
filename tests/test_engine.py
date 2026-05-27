@@ -314,33 +314,54 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(len(ready.game_state.player_1_hand or []), 5)
 
         # Give the player a single Fury rune pool + max Energy so every Unit
-        # is affordable. This keeps the assertion focused on play_unit/
-        # exhaust_rune/end_turn surfacing — the Energy cost gate is covered
-        # separately in PlayUnitEnergyCostTests.
+        # is affordable. This keeps the assertion focused on
+        # play_unit/play_spell/end_turn surfacing — the Energy cost gate is
+        # covered separately in PlayUnitEnergyCostTests.
         _flood_runes(engine, RequiredTo.PLAYER_1)
         # Bank an absurd amount of Energy AND Power across every domain
-        # without exhausting any runes so:
-        #   * every Unit in hand clears both the Energy and Power gates,
-        #   * a ready Fury is still surfaced as exhaust_rune:0.
+        # without exhausting any runes so every Unit in hand clears both the
+        # Energy and Power gates.
         _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
         ready = engine.start()
 
-        # Active player's options now lead with exhaust_rune (one per unique
-        # ready-rune domain — Fury here), then a recycle option per unique
-        # rune domain in the pool (exhaust_and_recycle_rune when no
-        # exhausted rune of that domain exists), then play_unit for
-        # affordable Unit cards, then end_turn. Non-units (spells, gear,
-        # etc.) are not offered.
+        # The engine no longer surfaces rune-resource actions
+        # (exhaust_rune / recycle_rune / exhaust_and_recycle_rune) as
+        # standalone options — clients drive payments via the
+        # shortcuts.ts plan and just receive the final play_unit /
+        # play_spell call back here. So the option list is just play_unit
+        # for each affordable unique Unit, play_spell for each affordable
+        # unique Spell, then end_turn. Duplicate card names in hand
+        # collapse to the leftmost occurrence since only one action can
+        # be taken at a time.
         hand = ready.game_state.player_1_hand or []
-        expected = [
-            "play:exhaust_rune:0",
-            "play:exhaust_and_recycle_rune:0",
-        ] + [
-            f"play:play_unit:{i}"
-            for i, card in enumerate(hand)
-            if card_type_of(card) == "Unit"
-        ] + ["play:end_turn"]
+        seen: set[str] = set()
+        unit_opts: list[str] = []
+        for i, card in enumerate(hand):
+            if card in seen:
+                continue
+            if card_type_of(card) != "Unit":
+                continue
+            seen.add(card)
+            unit_opts.append(f"play:play_unit:{i}")
+        spell_opts: list[str] = []
+        for i, card in enumerate(hand):
+            if card in seen:
+                continue
+            if card_type_of(card) != "Spell":
+                continue
+            seen.add(card)
+            spell_opts.append(f"play:play_spell:{i}")
+        expected = unit_opts + spell_opts + ["play:end_turn"]
         self.assertEqual(ready.player_1_options, expected)
+        # Sanity: none of the rune-resource verbs are surfaced anywhere
+        # in the option list any more.
+        for opt in ready.player_1_options:
+            self.assertFalse(
+                opt.startswith("play:exhaust_rune:")
+                or opt.startswith("play:recycle_rune:")
+                or opt.startswith("play:exhaust_and_recycle_rune:"),
+                f"unexpected rune option surfaced: {opt}",
+            )
         # Inactive player has no options during the active player's action turn.
         self.assertEqual(ready.player_2_options, [])
 
@@ -436,19 +457,29 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(settled.game_state.player_1_units[0].card, unit_card)
         self.assertEqual(settled.game_state.player_1_units[0].location, "base")
 
-        # Options now reflect the unique ready-rune domain, the
-        # corresponding recycle option, remaining Unit cards (all still
-        # affordable thanks to the Energy headroom), and end_turn.
-        # _flood_runes seeded 20 Fury, none exhausted, so one exhaust and
-        # one exhaust_and_recycle option appear.
-        expected = [
-            "play:exhaust_rune:0",
-            "play:exhaust_and_recycle_rune:0",
-        ] + [
-            f"play:play_unit:{i}"
-            for i, card in enumerate(hand_after_pop)
-            if card_type_of(card) == "Unit"
-        ] + ["play:end_turn"]
+        # Options now list the remaining unique Unit cards (all still
+        # affordable thanks to the Energy headroom), the remaining unique
+        # Spell cards, and end_turn. Rune-resource actions are no longer
+        # surfaced — clients drive payment through the shortcuts plan.
+        # Duplicate cards in hand collapse to the leftmost occurrence.
+        seen: set[str] = set()
+        unit_opts: list[str] = []
+        for i, card in enumerate(hand_after_pop):
+            if card in seen:
+                continue
+            if card_type_of(card) != "Unit":
+                continue
+            seen.add(card)
+            unit_opts.append(f"play:play_unit:{i}")
+        spell_opts: list[str] = []
+        for i, card in enumerate(hand_after_pop):
+            if card in seen:
+                continue
+            if card_type_of(card) != "Spell":
+                continue
+            seen.add(card)
+            spell_opts.append(f"play:play_spell:{i}")
+        expected = unit_opts + spell_opts + ["play:end_turn"]
         self.assertEqual(settled.player_1_options, expected)
 
     def test_play_unit_rejects_bad_indices_and_inactive_player(self) -> None:
@@ -525,6 +556,90 @@ class GameEngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine.apply_action(
                 action="play:choose_location:battlefield_1", actor=RequiredTo.PLAYER_1
+            )
+
+    def _first_spell_index(self, hand: list[str]) -> int:
+        """Pick the first Spell-type card in the hand, or skip the test if there are none."""
+        for i, card in enumerate(hand):
+            if card_type_of(card) == "Spell":
+                return i
+        raise unittest.SkipTest("dealt hand contains no Spell-type cards")
+
+    def test_play_spell_moves_card_from_hand_to_spells_and_deducts_cost(self) -> None:
+        """play_spell is the Spell counterpart to play_unit: same Energy/Power
+        cost gates, but the card lands in player_X_spells with no
+        choose_location step in between."""
+        engine, ready = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        ready = engine.start()
+        hand_before = list(ready.game_state.player_1_hand or [])
+        spell_idx = self._first_spell_index(hand_before)
+        spell_card = hand_before[spell_idx]
+
+        energy_before = engine.player_energy(RequiredTo.PLAYER_1)
+        energy_cost = engine.card_energy_cost(spell_card)
+
+        out = engine.apply_action(
+            action=f"play:play_spell:{spell_idx}", actor=RequiredTo.PLAYER_1
+        )
+        gs = out.game_state
+        # Hand had the card removed at spell_idx.
+        expected_hand = hand_before[:spell_idx] + hand_before[spell_idx + 1 :]
+        self.assertEqual(gs.player_1_hand, expected_hand)
+        # Card landed in player_1_spells.
+        self.assertEqual(len(gs.player_1_spells), 1)
+        self.assertEqual(gs.player_1_spells[0].card, spell_card)
+        # No pending state — spells skip choose_location.
+        self.assertIsNone(gs.pending_play)
+        # Energy was deducted up front.
+        self.assertEqual(gs.player_1_energy, energy_before - energy_cost)
+        # play_spell options appear in subsequent action-turn output for the
+        # remaining affordable Spell cards. Duplicate spell names collapse
+        # to one option pointing at the leftmost copy.
+        seen_spells: set[str] = set()
+        affordable_spells: list[str] = []
+        for i, card in enumerate(expected_hand):
+            if card in seen_spells:
+                continue
+            if card_type_of(card) != "Spell":
+                continue
+            if engine.card_energy_cost(card) > engine.player_energy(RequiredTo.PLAYER_1):
+                continue
+            if not engine.can_afford_power_cost(RequiredTo.PLAYER_1, card):
+                continue
+            seen_spells.add(card)
+            affordable_spells.append(f"play:play_spell:{i}")
+        for opt in affordable_spells:
+            self.assertIn(opt, out.player_1_options)
+
+    def test_play_spell_rejects_non_spell_cards_and_bad_indices(self) -> None:
+        engine, ready = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        hand = ready.game_state.player_1_hand or []
+
+        # Out-of-range index.
+        with self.assertRaises(ValueError):
+            engine.apply_action(action="play:play_spell:99", actor=RequiredTo.PLAYER_1)
+
+        # Non-Spell card (e.g. a Unit) rejected.
+        non_spell_idx = next(
+            (i for i, card in enumerate(hand) if card_type_of(card) != "Spell"),
+            None,
+        )
+        if non_spell_idx is None:
+            self.skipTest("dealt hand contains no non-Spell cards to test against")
+        with self.assertRaises(ValueError):
+            engine.apply_action(
+                action=f"play:play_spell:{non_spell_idx}", actor=RequiredTo.PLAYER_1
+            )
+
+        # Inactive player rejected.
+        spell_idx = self._first_spell_index(hand)
+        with self.assertRaises(ValueError):
+            engine.apply_action(
+                action=f"play:play_spell:{spell_idx}", actor=RequiredTo.PLAYER_2
             )
 
     def test_channel_rune_count_follows_first_second_then_two_schedule(self) -> None:
@@ -606,8 +721,9 @@ class PlayUnitEnergyCostTests(unittest.TestCase):
         # Force exactly 1 ready rune and pre-bank 1 Energy → any cost-2+
         # unit drops off the menu. No Power is banked, so units that also
         # require Power also drop off (covered separately in
-        # PlayUnitPowerCostTests). The single ready rune still surfaces as
-        # an exhaust_rune option.
+        # PlayUnitPowerCostTests). Rune-resource actions are no longer
+        # surfaced as options; the engine only emits the final play_*
+        # verbs and lets the shortcut plan handle payment.
         pool = engine.runes_for(RequiredTo.PLAYER_1)
         pool.clear()
         pool.append(Rune(domain="Fury"))
@@ -615,16 +731,36 @@ class PlayUnitEnergyCostTests(unittest.TestCase):
         ready = engine.start()
 
         hand = ready.game_state.player_1_hand or []
-        expected = [
-            "play:exhaust_rune:0",
-            "play:exhaust_and_recycle_rune:0",
-        ] + [
-            f"play:play_unit:{i}"
-            for i, card in enumerate(hand)
-            if card_type_of(card) == "Unit"
-            and (card_energy_of(card) or 0) <= 1
-            and (card_power_of(card) or 0) <= 0
-        ] + ["play:end_turn"]
+        # The same affordability gate applies to Spells — only ones whose
+        # Energy cost <= 1 and Power cost == 0 (since we banked no Power)
+        # are offered. Identical cards in hand collapse to one option at
+        # the leftmost index.
+        seen: set[str] = set()
+        unit_opts: list[str] = []
+        for i, card in enumerate(hand):
+            if card in seen:
+                continue
+            if card_type_of(card) != "Unit":
+                continue
+            if (card_energy_of(card) or 0) > 1:
+                continue
+            if (card_power_of(card) or 0) > 0:
+                continue
+            seen.add(card)
+            unit_opts.append(f"play:play_unit:{i}")
+        spell_opts: list[str] = []
+        for i, card in enumerate(hand):
+            if card in seen:
+                continue
+            if card_type_of(card) != "Spell":
+                continue
+            if (card_energy_of(card) or 0) > 1:
+                continue
+            if (card_power_of(card) or 0) > 0:
+                continue
+            seen.add(card)
+            spell_opts.append(f"play:play_spell:{i}")
+        expected = unit_opts + spell_opts + ["play:end_turn"]
         self.assertEqual(ready.player_1_options, expected)
 
     def test_play_unit_rejects_card_more_expensive_than_available_energy(self) -> None:
@@ -728,12 +864,12 @@ class PlayUnitEnergyCostTests(unittest.TestCase):
         for rune in gs.player_1_runes:
             self.assertFalse(rune.exhausted)
 
-    def test_exhaust_rune_options_collapse_to_one_per_domain(self) -> None:
+    def test_exhaust_rune_options_are_no_longer_surfaced(self) -> None:
+        # Rune-resource actions are still callable via the action endpoint
+        # (the shortcut plan composes them client-side), but the engine
+        # no longer offers them as standalone options. This test pins the
+        # new behavior so we don't regress and start surfacing them again.
         engine, ready = self._drive_to_action_turn()
-        # Hand-craft a mixed pool: 3 Fury (indices 0,1,2), 2 Body (3,4),
-        # 1 Mind (5). Player has 6 ready runes but 3 distinct domains, so
-        # the exhaust_rune option list should be 3 entries pointing at
-        # indices 0, 3, 5.
         pool = engine.runes_for(RequiredTo.PLAYER_1)
         pool.clear()
         pool.extend(
@@ -747,30 +883,17 @@ class PlayUnitEnergyCostTests(unittest.TestCase):
             ]
         )
         ready = engine.start()
-        exhaust_opts = [
-            opt for opt in ready.player_1_options if opt.startswith("play:exhaust_rune:")
+        rune_opts = [
+            opt for opt in ready.player_1_options
+            if opt.startswith("play:exhaust_rune:")
+            or opt.startswith("play:recycle_rune:")
+            or opt.startswith("play:exhaust_and_recycle_rune:")
         ]
-        self.assertEqual(
-            exhaust_opts,
-            [
-                "play:exhaust_rune:0",  # leftmost Fury
-                "play:exhaust_rune:3",  # leftmost Body
-                "play:exhaust_rune:5",  # leftmost Mind
-            ],
-        )
-        # Exhaust the leftmost Fury — the next emission should still offer
-        # Fury (pointing at index 1 now), Body (3), and Mind (5).
-        nxt = engine.apply_action(action="play:exhaust_rune:0", actor=RequiredTo.PLAYER_1)
-        next_exhaust = [
-            opt for opt in nxt.player_1_options if opt.startswith("play:exhaust_rune:")
-        ]
-        self.assertIn("play:exhaust_rune:1", next_exhaust)
-        # And no duplicate-domain options.
-        domains_seen = set()
-        for opt in next_exhaust:
-            i = int(opt.rsplit(":", 1)[1])
-            domains_seen.add(engine.runes_for(RequiredTo.PLAYER_1)[i].domain)
-        self.assertEqual(len(domains_seen), len(next_exhaust))
+        self.assertEqual(rune_opts, [])
+        # The action handler still works when called directly — the engine
+        # only stopped *advertising* it, not *implementing* it.
+        engine.apply_action(action="play:exhaust_rune:0", actor=RequiredTo.PLAYER_1)
+        self.assertTrue(engine.runes_for(RequiredTo.PLAYER_1)[0].exhausted)
 
     def test_exhaust_rune_blocked_while_play_is_pending(self) -> None:
         engine, ready = self._drive_to_action_turn()
@@ -817,15 +940,11 @@ class PlayUnitEnergyCostTests(unittest.TestCase):
         self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), 0)
         self.assertEqual(engine.player_energy(RequiredTo.PLAYER_2), 0)
 
-    def test_recycle_options_per_unique_rune_domain(self) -> None:
+    def test_recycle_options_are_no_longer_surfaced(self) -> None:
+        # As with exhaust_rune, recycle_rune and exhaust_and_recycle_rune
+        # are no longer offered as standalone options — the shortcuts
+        # plan emits them as part of a payment chain instead.
         engine, _ = self._drive_to_action_turn()
-        # Mixed pool: 2 Fury (0,1) both ready, 1 Body (2) ready, 1 Mind (3)
-        # already exhausted. Expect:
-        #   * exhaust_rune options for the two ready domains (Fury, Body)
-        #   * recycle options:
-        #       - Fury: exhaust_and_recycle (no exhausted Fury) → leftmost = 0
-        #       - Body: exhaust_and_recycle (no exhausted Body) → leftmost = 2
-        #       - Mind: recycle (the already-exhausted Mind at 3)
         pool = engine.runes_for(RequiredTo.PLAYER_1)
         pool.clear()
         pool.extend(
@@ -839,16 +958,10 @@ class PlayUnitEnergyCostTests(unittest.TestCase):
         ready = engine.start()
         recycle_opts = [
             opt for opt in ready.player_1_options
-            if opt.startswith("play:recycle_rune:") or opt.startswith("play:exhaust_and_recycle_rune:")
+            if opt.startswith("play:recycle_rune:")
+            or opt.startswith("play:exhaust_and_recycle_rune:")
         ]
-        self.assertEqual(
-            recycle_opts,
-            [
-                "play:exhaust_and_recycle_rune:0",  # leftmost ready Fury
-                "play:exhaust_and_recycle_rune:2",  # leftmost ready Body
-                "play:recycle_rune:3",              # the exhausted Mind
-            ],
-        )
+        self.assertEqual(recycle_opts, [])
 
     def test_recycle_exhausted_rune_grants_power_no_energy(self) -> None:
         engine, _ = self._drive_to_action_turn()

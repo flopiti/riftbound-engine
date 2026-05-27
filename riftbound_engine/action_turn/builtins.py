@@ -107,6 +107,98 @@ def _play_unit(ctx: ActionTurnContext) -> None:
     gs.pending_play = PendingPlay(actor=ctx.actor, card=card)
 
 
+@register_turn_action("play_spell")
+def _play_spell(ctx: ActionTurnContext) -> None:
+    """Play a card whose CSV ``Card Type`` is ``Spell``.
+
+    Payload is the 0-based hand index. The card is removed from hand and
+    appended to ``player_X_spells``. Unlike ``play_unit``, spells don't
+    go to a location — there's no ``pending_play`` / ``choose_location``
+    follow-up. The Energy and domain Power costs are deducted up front
+    using the same gates as units (see ``_play_unit``).
+
+    The engine currently has no resolution / on-cast effect for spells:
+    the card just sits in ``player_X_spells`` for the rest of the match
+    so the UI can render it (the surface displays it on the right side
+    of the screen, vertically centered and slightly enlarged).
+    """
+    from ..csv_data import card_type_of
+    from ..engine import PlayedSpell
+    from ..engine import RequiredTo as RT
+
+    payload = ctx.payload.strip()
+    if not payload:
+        raise ValueError("play:play_spell requires a hand index (e.g. play:play_spell:0)")
+    try:
+        index = int(payload)
+    except ValueError as e:
+        raise ValueError(f"play:play_spell index must be an integer, got {payload!r}") from e
+
+    gs = ctx.engine._game_state
+    if gs.pending_play is not None:
+        raise ValueError(
+            "cannot play a spell while a unit is waiting for a location — "
+            "choose the location first"
+        )
+    if gs.pending_showdown is not None:
+        raise ValueError(
+            "cannot play spells while a showdown is in progress — "
+            "resolve the showdown first"
+        )
+
+    if ctx.actor == RT.PLAYER_1:
+        hand = gs.player_1_hand
+        spells = gs.player_1_spells
+    elif ctx.actor == RT.PLAYER_2:
+        hand = gs.player_2_hand
+        spells = gs.player_2_spells
+    else:
+        raise ValueError("play_spell requires player_1 or player_2")
+
+    if hand is None:
+        raise ValueError("hand is not initialized")
+    if index < 0 or index >= len(hand):
+        raise ValueError(f"play_spell index out of range: {index} (hand size {len(hand)})")
+
+    # Peek the card before mutating state — if it's not a Spell, reject without
+    # disturbing the hand.
+    card = hand[index]
+    card_type = card_type_of(card)
+    if card_type != "Spell":
+        raise ValueError(
+            f"'{card}' cannot be played as a spell "
+            f"(CSV Card Type: {card_type or 'unknown'}; only 'Spell' is allowed)"
+        )
+
+    energy_cost = ctx.engine.card_energy_cost(card)
+    energy = ctx.engine.player_energy(ctx.actor)
+    if energy_cost > energy:
+        raise ValueError(
+            f"cannot play '{card}': costs {energy_cost} Energy but only {energy} available"
+            f" — exhaust runes first to produce Energy"
+        )
+
+    power_cost = ctx.engine.card_power_cost(card)
+    if power_cost > 0:
+        if not ctx.engine.can_afford_power_cost(ctx.actor, card):
+            domains = ctx.engine.card_domains(card)
+            domain_label = " / ".join(domains) if domains else "<no domain>"
+            pool = ctx.engine.player_power(ctx.actor)
+            available = sum(pool.get(d, 0) for d in domains)
+            raise ValueError(
+                f"cannot play '{card}': costs {power_cost} {domain_label} Power "
+                f"but only {available} available — recycle runes first to produce Power"
+            )
+
+    # Deduct both costs up front, then commit the card to the spell stack.
+    if energy_cost > 0:
+        ctx.engine.add_energy(ctx.actor, -energy_cost)
+    if power_cost > 0:
+        ctx.engine._deduct_power_cost(ctx.actor, card)
+    hand.pop(index)
+    spells.append(PlayedSpell(card=card))
+
+
 @register_turn_action("choose_location")
 def _choose_location(ctx: ActionTurnContext) -> None:
     """Commit a pending play to a location (base, battlefield_1, or battlefield_2).

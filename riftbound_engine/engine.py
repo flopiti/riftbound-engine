@@ -115,6 +115,19 @@ class PlayedUnit:
 
 
 @dataclass
+class PlayedSpell:
+    """A Spell-type card that has been played by paying its Energy/Power cost.
+
+    Unlike Units, Spells don't go to a location — they just go to the
+    player's spell stack. The UI renders them off to the right side of the
+    screen. The engine currently has no resolution/effect step for spells:
+    the card simply sits in ``player_X_spells`` for the rest of the match.
+    """
+
+    card: str
+
+
+@dataclass
 class PendingPlay:
     """A play that has been started but is waiting for the active player to pick a location.
 
@@ -182,6 +195,11 @@ class GameState:
     #: Cards played as units this match, in play order, each tagged with its location.
     player_1_units: list[PlayedUnit] = field(default_factory=list)
     player_2_units: list[PlayedUnit] = field(default_factory=list)
+    #: Cards played as spells this match, in play order. Spells have no
+    #: location — the UI renders them on the right side of the screen.
+    #: The engine doesn't resolve spell effects yet; the card just sits here.
+    player_1_spells: list[PlayedSpell] = field(default_factory=list)
+    player_2_spells: list[PlayedSpell] = field(default_factory=list)
     #: Set while a `play:play_unit:*` is waiting for `play:choose_location:*`.
     pending_play: PendingPlay | None = None
     #: Set after a play has been committed to a location but the active player
@@ -322,6 +340,12 @@ class GameEngine:
             player_2_units=[
                 PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted)
                 for u in self._game_state.player_2_units
+            ],
+            player_1_spells=[
+                PlayedSpell(card=s.card) for s in self._game_state.player_1_spells
+            ],
+            player_2_spells=[
+                PlayedSpell(card=s.card) for s in self._game_state.player_2_spells
             ],
             pending_play=(
                 None
@@ -945,65 +969,32 @@ class GameEngine:
                     if active == RequiredTo.PLAYER_1
                     else self._game_state.player_2_hand
                 )
-                # New order:
-                #  1) ``play:exhaust_rune:<i>`` per unique ready-rune
-                #     domain — exhausting a rune produces 1 Energy that
-                #     persists for the rest of this turn.
-                #  2) Recycle options per unique rune domain in the pool:
-                #       - ``play:recycle_rune:<i>`` when an exhausted rune
-                #         of that domain exists (the already-tapped one is
-                #         recycled — no double Energy).
-                #       - ``play:exhaust_and_recycle_rune:<i>`` otherwise —
-                #         the leftmost ready rune of that domain is both
-                #         exhausted (+1 Energy) and recycled.
-                #     Either way the rune leaves the pool for the bottom
-                #     of the rune library and yields 1 domain Power.
-                #  3) ``play:play_unit:<i>`` for each Unit in hand whose
-                #     Energy cost is ≤ the player's current Energy pool.
+                # Option order:
+                #  1) ``play:play_unit:<i>`` for each Unit in hand whose
+                #     Energy and domain-Power costs are ≤ the player's
+                #     current pools.
+                #  2) ``play:play_spell:<i>`` for each Spell in hand under
+                #     the same cost gates.
+                #  3) ``play:move_unit:<i>:<dest>`` for movement (below).
                 #  4) ``play:end_turn``.
-                # Same-domain runes are functionally identical, so the menu
-                # is collapsed to one option per unique domain (pointing at
-                # the leftmost ready rune of that domain, or in the recycle
-                # case the leftmost exhausted rune when one exists).
+                #
+                # Standalone rune actions (``play:exhaust_rune:*``,
+                # ``play:recycle_rune:*``, ``play:exhaust_and_recycle_rune:*``)
+                # are intentionally NOT surfaced here — they only make
+                # sense as the rune-payment part of playing a costed card,
+                # so the snapshot's `player_X_intents` field carries
+                # complete payment plans (computed server-side in
+                # shortcuts.py) and the branch view's two-tier picker
+                # turns one card chip into the right chain of rune
+                # actions. The underlying action handlers stay registered
+                # so /branch/forward can apply them as parts of a chain.
+                #
+                # Duplicate hand entries (same card name at multiple indices)
+                # collapse to a single option pointing at the leftmost copy:
+                # only one action can be taken at a time, so emitting
+                # ``play:play_unit:0`` and ``play:play_unit:3`` for the same
+                # card is noise.
                 options = []
-                seen_ready: set[str] = set()
-                for i, rune in enumerate(self.runes_for(active)):
-                    if rune.exhausted:
-                        continue
-                    if rune.domain in seen_ready:
-                        continue
-                    seen_ready.add(rune.domain)
-                    options.append(f"play:exhaust_rune:{i}")
-
-                # Recycle: one option per unique rune domain in the pool
-                # (ready or exhausted). Prefer the leftmost *exhausted* rune
-                # of that domain if any — recycling it costs no Energy
-                # (the rune's Energy was already produced when it was first
-                # exhausted). Otherwise the action exhausts + recycles a
-                # ready rune.
-                pool = self.runes_for(active)
-                exhausted_idx_by_domain: dict[str, int] = {}
-                ready_idx_by_domain: dict[str, int] = {}
-                for i, rune in enumerate(pool):
-                    if rune.exhausted:
-                        exhausted_idx_by_domain.setdefault(rune.domain, i)
-                    else:
-                        ready_idx_by_domain.setdefault(rune.domain, i)
-                # Stable order across emissions: walk the pool left-to-right
-                # and emit each domain once on first sighting.
-                seen_recycle: set[str] = set()
-                for rune in pool:
-                    if rune.domain in seen_recycle:
-                        continue
-                    seen_recycle.add(rune.domain)
-                    if rune.domain in exhausted_idx_by_domain:
-                        options.append(
-                            f"play:recycle_rune:{exhausted_idx_by_domain[rune.domain]}"
-                        )
-                    else:
-                        options.append(
-                            f"play:exhaust_and_recycle_rune:{ready_idx_by_domain[rune.domain]}"
-                        )
 
                 # Only Unit-type cards can be played via play_unit (see
                 # action_turn/builtins.py::_play_unit). Non-units stay in hand
@@ -1012,13 +1003,34 @@ class GameEngine:
                 # Power pool — the handler repeats both checks as last-line
                 # defense for clients that bypass the options list.
                 energy = self.player_energy(active)
-                options.extend(
-                    f"play:play_unit:{i}"
-                    for i, card in enumerate(active_hand or [])
-                    if card_type_of(card) == "Unit"
-                    and self.card_energy_cost(card) <= energy
-                    and self.can_afford_power_cost(active, card)
-                )
+                seen_play_card: set[str] = set()
+                for i, card in enumerate(active_hand or []):
+                    if card in seen_play_card:
+                        continue
+                    if card_type_of(card) != "Unit":
+                        continue
+                    if self.card_energy_cost(card) > energy:
+                        continue
+                    if not self.can_afford_power_cost(active, card):
+                        continue
+                    seen_play_card.add(card)
+                    options.append(f"play:play_unit:{i}")
+
+                # Spells are gated by the same Energy + domain Power cost
+                # gates as units. Unlike units they don't go to a location;
+                # the handler places them directly into ``player_X_spells``.
+                # See action_turn/builtins.py::_play_spell.
+                for i, card in enumerate(active_hand or []):
+                    if card in seen_play_card:
+                        continue
+                    if card_type_of(card) != "Spell":
+                        continue
+                    if self.card_energy_cost(card) > energy:
+                        continue
+                    if not self.can_afford_power_cost(active, card):
+                        continue
+                    seen_play_card.add(card)
+                    options.append(f"play:play_spell:{i}")
 
                 # Movement: each READY unit owned by the active player can
                 # move base ↔ a battlefield, as long as the destination

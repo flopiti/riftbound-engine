@@ -3,6 +3,53 @@
 A running list of Riftbound rules the engine actually enforces (or fakes well
 enough to drive the UI). Add new entries to the top of the list as they ship.
 
+## 0. Playing a spell
+
+Spells are the second card type the engine can play, alongside Units.
+Mechanically the costs and the affordability gate are identical to a Unit
+play; the difference is that a Spell never picks a location.
+
+### Wire format
+
+- `play:play_spell:<hand_index>` — 0-based index into the active player's
+  hand. Only cards whose CSV `Card Type` is `Spell` may be played this way
+  (non-Spell cards raise from the handler, mirroring the `play_unit` guard).
+
+### Cost gate
+
+Same as `play_unit`:
+
+- `card Energy ≤ player Energy pool`, and
+- `card Power ≤ available domain Power` (matched against the card's CSV
+  `Domain`(s)).
+
+Both costs are **deducted up front** the moment the play resolves. There is
+no `pending_play` / `choose_location` follow-up — the card moves straight
+from `hand` into `player_X_spells`.
+
+### State
+
+- `GameState.player_1_spells` / `player_2_spells` — lists of `PlayedSpell`
+  in cast order. Persisted across turns (like units; no resolution step yet).
+- Serialized to the wire as `player_1_spells` / `player_2_spells`, each
+  entry shaped `{"card": <name>}`.
+
+### Options
+
+Inside the action turn (no `pending_play`, no `pending_showdown`), the
+options list emits a `play:play_spell:<i>` per Spell-typed hand card whose
+Energy and domain Power costs the active player can already pay. These
+appear just after the `play:play_unit:*` options.
+
+### Surface
+
+The frontend (`riftbound/src/components/play/SpellsOverlay.tsx`) renders
+cast spells anchored to the right edge of the play surface, vertically
+centered, slightly enlarged compared to a hand card. Player 2's stack
+grows downward from the top half, Player 1's grows upward from the bottom
+half. Newer casts overlap older ones; the engine does not yet resolve or
+remove spells, so they accumulate for the rest of the match.
+
 ## 1. The turn loop (ABCD runs automatically)
 
 Every time `engine.start()` is polled, if the active player hasn't finished
