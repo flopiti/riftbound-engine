@@ -16,7 +16,7 @@ from riftbound_engine.csv_data import (
     csv_cards,
 )
 from riftbound_engine.deck_files import list_deck_ids
-from riftbound_engine.engine import Rune
+from riftbound_engine.engine import PlayedSpell, Rune
 
 
 def _flood_runes(engine: GameEngine, actor: RequiredTo, count: int = 20) -> None:
@@ -641,6 +641,40 @@ class GameEngineTests(unittest.TestCase):
             engine.apply_action(
                 action=f"play:play_spell:{spell_idx}", actor=RequiredTo.PLAYER_2
             )
+
+    def test_end_turn_clears_spell_piles_for_both_players(self) -> None:
+        """Spells are visual-only for now and have no resolution step, but the
+        right-side spell overlay should not accumulate cast spells past the
+        turn boundary. ``_advance_turn`` (triggered by ``play:end_turn``)
+        wipes both players' spell stacks so the overlay starts the next turn
+        empty."""
+        engine, ready = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        ready = engine.start()
+        hand = list(ready.game_state.player_1_hand or [])
+        spell_idx = self._first_spell_index(hand)
+        spell_card = hand[spell_idx]
+
+        # P1 casts a spell, then ends the turn.
+        out = engine.apply_action(
+            action=f"play:play_spell:{spell_idx}", actor=RequiredTo.PLAYER_1
+        )
+        self.assertEqual(len(out.game_state.player_1_spells), 1)
+        self.assertEqual(out.game_state.player_1_spells[0].card, spell_card)
+
+        # Seed P2's pile too so we verify *both* sides clear. The engine
+        # doesn't currently let P2 cast during P1's turn through the public
+        # action API, so we mutate the state directly — this test is about
+        # the end-of-turn wipe, not the cast path.
+        engine._game_state.player_2_spells.append(PlayedSpell(card=spell_card))
+        self.assertEqual(len(engine._game_state.player_2_spells), 1)
+
+        after_end = engine.apply_action(
+            action="play:end_turn", actor=RequiredTo.PLAYER_1
+        )
+        self.assertEqual(after_end.game_state.player_1_spells, [])
+        self.assertEqual(after_end.game_state.player_2_spells, [])
 
     def test_channel_rune_count_follows_first_second_then_two_schedule(self) -> None:
         gs = GameState(global_channel_count=0)
@@ -1394,15 +1428,24 @@ class MoveUnitTests(unittest.TestCase):
         units.append(PlayedUnit(card=card, location=location, exhausted=False))
         return len(units) - 1
 
-    def test_move_options_for_ready_unit_at_base_include_controlled_battlefields(self) -> None:
+    def test_move_options_for_ready_unit_at_base_include_both_battlefields(self) -> None:
+        # Both BFs always appear as move destinations from base regardless
+        # of who controls them. The handler opens a showdown when the
+        # destination isn't already self-controlled (see
+        # test_move_unit_to_opponent_controlled_battlefield_opens_showdown).
         engine, _ = self._drive_to_action_turn()
         engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_1
-        # P2 controls BF2 → P1 cannot move there.
         engine._game_state.battlefield_2_controller = RequiredTo.PLAYER_2
         unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
         ready = engine.start()
         move_opts = [opt for opt in ready.player_1_options if opt.startswith("play:move_unit:")]
-        self.assertEqual(move_opts, [f"play:move_unit:{unit_idx}:battlefield_1"])
+        self.assertEqual(
+            move_opts,
+            [
+                f"play:move_unit:{unit_idx}:battlefield_1",
+                f"play:move_unit:{unit_idx}:battlefield_2",
+            ],
+        )
 
     def test_move_options_include_uncontrolled_battlefields(self) -> None:
         # Uncontrolled BFs are valid move destinations — picking one opens
@@ -1420,16 +1463,26 @@ class MoveUnitTests(unittest.TestCase):
             ],
         )
 
-    def test_move_options_exclude_opponent_controlled_battlefields(self) -> None:
-        # Opponent-controlled BFs must NOT appear as move options — the
-        # active player has no right to deploy there.
+    def test_move_options_include_opponent_controlled_battlefields(self) -> None:
+        # Opponent-controlled BFs ARE valid move destinations — moving in
+        # opens a showdown (the "invade" path). This is distinct from
+        # play_unit, which still rejects opponent-controlled locations
+        # because a freshly-deployed unit has no business landing there
+        # without first transiting through base.
         engine, _ = self._drive_to_action_turn()
         engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_2
-        # Leave BF2 uncontrolled.
+        # Leave BF2 uncontrolled so both kinds of "contested" destinations
+        # show up in the same option list.
         unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
         ready = engine.start()
         move_opts = [opt for opt in ready.player_1_options if opt.startswith("play:move_unit:")]
-        self.assertEqual(move_opts, [f"play:move_unit:{unit_idx}:battlefield_2"])
+        self.assertEqual(
+            move_opts,
+            [
+                f"play:move_unit:{unit_idx}:battlefield_1",
+                f"play:move_unit:{unit_idx}:battlefield_2",
+            ],
+        )
 
     def test_move_options_for_ready_unit_at_battlefield_offers_base_only(self) -> None:
         engine, _ = self._drive_to_action_turn()
@@ -1501,15 +1554,32 @@ class MoveUnitTests(unittest.TestCase):
         # BF controller is still None until the showdown resolves.
         self.assertIsNone(after.game_state.battlefield_1_controller)
 
-    def test_move_unit_rejects_opponent_controlled_battlefield(self) -> None:
+    def test_move_unit_to_opponent_controlled_battlefield_opens_showdown(self) -> None:
+        # "Invade" path: moving a ready unit from base onto a battlefield
+        # the opponent currently controls must succeed (the unit relocates
+        # and exhausts) AND must open a PendingShowdown initiated by the
+        # active player. Battlefield control stays unchanged until the
+        # showdown actually resolves via mutual pass_showdown.
         engine, _ = self._drive_to_action_turn()
         engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_2
         unit_idx = self._place_ready_unit(engine, "base", card="Sentinel")
-        with self.assertRaises(ValueError) as ctx:
-            engine.apply_action(
-                action=f"play:move_unit:{unit_idx}:battlefield_1", actor=RequiredTo.PLAYER_1
-            )
-        self.assertIn("controlled by", str(ctx.exception))
+        after = engine.apply_action(
+            action=f"play:move_unit:{unit_idx}:battlefield_1", actor=RequiredTo.PLAYER_1
+        )
+        unit = after.game_state.player_1_units[unit_idx]
+        self.assertEqual(unit.location, "battlefield_1")
+        self.assertTrue(unit.exhausted, "invading must exhaust the unit")
+        self.assertIsNotNone(after.game_state.pending_showdown)
+        self.assertEqual(
+            after.game_state.pending_showdown.battlefield, "battlefield_1"
+        )
+        self.assertEqual(
+            after.game_state.pending_showdown.initiator, RequiredTo.PLAYER_1
+        )
+        # Defender still holds the BF until the showdown resolves.
+        self.assertEqual(
+            after.game_state.battlefield_1_controller, RequiredTo.PLAYER_2
+        )
 
     def test_move_unit_rejects_exhausted_unit(self) -> None:
         engine, _ = self._drive_to_action_turn()
@@ -1725,6 +1795,43 @@ class ShowdownTests(unittest.TestCase):
         )
         self.assertIsNone(after.game_state.pending_showdown)
         self.assertEqual(after.game_state.player_1_units[idx].location, "battlefield_1")
+
+    def test_invasion_into_opponent_bf_transfers_control_on_both_pass(self) -> None:
+        """End-to-end: P2 holds BF1; P1 moves a unit there (opens
+        showdown); both pass; P1 takes control of BF1 and scores 1 point.
+        This is the "invade an opponent-held battlefield" path that used
+        to be blocked outright at the move handler."""
+        from riftbound_engine.engine import PlayedUnit
+
+        engine, _ = self._drive_to_action_turn()
+        engine._game_state.battlefield_1_controller = RequiredTo.PLAYER_2
+        engine._game_state.player_1_units.append(
+            PlayedUnit(card="Sentinel", location="base", exhausted=False)
+        )
+        idx = len(engine._game_state.player_1_units) - 1
+
+        # Invade.
+        after_move = engine.apply_action(
+            action=f"play:move_unit:{idx}:battlefield_1", actor=RequiredTo.PLAYER_1
+        )
+        self.assertIsNotNone(after_move.game_state.pending_showdown)
+        self.assertEqual(
+            after_move.game_state.battlefield_1_controller, RequiredTo.PLAYER_2,
+            "defender still holds the BF until the showdown resolves",
+        )
+
+        # Resolve.
+        engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        out = engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_2)
+
+        self.assertIsNone(out.game_state.pending_showdown)
+        # Control flips to the initiator (placeholder showdown model).
+        self.assertEqual(
+            out.game_state.battlefield_1_controller, RequiredTo.PLAYER_1
+        )
+        # Initiator scored 1 for taking the BF.
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 1)
+        self.assertEqual(engine.player_score(RequiredTo.PLAYER_2), 0)
 
 
 class ScoringTests(unittest.TestCase):

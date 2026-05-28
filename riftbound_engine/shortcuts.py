@@ -556,10 +556,21 @@ def _intent_synthetic_action(i: PlayIntent) -> str:
     `_synthetic_action` but at the tier-1 (card-pick) level — used only
     for layoutId / visited-paths keys, never sent to /engine/action.
 
-    When the user picks a single-combo intent we auto-skip directly to
-    the combo's synthetic action; only multi-combo intents create a
-    path step keyed by this string (and only as an `intent_only` no-op
-    that the disambiguation tier renders combos from)."""
+    The client records EVERY intent click under this key, regardless of
+    combo count:
+      • Single-combo intents auto-skip into the combo's chain (the
+        engine state advances atomically) but the path step is still
+        recorded with `action = intent:N` so the visited-paths lookup
+        on the next render — which keys off the chip the user sees,
+        i.e. the intent — matches.
+      • Multi-combo intents record an `intent_only` no-op step under
+        this key, then a follow-up combo step under the combo's
+        synthetic action.
+
+    Previously single-combo clicks recorded under the combo's
+    synthetic action, which made the same chip look unvisited after a
+    rewind because the chip's lookup key (`intent:N`) didn't match the
+    recorded key (`shortcut:...`)."""
     return f"intent:{i.card_index}"
 
 

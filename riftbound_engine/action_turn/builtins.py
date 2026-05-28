@@ -246,7 +246,7 @@ def _choose_location(ctx: ActionTurnContext) -> None:
 
 @register_turn_action("move_unit")
 def _move_unit(ctx: ActionTurnContext) -> None:
-    """Move a ready unit between base and a controlled battlefield, exhausting it.
+    """Move a ready unit between base and a battlefield, exhausting it.
 
     Wire format: ``play:move_unit:<unit_index>:<destination>``.
       * ``unit_index`` — 0-based index into the active player's ``units`` list.
@@ -255,10 +255,16 @@ def _move_unit(ctx: ActionTurnContext) -> None:
     Rules:
       * The unit must be **ready** (``exhausted=False``). Newly played units
         suffer summoning sickness and cannot move on their first turn.
-      * Allowed transitions: ``base`` ↔ a battlefield the active player
-        controls. Battlefield ↔ battlefield jumps are NOT allowed.
+      * Allowed transitions: ``base`` ↔ any battlefield. Battlefield ↔
+        battlefield jumps are NOT allowed (route through base).
       * The destination must be different from the unit's current location.
-      * Battlefield destinations require the active player to control them.
+      * The destination's CONTROL status drives what happens after the move:
+          - own-controlled battlefield → just relocates;
+          - uncontrolled battlefield → opens a showdown;
+          - opponent-controlled battlefield → opens a showdown (the
+            active player is "invading" — unlike ``play_unit``, which
+            still refuses to deploy a fresh unit onto an opponent BF,
+            moving a unit there is allowed and triggers the contest).
 
     Effect: updates the unit's ``location`` and flips ``exhausted=True`` so
     the unit can't move again this turn (and stays exhausted through the
@@ -334,33 +340,25 @@ def _move_unit(ctx: ActionTurnContext) -> None:
         )
 
     # Determine the current controller of the destination battlefield (if any).
-    # A move to a battlefield controlled by the opponent is rejected — the
-    # active player has no right to deploy there. A move to a battlefield
-    # the active player already controls is fine. A move to an UNCONTROLLED
-    # battlefield is allowed and opens a showdown — see PendingShowdown.
+    # Moves to a battlefield the active player already controls just
+    # relocate the unit. Moves to an UNCONTROLLED battlefield, or to one
+    # controlled by the OPPONENT, open a showdown — see PendingShowdown.
+    # Only battlefield → battlefield is barred (handled above).
     dest_controller: "RequiredTo | None" = None
     if destination == "battlefield_1":
         dest_controller = gs.battlefield_1_controller
     elif destination == "battlefield_2":
         dest_controller = gs.battlefield_2_controller
 
-    if (
-        destination != "base"
-        and dest_controller is not None
-        and dest_controller != ctx.actor
-    ):
-        raise ValueError(
-            f"{ctx.actor.value} cannot move to {destination!r}: "
-            f"it is controlled by {dest_controller.value}"
-        )
-
     unit.location = destination
     unit.exhausted = True
 
-    # If the unit just walked onto an uncontrolled battlefield, open a
-    # showdown. Both players' options collapse to ``play:pass_showdown``
-    # until both have passed.
-    if destination != "base" and dest_controller is None:
+    # If the unit just walked onto a battlefield that the active player
+    # does NOT already control, open a showdown. Both players' options
+    # collapse to ``play:pass_showdown`` until both have passed; on
+    # resolution the initiator takes control (matching the minimal
+    # showdown model we've had for uncontrolled BFs).
+    if destination != "base" and dest_controller != ctx.actor:
         from ..engine import PendingShowdown
         gs.pending_showdown = PendingShowdown(
             battlefield=destination,

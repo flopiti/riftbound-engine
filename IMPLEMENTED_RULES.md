@@ -30,7 +30,10 @@ from `hand` into `player_X_spells`.
 ### State
 
 - `GameState.player_1_spells` / `player_2_spells` — lists of `PlayedSpell`
-  in cast order. Persisted across turns (like units; no resolution step yet).
+  in cast order. **Cleared at end of turn** in `_advance_turn` (both
+  players' stacks wipe whenever the active player ends their turn), so the
+  right-side spell overlay starts every turn empty. There is still no
+  per-spell resolution step — cards just vanish.
 - Serialized to the wire as `player_1_spells` / `player_2_spells`, each
   entry shaped `{"card": <name>}`.
 
@@ -47,8 +50,10 @@ The frontend (`riftbound/src/components/play/SpellsOverlay.tsx`) renders
 cast spells anchored to the right edge of the play surface, vertically
 centered, slightly enlarged compared to a hand card. Player 2's stack
 grows downward from the top half, Player 1's grows upward from the bottom
-half. Newer casts overlap older ones; the engine does not yet resolve or
-remove spells, so they accumulate for the rest of the match.
+half. Newer casts overlap older ones. Spells stay in the overlay for the
+turn they were cast in, and `_advance_turn` clears both players' spell
+stacks when the active player ends the turn — so the overlay always reads
+"what was cast during the turn that's just ending."
 
 ## 1. The turn loop (ABCD runs automatically)
 
@@ -133,15 +138,44 @@ pick the location.
 
 ### Step B constraint — control
 
-A unit may only be played in a location the active player **controls**.
+A unit may only be **played** (`play_unit` → `choose_location`) in a
+location the active player **controls**.
 
 - Each player always controls their own `base`.
 - A battlefield is "controlled" by whichever player matches
   `battlefield_1_controller` / `battlefield_2_controller` on the game state.
   Both start as `None` (uncontrolled), so initially neither player can play
   units on either battlefield — `base` is the only legal target.
-- No mechanism for gaining control of a battlefield is implemented yet;
-  once one is added, those fields will be set by it.
+- Control of an uncontrolled or opponent-held battlefield is gained by
+  walking a ready unit onto it via `play:move_unit` and winning the
+  resulting showdown (see §3a).
+
+### §3a — Moving units and showdowns
+
+After a unit has been played, `play:move_unit:<unit_index>:<destination>`
+lets the active player walk a ready unit between `base` and either
+battlefield. Rules:
+
+- The unit must be **ready** (no summoning sickness, not exhausted
+  earlier this turn).
+- Allowed transitions: `base` ↔ a battlefield. BF ↔ BF jumps are
+  rejected (route through base).
+- Moving always exhausts the unit, so it can't move again this turn.
+- What happens at the destination depends on its current controller:
+    - **Own-controlled BF** → just relocates the unit.
+    - **Uncontrolled BF** → opens a `PendingShowdown` with the active
+      player as initiator.
+    - **Opponent-controlled BF** → also opens a `PendingShowdown` (the
+      "invade" path). Unlike `play_unit`, which still refuses to deploy
+      a *fresh* unit onto an opponent BF, moving a unit that's already
+      in play across the line is allowed and forces the contest.
+
+While a showdown is pending, both players' option menus collapse to a
+single `play:pass_showdown` (initiator first, then opponent). When both
+have passed, the battlefield's controller is set to the initiator (the
+current minimal model — proper unit-vs-unit resolution is still a
+placeholder) and the initiator scores 1 point (capped at 1 per BF per
+turn via `award_bf_point`).
 
 ## 4. Summoning sickness
 

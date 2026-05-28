@@ -25,7 +25,7 @@ MainDeck:
 1 Vex, Apathetic
 
 Battlefields:
-1 Abandoned Hall
+1 Sunken Temple
 1 Sunken Temple
 1 Targon's Peak
 

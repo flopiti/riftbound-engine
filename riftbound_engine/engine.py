@@ -120,8 +120,9 @@ class PlayedSpell:
 
     Unlike Units, Spells don't go to a location — they just go to the
     player's spell stack. The UI renders them off to the right side of the
-    screen. The engine currently has no resolution/effect step for spells:
-    the card simply sits in ``player_X_spells`` for the rest of the match.
+    screen. The engine has no per-spell resolution/effect step yet, but
+    ``_advance_turn`` clears both players' spell stacks at end of turn so
+    the overlay only shows spells cast during the current turn.
     """
 
     card: str
@@ -142,15 +143,16 @@ class PendingPlay:
 
 @dataclass
 class PendingShowdown:
-    """An active showdown over an uncontrolled battlefield.
+    """An active showdown over a contested battlefield.
 
-    Opened when the active player moves a unit onto a battlefield with no
-    controller. While set, both players' options collapse to a single
+    Opened when the active player moves a unit onto a battlefield they
+    don't already control — either an uncontrolled BF or one held by the
+    opponent. While set, both players' options collapse to a single
     ``play:pass_showdown`` action — first the initiator passes, then the
-    opponent. When both have passed the showdown resolves: the battlefield's
-    controller is set to whoever still has units remaining on it (in the
-    current minimal model that's just the initiator), and this field is
-    cleared.
+    opponent. When both have passed the showdown resolves: the
+    battlefield's controller is set to the showdown's initiator (in the
+    current minimal model the initiator always "wins"; that's a placeholder
+    until proper unit-vs-unit resolution lands), and this field is cleared.
     """
 
     battlefield: str  # "battlefield_1" or "battlefield_2"
@@ -532,6 +534,13 @@ class GameEngine:
         # The per-BF scoring cap is also per-turn: clear the set so each
         # battlefield can score again on the new turn (if conditions hold).
         self._game_state.scored_bfs_this_turn = set()
+        # Spells "resolve" at end of turn — we don't yet model their effects
+        # or a discard pile, so for now they simply vanish off the right-side
+        # spell overlay. Both players' stacks are cleared (only the active
+        # player can cast today, but interrupts may exist later and the
+        # overlay should be empty going into the next turn regardless).
+        self._game_state.player_1_spells = []
+        self._game_state.player_2_spells = []
         nxt = RequiredTo.PLAYER_2 if cp == RequiredTo.PLAYER_1 else RequiredTo.PLAYER_1
         self._game_state.current_player = nxt
         self._game_state.total_turn_number += 1
@@ -1033,33 +1042,31 @@ class GameEngine:
                     options.append(f"play:play_spell:{i}")
 
                 # Movement: each READY unit owned by the active player can
-                # move base ↔ a battlefield, as long as the destination
-                # isn't controlled by the opponent. Moving onto an
-                # uncontrolled battlefield opens a showdown (see
-                # PendingShowdown); moving onto our own controlled
-                # battlefield just relocates. BF ↔ BF is not allowed.
-                # Moving always exhausts the unit — see
+                # move base ↔ a battlefield. Destination control drives the
+                # follow-up:
+                #   - own-controlled BF → just relocates;
+                #   - uncontrolled BF  → opens a showdown;
+                #   - opponent BF      → opens a showdown (the active
+                #                        player is "invading" — unlike
+                #                        play_unit, which still refuses to
+                #                        deploy a *fresh* unit there).
+                # BF ↔ BF is not allowed; route through base. Moving
+                # always exhausts the unit — see
                 # action_turn/builtins.py::_move_unit.
                 active_units = (
                     self._game_state.player_1_units
                     if active == RequiredTo.PLAYER_1
                     else self._game_state.player_2_units
                 )
-                bf_controllers = {
-                    "battlefield_1": self._game_state.battlefield_1_controller,
-                    "battlefield_2": self._game_state.battlefield_2_controller,
-                }
                 for unit_idx, unit in enumerate(active_units):
                     if unit.exhausted:
                         continue
                     if unit.location == "base":
-                        # Base → any BF not controlled by the opponent
-                        # (uncontrolled BFs are allowed; they trigger a
-                        # showdown when the move resolves).
+                        # Base → both battlefields are always offered;
+                        # the move handler opens a showdown when the
+                        # destination isn't already self-controlled.
                         for dest in ("battlefield_1", "battlefield_2"):
-                            controller = bf_controllers[dest]
-                            if controller is None or controller == active:
-                                options.append(f"play:move_unit:{unit_idx}:{dest}")
+                            options.append(f"play:move_unit:{unit_idx}:{dest}")
                     else:
                         # Battlefield → base only. (BF ↔ BF rejected.)
                         options.append(f"play:move_unit:{unit_idx}:base")
