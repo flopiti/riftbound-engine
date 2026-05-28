@@ -54,6 +54,11 @@ def _play_unit(ctx: ActionTurnContext) -> None:
             "cannot play units while a showdown is in progress — "
             "resolve the showdown first"
         )
+    if gs.pending_combat is not None:
+        raise ValueError(
+            "cannot play units while a contested showdown is in combat — "
+            "commit your kills first"
+        )
 
     if ctx.actor == RT.PLAYER_1:
         hand = gs.player_1_hand
@@ -144,6 +149,11 @@ def _play_spell(ctx: ActionTurnContext) -> None:
         raise ValueError(
             "cannot play spells while a showdown is in progress — "
             "resolve the showdown first"
+        )
+    if gs.pending_combat is not None:
+        raise ValueError(
+            "cannot play spells while a contested showdown is in combat — "
+            "commit your kills first"
         )
 
     if ctx.actor == RT.PLAYER_1:
@@ -308,6 +318,11 @@ def _move_unit(ctx: ActionTurnContext) -> None:
             "cannot move units while a showdown is in progress — "
             "resolve the showdown first"
         )
+    if gs.pending_combat is not None:
+        raise ValueError(
+            "cannot move units while a contested showdown is in combat — "
+            "commit your kills first"
+        )
 
     if ctx.actor == RT.PLAYER_1:
         units = gs.player_1_units
@@ -370,11 +385,19 @@ def _move_unit(ctx: ActionTurnContext) -> None:
 def _pass_showdown(ctx: ActionTurnContext) -> None:
     """Pass on a pending showdown. The initiator passes first, then the opponent.
 
-    When both players have passed, the showdown resolves: the contested
-    battlefield's controller is set to the showdown's initiator (in the
-    current minimal model the initiator is always the only player with a
-    unit on the battlefield, so they always "win"), and ``pending_showdown``
-    is cleared. The active player's turn then continues normally.
+    When both players have passed, the showdown resolves with one of two
+    outcomes:
+
+      * **Conquest** — only the initiator has units at the battlefield.
+        The initiator takes control and earns 1 point (capped per-BF-
+        per-turn via ``award_bf_point``).
+      * **Contested** — both players have units at the battlefield. No
+        one controls it; the battlefield's controller is cleared. If
+        someone previously controlled the BF, the point they earned for
+        it is revoked (they no longer hold a conquered battlefield).
+
+    ``pending_showdown`` is cleared either way and the active player's
+    turn continues normally.
 
     Payload is ignored — passes carry no arguments.
     """
@@ -402,20 +425,65 @@ def _pass_showdown(ctx: ActionTurnContext) -> None:
             )
         showdown.opponent_passed = True
 
-    # Both passed → resolve.
+    # Both passed → either resolve directly (uncontested) or move
+    # into the PendingCombat damage-distribution phase (contested).
     if showdown.initiator_passed and showdown.opponent_passed:
-        if showdown.battlefield == "battlefield_1":
-            gs.battlefield_1_controller = initiator
-        elif showdown.battlefield == "battlefield_2":
-            gs.battlefield_2_controller = initiator
-        else:  # pragma: no cover — guarded by move_unit handler
-            raise ValueError(f"unknown showdown battlefield {showdown.battlefield!r}")
-        # Gaining control of a battlefield you didn't already control
-        # scores 1 point — capped at 1 per battlefield per turn via
-        # award_bf_point (so this is suppressed if B-phase HOLD scoring
-        # already credited this BF this turn, e.g. for a future rule that
-        # could give a player control during their own HOLD step).
-        ctx.engine.award_bf_point(initiator, showdown.battlefield)
+        bf = showdown.battlefield
+        if bf not in ("battlefield_1", "battlefield_2"):
+            # Guarded by move_unit handler, but defensive.
+            raise ValueError(f"unknown showdown battlefield {bf!r}")
+
+        p1_has = any(u.location == bf for u in gs.player_1_units)
+        p2_has = any(u.location == bf for u in gs.player_2_units)
+        contested = p1_has and p2_has
+
+        if contested:
+            # Both players have units here — open a simultaneous
+            # damage-distribution combat. Each side's damage budget is
+            # their TOTAL might at this BF; they'll commit a target
+            # list via play:commit_kills:<csv-of-target-indices>.
+            # 0-might attackers auto-commit to [] (they get to skip
+            # their damage step but still have to wait for the
+            # opponent's commit before combat resolves).
+            from ..engine import PendingCombat
+            p1_might = ctx.engine.might_at_battlefield(RequiredTo.PLAYER_1, bf)
+            p2_might = ctx.engine.might_at_battlefield(RequiredTo.PLAYER_2, bf)
+            gs.pending_combat = PendingCombat(
+                battlefield=bf,
+                player_1_might=p1_might,
+                player_2_might=p2_might,
+                player_1_targets=[] if p1_might == 0 else None,
+                player_2_targets=[] if p2_might == 0 else None,
+            )
+            gs.pending_showdown = None
+            # Fall through with pending_combat set; control/scoring
+            # decisions wait until both players commit and resolve_combat
+            # has actually applied the kills.
+            return
+
+        # Not contested — only the initiator has units at the BF (move_unit
+        # never opens a showdown onto a BF where only the OPPONENT has
+        # units), so this is a clean conquest of an empty or
+        # opponent-controlled-but-empty battlefield.
+        from ..engine import RequiredTo as RT
+        previous_controller = (
+            gs.battlefield_1_controller
+            if bf == "battlefield_1"
+            else gs.battlefield_2_controller
+        )
+        if p1_has or p2_has:
+            winner = RT.PLAYER_1 if p1_has else RT.PLAYER_2
+            if bf == "battlefield_1":
+                gs.battlefield_1_controller = winner
+            else:
+                gs.battlefield_2_controller = winner
+            if previous_controller != winner:
+                ctx.engine.award_bf_point(winner, bf)
+        else:
+            if bf == "battlefield_1":
+                gs.battlefield_1_controller = None
+            else:
+                gs.battlefield_2_controller = None
         gs.pending_showdown = None
 
 
@@ -452,6 +520,11 @@ def _exhaust_rune(ctx: ActionTurnContext) -> None:
             "cannot exhaust runes while a showdown is in progress — "
             "resolve the showdown first"
         )
+    if gs.pending_combat is not None:
+        raise ValueError(
+            "cannot exhaust runes while a contested showdown is in combat — "
+            "commit your kills first"
+        )
     if ctx.actor != gs.current_player:
         raise ValueError("only the active player may exhaust runes")
 
@@ -485,6 +558,11 @@ def _take_rune_at_index(ctx: ActionTurnContext, index: int):
         raise ValueError(
             "cannot recycle runes while a showdown is in progress — "
             "resolve the showdown first"
+        )
+    if gs.pending_combat is not None:
+        raise ValueError(
+            "cannot recycle runes while a contested showdown is in combat — "
+            "commit your kills first"
         )
     if ctx.actor != gs.current_player:
         raise ValueError("only the active player may recycle runes")
@@ -575,3 +653,125 @@ def _exhaust_and_recycle_rune(ctx: ActionTurnContext) -> None:
     rune.exhausted = False
     library.append(rune)
     ctx.engine.add_power(ctx.actor, domain, 1)
+
+
+@register_turn_action("commit_kills")
+def _commit_kills(ctx: ActionTurnContext) -> None:
+    """Commit one player's damage assignment in a PendingCombat.
+
+    Payload is a comma-separated list of OPPONENT unit indices to kill
+    (empty payload = "I kill nothing"). The sum of the targets' Might
+    must not exceed the actor's total Might at the contested BF — that's
+    the "damage must kill" rule (no partial damage, no overflow). Each
+    target index must be unique and refer to an existing opponent unit
+    sitting AT the contested battlefield.
+
+    Both players commit independently and BLIND; the engine doesn't
+    reveal the opponent's choice until both have committed. As soon as
+    both ``player_1_targets`` and ``player_2_targets`` are set, the
+    handler calls ``engine.resolve_combat()`` which applies all kills
+    simultaneously and then the move continues by reading the
+    post-combat state for control + scoring.
+    """
+    from ..csv_data import card_might_of
+    from ..engine import RequiredTo as RT
+
+    gs = ctx.engine._game_state
+    pc = gs.pending_combat
+    if pc is None:
+        raise ValueError("no contested combat is awaiting kill assignments")
+    if ctx.actor not in (RT.PLAYER_1, RT.PLAYER_2):
+        raise ValueError("commit_kills requires player_1 or player_2")
+
+    # Parse the index list. Empty payload is valid — "I kill nothing".
+    payload = ctx.payload.strip()
+    if payload:
+        try:
+            target_indices = [int(p.strip()) for p in payload.split(",") if p.strip()]
+        except ValueError as e:
+            raise ValueError(
+                f"play:commit_kills payload must be a comma-separated list of integers, got {payload!r}"
+            ) from e
+    else:
+        target_indices = []
+    if len(set(target_indices)) != len(target_indices):
+        raise ValueError("play:commit_kills target indices must be unique")
+
+    # Resolve which list we're killing into and our damage budget.
+    if ctx.actor == RT.PLAYER_1:
+        if pc.player_1_targets is not None:
+            raise ValueError("player_1 has already committed their kills for this combat")
+        opponent_units = gs.player_2_units
+        budget = pc.player_1_might
+    else:
+        if pc.player_2_targets is not None:
+            raise ValueError("player_2 has already committed their kills for this combat")
+        opponent_units = gs.player_1_units
+        budget = pc.player_2_might
+
+    # Validate every target: in range, at the contested BF, and the
+    # total Might cost doesn't exceed our budget.
+    total_cost = 0
+    for idx in target_indices:
+        if idx < 0 or idx >= len(opponent_units):
+            raise ValueError(
+                f"play:commit_kills target index out of range: {idx} "
+                f"(opponent has {len(opponent_units)} units)"
+            )
+        unit = opponent_units[idx]
+        if unit.location != pc.battlefield:
+            raise ValueError(
+                f"play:commit_kills target index {idx} is not at the contested "
+                f"battlefield ({pc.battlefield})"
+            )
+        might = card_might_of(unit.card)
+        if might is None:
+            raise ValueError(
+                f"play:commit_kills target {unit.card!r} has no Might value in the CSV"
+            )
+        total_cost += might
+    if total_cost > budget:
+        raise ValueError(
+            f"play:commit_kills total Might of targets ({total_cost}) exceeds "
+            f"available damage ({budget})"
+        )
+
+    # Record this player's commit.
+    if ctx.actor == RT.PLAYER_1:
+        pc.player_1_targets = list(target_indices)
+    else:
+        pc.player_2_targets = list(target_indices)
+
+    # If both committed, resolve combat NOW and then close out
+    # control/scoring per the same rules as an uncontested showdown.
+    if pc.player_1_targets is not None and pc.player_2_targets is not None:
+        bf = pc.battlefield
+        ctx.engine.resolve_combat(bf)
+        # `resolve_combat` cleared pending_combat. Now read who's left
+        # at the BF and assign control + a point (points NEVER removed —
+        # the previous controller keeping the BF earns no new point).
+        p1_has = any(u.location == bf for u in gs.player_1_units)
+        p2_has = any(u.location == bf for u in gs.player_2_units)
+        previous_controller = (
+            gs.battlefield_1_controller
+            if bf == "battlefield_1"
+            else gs.battlefield_2_controller
+        )
+        if p1_has and p2_has:
+            # Still contested even after combat. Nobody's been wiped —
+            # control unchanged, no point awarded.
+            return
+        if p1_has or p2_has:
+            winner = RT.PLAYER_1 if p1_has else RT.PLAYER_2
+            if bf == "battlefield_1":
+                gs.battlefield_1_controller = winner
+            else:
+                gs.battlefield_2_controller = winner
+            if previous_controller != winner:
+                ctx.engine.award_bf_point(winner, bf)
+        else:
+            # Both sides wiped — BF goes neutral.
+            if bf == "battlefield_1":
+                gs.battlefield_1_controller = None
+            else:
+                gs.battlefield_2_controller = None

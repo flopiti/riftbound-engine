@@ -612,6 +612,10 @@ def _serialize_hand_costs(hand: list[str] | None) -> list[dict[str, Any]]:
 def _serialize_state(gs: GameState) -> dict[str, Any]:
     return {
         "counter": gs.counter,
+        "action_log": [
+            {"sequence": e.sequence, "actor": e.actor, "action": e.action}
+            for e in gs.action_log
+        ],
         "started": gs.started,
         "total_turn_number": gs.total_turn_number,
         "player_1_turn_number": gs.player_1_turn_number,
@@ -658,6 +662,26 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 "initiator": gs.pending_showdown.initiator.value,
                 "initiator_passed": gs.pending_showdown.initiator_passed,
                 "opponent_passed": gs.pending_showdown.opponent_passed,
+            }
+        ),
+        "pending_combat": (
+            None
+            if gs.pending_combat is None
+            else {
+                "battlefield": gs.pending_combat.battlefield,
+                "player_1_might": gs.pending_combat.player_1_might,
+                "player_2_might": gs.pending_combat.player_2_might,
+                # `null` = "still picking", list = "committed".
+                "player_1_targets": (
+                    None
+                    if gs.pending_combat.player_1_targets is None
+                    else list(gs.pending_combat.player_1_targets)
+                ),
+                "player_2_targets": (
+                    None
+                    if gs.pending_combat.player_2_targets is None
+                    else list(gs.pending_combat.player_2_targets)
+                ),
             }
         ),
         "battlefield_1_controller": (

@@ -162,6 +162,37 @@ class PendingShowdown:
 
 
 @dataclass
+class PendingCombat:
+    """Simultaneous damage-distribution state after a contested showdown.
+
+    When both players have passed on a ``PendingShowdown`` over a battlefield
+    where BOTH have units, the engine moves into this state instead of
+    resolving the showdown directly. Each player independently picks which
+    OPPONENT units to kill using their own total Might at the battlefield;
+    distributions are "blind" (one player can't see what the other has
+    committed yet) and applied simultaneously once both have committed.
+
+    Damage rule: each kill spends ``target.might`` damage from the
+    attacker's pool. You can only assign damage in chunks that exactly
+    kill a unit — there's no partial damage carried over. Excess damage
+    that can't kill anything (e.g. 1 left vs a 4-might survivor) is
+    wasted. A 0-might attacker auto-commits to ``[]`` on entry (skips
+    their damage step).
+
+    Targets are stored as indices into the OPPONENT's ``player_X_units``
+    list at the moment combat was entered. ``None`` means the player
+    hasn't committed yet; ``[]`` means committed but chose to kill
+    nothing.
+    """
+
+    battlefield: str  # "battlefield_1" or "battlefield_2"
+    player_1_might: int  # P1's total Might at the BF when combat opened
+    player_2_might: int  # P2's total Might at the BF when combat opened
+    player_1_targets: list[int] | None = None  # indices into player_2_units
+    player_2_targets: list[int] | None = None  # indices into player_1_units
+
+
+@dataclass
 class PendingPayment:
     """A unit has been committed to a location and is now waiting for the
     active player to pick which ready runes to exhaust to pay its Energy cost.
@@ -179,8 +210,35 @@ class PendingPayment:
 
 
 @dataclass
+class ActionLogEntry:
+    """One committed engine action.
+
+    Appended by ``GameEngine.apply_action`` after the action successfully
+    mutates the state. Lives on ``GameState`` (not on the engine instance)
+    so it travels with branch-tree snapshots and ``/goto`` restoration:
+    rewinding to an earlier state automatically truncates the log to that
+    point's history. Reset starts a fresh GameState ⇒ empty log.
+
+    ``actor`` and ``action`` are the same strings the engine accepts on
+    ``apply_action`` — the UI can humanise them with its own formatter.
+    ``sequence`` is the action's 0-indexed position in the log, useful for
+    React keys and stable ordering even if entries get re-serialised.
+    """
+
+    sequence: int
+    actor: str
+    action: str
+
+
+@dataclass
 class GameState:
     counter: int = 0
+    #: Ordered list of every committed action that produced this state.
+    #: Appended to inside ``GameEngine.apply_action`` AFTER the action
+    #: succeeds, so failed/raised actions do not pollute it. Survives
+    #: deep-copy (branch-tree snapshots) automatically; reset gets a
+    #: fresh GameState with the log empty.
+    action_log: list[ActionLogEntry] = field(default_factory=list)
     first_turn_choice: RequiredTo | None = None
     first_turn: RequiredTo | None = None
     battlefield_1: str | None = None
@@ -212,6 +270,12 @@ class GameState:
     #: While set, both players' options are limited to ``play:pass_showdown`` —
     #: first the initiator passes, then the opponent. See PendingShowdown.
     pending_showdown: PendingShowdown | None = None
+    #: Set after both players have passed a showdown over a CONTESTED
+    #: battlefield (both had units there). While set, each player's
+    #: options collapse to ``play:commit_kills:<csv-of-target-indices>`` —
+    #: their blind damage-distribution against the opponent's units.
+    #: Combat resolves once both have committed; see PendingCombat.
+    pending_combat: "PendingCombat | None" = None
     #: Who controls each contested territory. None ⇒ uncontrolled (nobody may
     #: play units there yet). Each player always controls their own `base`,
     #: which is not tracked here.
@@ -318,6 +382,10 @@ class GameEngine:
     def game_state(self) -> GameState:
         return GameState(
             counter=self._game_state.counter,
+            action_log=[
+                ActionLogEntry(sequence=e.sequence, actor=e.actor, action=e.action)
+                for e in self._game_state.action_log
+            ],
             first_turn_choice=self._game_state.first_turn_choice,
             first_turn=self._game_state.first_turn,
             battlefield_1=self._game_state.battlefield_1,
@@ -373,6 +441,25 @@ class GameEngine:
                     initiator=self._game_state.pending_showdown.initiator,
                     initiator_passed=self._game_state.pending_showdown.initiator_passed,
                     opponent_passed=self._game_state.pending_showdown.opponent_passed,
+                )
+            ),
+            pending_combat=(
+                None
+                if self._game_state.pending_combat is None
+                else PendingCombat(
+                    battlefield=self._game_state.pending_combat.battlefield,
+                    player_1_might=self._game_state.pending_combat.player_1_might,
+                    player_2_might=self._game_state.pending_combat.player_2_might,
+                    player_1_targets=(
+                        None
+                        if self._game_state.pending_combat.player_1_targets is None
+                        else list(self._game_state.pending_combat.player_1_targets)
+                    ),
+                    player_2_targets=(
+                        None
+                        if self._game_state.pending_combat.player_2_targets is None
+                        else list(self._game_state.pending_combat.player_2_targets)
+                    ),
                 )
             ),
             battlefield_1_controller=self._game_state.battlefield_1_controller,
@@ -694,6 +781,109 @@ class GameEngine:
         self.add_score(actor, 1)
         return True
 
+    def _commit_kills_options(self, actor: RequiredTo) -> list[str]:
+        """Enumerate every valid ``play:commit_kills:<csv>`` an attacker
+        can submit for the current PendingCombat.
+
+        A valid commit is any subset of opponent units at the contested
+        battlefield whose summed Might ≤ the attacker's damage budget
+        (their total Might at the BF). The empty subset is included —
+        it represents "skip my damage, kill nothing". Returns ``[]`` if
+        there's no active combat or the actor isn't player_1 / player_2.
+
+        2^N enumeration is acceptable here because both players' units
+        at a single battlefield are bounded by their hand size + a few
+        movements per turn — N stays small in practice.
+        """
+        import itertools
+        from .csv_data import card_might_of
+        combat = self._game_state.pending_combat
+        if combat is None:
+            return []
+        if actor == RequiredTo.PLAYER_1:
+            opponent_units = self._game_state.player_2_units
+            budget = combat.player_1_might
+        elif actor == RequiredTo.PLAYER_2:
+            opponent_units = self._game_state.player_1_units
+            budget = combat.player_2_might
+        else:
+            return []
+
+        targets: list[tuple[int, int]] = []  # (opponent-unit-index, might)
+        for i, u in enumerate(opponent_units):
+            if u.location != combat.battlefield:
+                continue
+            m = card_might_of(u.card)
+            if m is None:
+                continue
+            targets.append((i, m))
+
+        options: list[str] = []
+        for size in range(0, len(targets) + 1):
+            for combo in itertools.combinations(targets, size):
+                cost = sum(m for _, m in combo)
+                if cost > budget:
+                    continue
+                indices = sorted(i for i, _ in combo)
+                options.append(
+                    "play:commit_kills:" + ",".join(str(i) for i in indices)
+                )
+        return options
+
+    def might_at_battlefield(self, actor: RequiredTo, battlefield: str) -> int:
+        """Sum of Might (from CSV) of all of ``actor``'s units sitting at
+        ``battlefield``. Used to compute each player's damage budget when
+        a contested showdown enters its combat phase."""
+        from .csv_data import card_might_of
+        if actor == RequiredTo.PLAYER_1:
+            units = self._game_state.player_1_units
+        elif actor == RequiredTo.PLAYER_2:
+            units = self._game_state.player_2_units
+        else:
+            return 0
+        total = 0
+        for unit in units:
+            if unit.location != battlefield:
+                continue
+            m = card_might_of(unit.card)
+            if m is None:
+                continue
+            total += m
+        return total
+
+    def resolve_combat(self, battlefield: str) -> None:
+        """Apply the kills committed during a ``PendingCombat`` for
+        ``battlefield`` and clear the pending state.
+
+        Both players' ``player_X_targets`` lists must already be set
+        (the commit_kills handler ensures this before calling here).
+        Targets are interpreted as indices into the OPPONENT's
+        ``player_X_units`` at the moment combat opened, so we apply
+        all kills SIMULTANEOUSLY — we collect both target sets first
+        and only then prune both unit lists, which means each side's
+        targets refer to the same indices they validated against.
+
+        Indices that fell out of range (because a unit array shrank
+        between commit and resolve via some out-of-band path) are
+        silently skipped — defensive only; the action handler
+        rejects invalid indices on commit.
+        """
+        gs = self._game_state
+        pc = gs.pending_combat
+        if pc is None or pc.battlefield != battlefield:
+            return
+        p1_targets = set(pc.player_1_targets or [])
+        p2_targets = set(pc.player_2_targets or [])
+        # Apply simultaneously: snapshot both lists, then drop targeted
+        # units from each.
+        gs.player_2_units = [
+            u for i, u in enumerate(gs.player_2_units) if i not in p1_targets
+        ]
+        gs.player_1_units = [
+            u for i, u in enumerate(gs.player_1_units) if i not in p2_targets
+        ]
+        gs.pending_combat = None
+
     def player_power(self, actor: RequiredTo) -> dict[str, int]:
         """Power ``actor`` has produced this turn, keyed by rune domain (live dict)."""
         if actor == RequiredTo.PLAYER_1:
@@ -961,6 +1151,42 @@ class GameEngine:
                     required_action=_required_action(next_actor, RequiredStep.ACTION_TURN),
                 )
 
+            combat = self._game_state.pending_combat
+            if combat is not None:
+                # Mid-combat: each player INDEPENDENTLY commits a kill list
+                # using their total Might at the contested BF. Surfaces
+                # every valid `play:commit_kills:<csv>` (sum of target
+                # mights ≤ budget; empty target list = "skip") for each
+                # player who hasn't committed yet. A player who's already
+                # committed (or auto-committed via the 0-might rule) has
+                # no further options — they wait for the other side.
+                p1_options = (
+                    self._commit_kills_options(RequiredTo.PLAYER_1)
+                    if combat.player_1_targets is None
+                    else []
+                )
+                p2_options = (
+                    self._commit_kills_options(RequiredTo.PLAYER_2)
+                    if combat.player_2_targets is None
+                    else []
+                )
+                if combat.player_1_targets is None:
+                    next_actor = RequiredTo.PLAYER_1
+                elif combat.player_2_targets is None:
+                    next_actor = RequiredTo.PLAYER_2
+                else:
+                    # Both committed — resolution happens inside the
+                    # commit_kills handler, so reaching this branch
+                    # without pending_combat being cleared shouldn't
+                    # happen. Defensive fallback.
+                    next_actor = RequiredTo.BOTH
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=p1_options,
+                    player_2_options=p2_options,
+                    required_action=_required_action(next_actor, RequiredStep.ACTION_TURN),
+                )
+
             pending = self._game_state.pending_play
             if pending is not None and pending.actor == active:
                 # Mid-play: the active player must pick a location before doing
@@ -1085,7 +1311,23 @@ class GameEngine:
         )
 
     def apply_action(self, action: str, actor: RequiredTo) -> EngineOutput:
-        action = action.strip()
+        """Commit one action and record it on ``state.action_log``.
+
+        The action-log entry is appended ONLY if the underlying
+        implementation returns without raising — failed actions
+        (validation errors, illegal moves) do not pollute the log."""
+        stripped = action.strip()
+        output = self._apply_action_impl(stripped, actor)
+        self._game_state.action_log.append(
+            ActionLogEntry(
+                sequence=len(self._game_state.action_log),
+                actor=actor.value if isinstance(actor, RequiredTo) else str(actor),
+                action=stripped,
+            )
+        )
+        return output
+
+    def _apply_action_impl(self, action: str, actor: RequiredTo) -> EngineOutput:
         if not action:
             raise ValueError("action must not be empty")
 

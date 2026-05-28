@@ -201,6 +201,60 @@ def _csv_card_power_index() -> dict[str, int]:
     return out
 
 
+@lru_cache(maxsize=1)
+def _csv_card_might_index() -> dict[str, int]:
+    """Lowercased card name → CSV ``Might`` as an integer.
+
+    Might is the "combat strength" of a Unit — the damage it both deals
+    and can absorb in a showdown. Non-Unit rows (Spell, Battlefield, …)
+    have a blank Might and are skipped. We don't accept partial / decimal
+    might — any non-integer Might row is treated as missing.
+    """
+    rows = _csv_rows_raw()
+    if len(rows) < 2:
+        return {}
+    header = rows[0]
+    i_name = _header_index(header, "Name")
+    i_might = _header_index(header, "Might")
+    if i_name is None or i_might is None:
+        return {}
+    out: dict[str, int] = {}
+    for parts in rows[1:]:
+        if len(parts) <= max(i_name, i_might):
+            continue
+        name = parts[i_name].strip().lower()
+        might_raw = parts[i_might].strip()
+        if not name or not might_raw:
+            continue
+        try:
+            value = int(might_raw)
+        except ValueError:
+            continue
+        if name not in out:
+            out[name] = value
+    return out
+
+
+def card_might_of(name: str) -> int | None:
+    """Look up the Might (combat strength) of a unit by name (case-insensitive).
+
+    Returns ``None`` if the card isn't in the CSV or has no numeric Might
+    (e.g. Spell / Battlefield / Rune rows). Uses the same name-resolution
+    fallback as :func:`card_type_of` so "Garen, Rugged" matches the CSV
+    row "Garen, Rugged" or its bare-name form if any.
+    """
+    if not name:
+        return None
+    index = _csv_card_might_index()
+    direct = index.get(name.strip().lower())
+    if direct is not None:
+        return direct
+    sep = name.find(", ")
+    if sep >= 0:
+        return index.get(name[sep + 2 :].strip().lower())
+    return None
+
+
 def card_power_of(name: str) -> int | None:
     """Look up the Power (cost) for a card by name (case-insensitive).
 
