@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
+import random
 import re
 import threading
 from pathlib import Path
@@ -18,6 +19,7 @@ from .deck_files import DECKS_DIR, deck_file_path, list_deck_ids, load_deck_file
 from .engine import Deck, EngineOutput, GameEngine, GameState, RequiredTo
 from .fake_fill import (
     FakeFillConfig,
+    FakeFillMode,
     battlefields_dict,
     choices_dict,
     get_config as get_fake_fill_config,
@@ -25,7 +27,7 @@ from .fake_fill import (
     update_config as update_fake_fill_config,
 )
 from .protocol import ApplyVerb, RequiredStep
-from .shortcuts import compute_play_intents, serialize_play_intent
+from .shortcuts import Shortcut, compute_play_intents, serialize_play_intent
 
 # Reentrant: several of the endpoint handlers acquire this lock and then call
 # helpers that internally re-acquire it (e.g. /branch handlers wrap
@@ -139,6 +141,257 @@ def _fake_fill_enabled() -> bool:
     return get_fake_fill_config().enabled
 
 
+def _battlefield_contested(gs: GameState) -> bool:
+    """Stop condition for the advanced auto-play loop.
+
+    A battlefield counts as "contested by both players" the moment any
+    single battlefield (battlefield_1 OR battlefield_2) has at least one
+    unit from each player at it. This is the literal interpretation Nathan
+    picked in the design questions — base territories don't count, and we
+    don't require BOTH battlefields to be contested.
+    """
+    p1_bfs = {u.location for u in gs.player_1_units if u.location.startswith("battlefield_")}
+    p2_bfs = {u.location for u in gs.player_2_units if u.location.startswith("battlefield_")}
+    return bool(p1_bfs & p2_bfs)
+
+
+def _shortcut_to_actions(shortcut: Shortcut) -> list[str]:
+    """Expand one Shortcut into the engine-action strings that execute it.
+
+    Port of the client-side ``executionSteps`` in
+    ``riftbound/src/utils/shortcuts.ts``. The tricky bit is that
+    ``recycle_rune`` / ``exhaust_and_recycle_rune`` POP runes from the pool,
+    shifting indices for everything still in the pool; plain ``exhaust_rune``
+    does not. We therefore:
+
+    1. Run all pop-actions FIRST, in descending rune_index order, so no pop
+       disturbs the indices of pending pop targets.
+    2. For each ``exhaust_rune``, remap its original index by subtracting the
+       count of already-popped lower-index runes.
+    3. Finally emit ``play:play_unit:<i>`` / ``play:play_spell:<i>``.
+
+    The advanced auto-play loop appends ``play:choose_location:*`` separately
+    when a play_unit ends up with a pending_play.
+    """
+    pops = sorted(
+        (s for s in shortcut.plan if s.action != "exhaust_rune"),
+        key=lambda s: -s.rune_index,
+    )
+    exhausts = [s for s in shortcut.plan if s.action == "exhaust_rune"]
+    pop_indices_asc = sorted(p.rune_index for p in pops)
+
+    out: list[str] = []
+    for p in pops:
+        out.append(f"play:{p.action}:{p.rune_index}")
+    for e in exhausts:
+        shift = sum(1 for i in pop_indices_asc if i < e.rune_index)
+        out.append(f"play:exhaust_rune:{e.rune_index - shift}")
+    out.append(f"play:{shortcut.play_action}:{shortcut.card_index}")
+    return out
+
+
+def _best_play_unit_location(gs: GameState, actor: RequiredTo) -> str:
+    """Where to place a FRESHLY PLAYED unit.
+
+    ``play_unit`` is gated by ``player_controls_location`` — the engine
+    refuses to place a fresh unit on a BF the active player doesn't
+    already control. So this function only ever returns a CONTROLLABLE
+    location:
+
+      1. A battlefield the active player already controls (consolidate
+         board presence at the front line).
+      2. Base (always controllable; the fallback for turn 1 when no BF
+         is yet controlled).
+
+    Aggression onto an uncontrolled or opponent BF goes through
+    ``move_unit`` instead — see ``_advanced_auto_play``.
+    """
+    for bf_key, ctrl in (
+        ("battlefield_1", gs.battlefield_1_controller),
+        ("battlefield_2", gs.battlefield_2_controller),
+    ):
+        if ctrl == actor:
+            return bf_key
+    return "base"
+
+
+def _aggression_target(gs: GameState, actor: RequiredTo) -> str | None:
+    """Pick a battlefield ``actor`` should move a ready unit into to push
+    the game toward the contested-BF stop condition.
+
+    Preference order:
+      1. A battlefield the OPPONENT controls — moving onto it directly
+         contests the BF (both players will have units there once the
+         move applies).
+      2. An UNCONTROLLED battlefield — opens a fresh showdown, the loop's
+         pass/pass resolution hands it to the initiator. The opponent's
+         next aggression move into that BF is what eventually contests it.
+
+    Returns ``None`` when both BFs are already controlled by ``actor``
+    (nothing to push into) or when no BFs exist yet.
+    """
+    opponent = GameEngine.opponent_of(actor)
+    # First pass: an opponent-controlled BF (contests immediately).
+    for bf_key, ctrl in (
+        ("battlefield_1", gs.battlefield_1_controller),
+        ("battlefield_2", gs.battlefield_2_controller),
+    ):
+        if ctrl == opponent:
+            return bf_key
+    # Second pass: an uncontrolled BF.
+    for bf_key, ctrl in (
+        ("battlefield_1", gs.battlefield_1_controller),
+        ("battlefield_2", gs.battlefield_2_controller),
+    ):
+        if ctrl is None:
+            return bf_key
+    return None
+
+
+def _ready_unit_at_base(gs: GameState, actor: RequiredTo) -> int | None:
+    """Index of a ready (non-exhausted) unit owned by ``actor`` sitting at
+    base, or ``None`` if no such unit exists. Used by the advanced loop to
+    decide whether ``move_unit`` is available this turn.
+    """
+    units = gs.player_1_units if actor == RequiredTo.PLAYER_1 else gs.player_2_units
+    for i, u in enumerate(units):
+        if u.location == "base" and not u.exhausted:
+            return i
+    return None
+
+
+def _resolve_pending_showdown(engine: GameEngine, output: EngineOutput) -> EngineOutput:
+    """Both players pass any pending showdown.
+
+    Advanced auto-play is non-interactive: we don't play "showdown spells",
+    so the deterministic resolution is simply initiator passes, then
+    opponent passes. The engine takes care of awarding the battlefield to
+    the initiator.
+    """
+    while output.game_state.pending_showdown is not None:
+        sd = output.game_state.pending_showdown
+        if not sd.initiator_passed:
+            output = engine.apply_action(action="play:pass_showdown", actor=sd.initiator)
+            continue
+        opp = GameEngine.opponent_of(sd.initiator)
+        if not sd.opponent_passed:
+            output = engine.apply_action(action="play:pass_showdown", actor=opp)
+            continue
+        # Both flagged passed but pending_showdown still set — shouldn't
+        # happen, but guard against an infinite loop.
+        break
+    return output
+
+
+def _advanced_auto_play(engine: GameEngine, output: EngineOutput) -> EngineOutput:
+    """Run hardcoded moves through the action turn until a battlefield is
+    contested by both players.
+
+    The "hardcoded script" is deterministic in two senses:
+
+    1. The library shuffle is seeded (see ``reset_engine``), so the cards
+       drawn at each index are reproducible across resets.
+    2. The play algorithm itself is fully deterministic — given the same
+       hand and pool it always picks the same action: try to play the
+       first affordable Unit (via the leftmost combo from
+       ``compute_play_intents``), place it at the most aggressive
+       controllable battlefield, end the turn when no Unit can be played.
+
+    Together those two properties mean: same seed + same decks ⇒ same
+    sequence of moves, every reset. That's the "fixed draw + hardcoded
+    moves" Nathan asked for.
+
+    The loop short-circuits the moment ``_battlefield_contested`` returns
+    True, so as soon as both players have a unit at the same BF we stop
+    and hand control back. Any illegal move raises (per the "this can't
+    happen" design call) — see the docstring on ``FakeFillMode.ADVANCED``.
+    """
+    # Outer safety cap. A typical run resolves in 5–15 actions; 256 is a
+    # generous upper bound that prevents a runaway loop if the script ever
+    # ends up in a state where neither player can play a unit AND no
+    # battlefield gets contested.
+    for _ in range(256):
+        gs = output.game_state
+        if _battlefield_contested(gs):
+            return output
+
+        ra = output.required_action
+        if ra is None:
+            return output
+        if ra.name != RequiredStep.ACTION_TURN:
+            # Still in setup, or a state the advanced loop doesn't drive.
+            return output
+
+        # Showdowns can also pop in the middle of a turn (e.g. moving a
+        # ready unit into an uncontrolled battlefield). Resolve before
+        # planning the next play.
+        if gs.pending_showdown is not None:
+            output = _resolve_pending_showdown(engine, output)
+            continue
+
+        # Defensive: if anything ever leaves a pending_play around at the
+        # top of the loop (the inner "play then choose_location" pair
+        # already handles the normal case), resolve it before trying to
+        # compute new intents — compute_play_intents short-circuits to []
+        # when pending_play is set, which would otherwise end the turn
+        # mid-play and crash.
+        if gs.pending_play is not None:
+            active_pp = gs.pending_play.actor
+            loc = _best_play_unit_location(gs, active_pp)
+            output = engine.apply_action(
+                action=f"play:choose_location:{loc}",
+                actor=active_pp,
+            )
+            if output.game_state.pending_showdown is not None:
+                output = _resolve_pending_showdown(engine, output)
+            continue
+
+        active = gs.current_player
+
+        # Priority 1: push a ready base unit onto a BF we don't control.
+        # This is the action that actually moves the game toward the
+        # contested-BF stop condition — fresh plays go to base, and only
+        # move_unit can contest a battlefield. We pick this before
+        # play_unit so a ready unit doesn't sit idle at base.
+        ready_idx = _ready_unit_at_base(gs, active)
+        target_bf = _aggression_target(gs, active) if ready_idx is not None else None
+        if ready_idx is not None and target_bf is not None:
+            output = engine.apply_action(
+                action=f"play:move_unit:{ready_idx}:{target_bf}",
+                actor=active,
+            )
+            # move_unit onto an uncontrolled-or-opponent BF opens a showdown.
+            # The stop condition can already be true at this point (the
+            # opponent had a unit at that BF) — checked at the top of the
+            # next iteration.
+            if output.game_state.pending_showdown is not None:
+                output = _resolve_pending_showdown(engine, output)
+            continue
+
+        # Priority 2: play the cheapest affordable Unit from hand to a
+        # controllable location (base, or a BF we already own).
+        intents = compute_play_intents(engine, active)
+        unit_intents = [i for i in intents if i.play_action == "play_unit"]
+        target = unit_intents[0] if unit_intents else None
+
+        if target is not None and target.combos:
+            for action_str in _shortcut_to_actions(target.combos[0]):
+                output = engine.apply_action(action=action_str, actor=active)
+            # play_unit always leaves a pending_play waiting for a location.
+            if output.game_state.pending_play is not None:
+                loc = _best_play_unit_location(output.game_state, active)
+                output = engine.apply_action(
+                    action=f"play:choose_location:{loc}",
+                    actor=active,
+                )
+            continue
+
+        # Priority 3: nothing to play, nothing to move — end the turn.
+        output = engine.apply_action(action="play:end_turn", actor=active)
+
+    return output
+
+
 def _auto_fake_fill(engine: GameEngine, output: EngineOutput) -> EngineOutput:
     cfg = get_fake_fill_config()
     if not cfg.enabled:
@@ -212,6 +465,13 @@ def _auto_fake_fill(engine: GameEngine, output: EngineOutput) -> EngineOutput:
 
         break
 
+    # Advanced mode keeps going past the setup phase: once we land in the
+    # action turn (mulligan done, ABCD auto-completed inside engine.start),
+    # we hardcode moves until a battlefield is contested.
+    if cfg.mode == FakeFillMode.ADVANCED and output.required_action is not None:
+        if output.required_action.name == RequiredStep.ACTION_TURN:
+            output = _advanced_auto_play(engine, output)
+
     return output
 
 
@@ -284,14 +544,29 @@ def _serialize_fake_fill(cfg: FakeFillConfig) -> dict[str, Any]:
             "player_2_battlefield": cfg.player_2_battlefield,
             "first_turn": cfg.first_turn.value,
             "mulligan_bottom": cfg.mulligan_bottom,
+            "mode": cfg.mode.value,
+            "advanced_seed": cfg.advanced_seed,
         },
         "decks": list_decks_with_battlefields(),
     }
 
 
 def reset_engine() -> EngineOutput:
+    """Recreate the engine, run start(), then apply fake-fill auto-pilot.
+
+    In ADVANCED mode the engine is constructed with a SEEDED RNG so the
+    library and rune-library shuffles produce the same order every time —
+    this is what lets the advanced auto-play script's hardcoded moves stay
+    valid across resets. EARLY mode (and the case when fake-fill is
+    disabled entirely) uses a fresh ``random.Random()``, matching the
+    original non-deterministic behaviour.
+    """
     global _engine, _last_output, _initial_state, _branch_states
-    _engine = GameEngine()
+    cfg = get_fake_fill_config()
+    if cfg.enabled and cfg.mode == FakeFillMode.ADVANCED:
+        _engine = GameEngine(rng=random.Random(cfg.advanced_seed))
+    else:
+        _engine = GameEngine()
     _last_output = _engine.start()
     _last_output = _auto_fake_fill(_engine, _last_output)
     # Snapshot the post-fake-fill state. /branch/back uses this to restore
@@ -555,6 +830,11 @@ class FakeFillUpdateBody(BaseModel):
     player_2_battlefield: str | None = None
     first_turn: str | None = Field(default=None, description="player_1 or player_2")
     mulligan_bottom: str | None = None
+    mode: str | None = Field(default=None, description="'early' or 'advanced'")
+    advanced_seed: int | None = Field(
+        default=None,
+        description="RNG seed used to shuffle the library in advanced mode (reproducible draw)",
+    )
 
 
 class DeckSaveBody(BaseModel):

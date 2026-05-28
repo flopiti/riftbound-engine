@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from threading import Lock
 from typing import Any
 
@@ -17,6 +18,28 @@ from .deck_files import list_deck_ids, load_deck_file
 from .engine import RequiredTo
 
 _DEFAULT_FALLBACK_BATTLEFIELD = "Altar to Unity"
+_DEFAULT_ADVANCED_SEED = 42
+
+
+class FakeFillMode(StrEnum):
+    """Two flavours of auto-pilot.
+
+    * ``EARLY`` — the historical behaviour: just resolves deck / battlefield /
+      first-turn / mulligan and hands control back at the first action turn.
+      The library is shuffled with a fresh RNG, so each reset deals different
+      cards.
+    * ``ADVANCED`` — uses a SEEDED RNG so the library always shuffles to the
+      same order (reproducible "fixed draw"), then continues auto-playing
+      hardcoded moves through the action turn until any single battlefield is
+      contested by both players. Once contested, control hands back to the
+      user.
+
+    The mode is part of the runtime fake-fill config and can be toggled from
+    the dashboard.
+    """
+
+    EARLY = "early"
+    ADVANCED = "advanced"
 
 
 @dataclass
@@ -32,6 +55,9 @@ class FakeFillConfig:
     player_2_battlefield: str = ""
     first_turn: RequiredTo = RequiredTo.PLAYER_1
     mulligan_bottom: str = ""  # comma-separated hand indices (0-3), max 2; empty = none
+    # ADVANCED mode extras. Both ignored when ``mode == EARLY``.
+    mode: FakeFillMode = FakeFillMode.EARLY
+    advanced_seed: int = _DEFAULT_ADVANCED_SEED
 
 
 def _env_enabled_default() -> bool:
@@ -68,6 +94,8 @@ def _initial_config() -> FakeFillConfig:
         player_2_battlefield=_default_battlefield(p2),
         first_turn=RequiredTo.PLAYER_1,
         mulligan_bottom="",
+        mode=FakeFillMode.EARLY,
+        advanced_seed=_DEFAULT_ADVANCED_SEED,
     )
 
 
@@ -89,6 +117,8 @@ _ALLOWED_FIELDS = {
     "player_2_battlefield",
     "first_turn",
     "mulligan_bottom",
+    "mode",
+    "advanced_seed",
 }
 
 
@@ -111,6 +141,17 @@ def update_config(updates: dict[str, Any]) -> FakeFillConfig:
                 value = bool(value)
             elif key == "mulligan_bottom":
                 value = str(value)
+            elif key == "mode":
+                if not isinstance(value, FakeFillMode):
+                    try:
+                        value = FakeFillMode(value)
+                    except ValueError:
+                        continue
+            elif key == "advanced_seed":
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
             else:
                 value = str(value)
             setattr(_config, key, value)
