@@ -1,4 +1,4 @@
-ID,Name,,,,,,Energy,Might,Power,Card Type,Rarity,Domain,Tags,Ability,Image URL
+ID,Name,,,,,,Energy,Might,Power,Card Type,Rarity,Domain,Tags,Ability,Image URL,Spell Choice Requirement
 ogn-001,Blazing Scorcher,,,,,,5,5,,Unit,Common,Fury,"Dragon, Noxus",[Accelerate] (You may pay 1 energy and 1 fury rune as an additional cost to have me enter ready.),https://cmsassets.rgpub.io/sanity/images/dsfx7636/game_data_live/15ed971e4029a92b362a81ccadf309fb81e40b81-744x1039.png
 ogn-002,Brazen Buccaneer,,,,,,6,5,,Unit,Common,Fury,"Pirate, Bilgewater","As you play me, you may discard 1 as an additional cost. If you do, reduce my cost by 2 energy.",https://cmsassets.rgpub.io/sanity/images/dsfx7636/game_data_live/d481971f7560e7235e7d6934767da18daa019eff-744x1039.png
 ogn-003,Chemtech Enforcer,,,,,,2,2,,Unit,Common,Fury,Zaun,"[Assault 2] (+2 might while I'm an attacker.) When you play me, discard 1.",https://cmsassets.rgpub.io/sanity/images/dsfx7636/game_data_live/19dcf211457d9c9c6e9ea0cd32af76c2c92a3160-744x1039.png
