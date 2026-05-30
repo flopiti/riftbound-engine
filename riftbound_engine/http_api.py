@@ -8,7 +8,7 @@ import random
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -260,6 +260,22 @@ def _ready_unit_at_base(gs: GameState, actor: RequiredTo) -> int | None:
     return None
 
 
+#: When set (only during reset's advanced fast-forward), every action the
+#: auto-play applies is reported here so reset_engine can rebuild the
+#: branch-tree path/states from the exact moves it made. None ⇒ no recording.
+_step_recorder: "Callable[[str, str], None] | None" = None
+
+
+def _apply(engine: GameEngine, action: str, actor: RequiredTo) -> EngineOutput:
+    """Apply one auto-play action AND report it to the active step recorder
+    (if any), so each fast-forwarded move becomes a branch-tree node instead
+    of vanishing into a single 'start' node."""
+    out = engine.apply_action(action=action, actor=actor)
+    if _step_recorder is not None:
+        _step_recorder(actor.value, action)
+    return out
+
+
 def _resolve_pending_showdown(engine: GameEngine, output: EngineOutput) -> EngineOutput:
     """Both players pass any pending showdown.
 
@@ -271,11 +287,11 @@ def _resolve_pending_showdown(engine: GameEngine, output: EngineOutput) -> Engin
     while output.game_state.pending_showdown is not None:
         sd = output.game_state.pending_showdown
         if not sd.initiator_passed:
-            output = engine.apply_action(action="play:pass_showdown", actor=sd.initiator)
+            output = _apply(engine, "play:pass_showdown", sd.initiator)
             continue
         opp = GameEngine.opponent_of(sd.initiator)
         if not sd.opponent_passed:
-            output = engine.apply_action(action="play:pass_showdown", actor=opp)
+            output = _apply(engine, "play:pass_showdown", opp)
             continue
         # Both flagged passed but pending_showdown still set — shouldn't
         # happen, but guard against an infinite loop.
@@ -338,10 +354,7 @@ def _advanced_auto_play(engine: GameEngine, output: EngineOutput) -> EngineOutpu
         if gs.pending_play is not None:
             active_pp = gs.pending_play.actor
             loc = _best_play_unit_location(gs, active_pp)
-            output = engine.apply_action(
-                action=f"play:choose_location:{loc}",
-                actor=active_pp,
-            )
+            output = _apply(engine, f"play:choose_location:{loc}", active_pp)
             if output.game_state.pending_showdown is not None:
                 output = _resolve_pending_showdown(engine, output)
             continue
@@ -356,10 +369,7 @@ def _advanced_auto_play(engine: GameEngine, output: EngineOutput) -> EngineOutpu
         ready_idx = _ready_unit_at_base(gs, active)
         target_bf = _aggression_target(gs, active) if ready_idx is not None else None
         if ready_idx is not None and target_bf is not None:
-            output = engine.apply_action(
-                action=f"play:move_unit:{ready_idx}:{target_bf}",
-                actor=active,
-            )
+            output = _apply(engine, f"play:move_unit:{ready_idx}:{target_bf}", active)
             # move_unit onto an uncontrolled-or-opponent BF opens a showdown.
             # The stop condition can already be true at this point (the
             # opponent had a unit at that BF) — checked at the top of the
@@ -376,18 +386,15 @@ def _advanced_auto_play(engine: GameEngine, output: EngineOutput) -> EngineOutpu
 
         if target is not None and target.combos:
             for action_str in _shortcut_to_actions(target.combos[0]):
-                output = engine.apply_action(action=action_str, actor=active)
+                output = _apply(engine, action_str, active)
             # play_unit always leaves a pending_play waiting for a location.
             if output.game_state.pending_play is not None:
                 loc = _best_play_unit_location(output.game_state, active)
-                output = engine.apply_action(
-                    action=f"play:choose_location:{loc}",
-                    actor=active,
-                )
+                output = _apply(engine, f"play:choose_location:{loc}", active)
             continue
 
         # Priority 3: nothing to play, nothing to move — end the turn.
-        output = engine.apply_action(action="play:end_turn", actor=active)
+        output = _apply(engine, "play:end_turn", active)
 
     return output
 
@@ -465,13 +472,12 @@ def _auto_fake_fill(engine: GameEngine, output: EngineOutput) -> EngineOutput:
 
         break
 
-    # Advanced mode keeps going past the setup phase: once we land in the
-    # action turn (mulligan done, ABCD auto-completed inside engine.start),
-    # we hardcode moves until a battlefield is contested.
-    if cfg.mode == FakeFillMode.ADVANCED and output.required_action is not None:
-        if output.required_action.name == RequiredStep.ACTION_TURN:
-            output = _advanced_auto_play(engine, output)
-
+    # NOTE: ADVANCED mode's gameplay fast-forward is intentionally NOT run
+    # here. It used to run on every snapshot poll, which (a) re-advanced the
+    # game after a /branch/back, defeating rewind, and (b) recorded no branch
+    # nodes, so the tree showed only "start". Advanced fast-forward now runs
+    # ONCE in reset_engine, recording each move as a branch step. This
+    # function only auto-resolves the setup choices (idempotent on re-poll).
     return output
 
 
@@ -569,12 +575,60 @@ def reset_engine() -> EngineOutput:
         _engine = GameEngine()
     _last_output = _engine.start()
     _last_output = _auto_fake_fill(_engine, _last_output)
-    # Snapshot the post-fake-fill state. /branch/back uses this to restore
-    # the engine when the user trims the path all the way back to empty.
+    # Branch-tree ROOT = the state at the start of the action turn (setup
+    # auto-resolved, nothing played yet). /branch/back to an empty path
+    # restores this.
     _initial_state = _capture_state()
     _branch_states = []
     _reset_branch_tree()
+
+    # ADVANCED: fast-forward the opening moves ONCE, recording each as a
+    # branch node so the tree reflects the jumped-forward position (and the
+    # moves are rewindable). EARLY mode lands at the action turn with an
+    # empty path, as before.
+    if (
+        cfg.enabled
+        and cfg.mode == FakeFillMode.ADVANCED
+        and _last_output.required_action is not None
+        and _last_output.required_action.name == RequiredStep.ACTION_TURN
+    ):
+        _last_output = _record_advanced_fast_forward(_last_output)
     return _last_output
+
+
+def _record_advanced_fast_forward(output: EngineOutput) -> EngineOutput:
+    """Run the advanced gameplay fast-forward ONCE, recording every move as a
+    branch-tree node (with the post-move state captured) so the tree shows
+    the jumped-forward position and each move can be rewound to."""
+    global _step_recorder, _branch_path, _branch_states, _branch_nodes_visited
+    path: list[BranchStep] = []
+    states: list[GameState] = []
+
+    def rec(actor_val: str, action: str) -> None:
+        path.append(
+            {
+                "actor": actor_val,
+                "action": action,
+                "label": action,
+                "intent_only": False,
+                "shortcut": None,
+                "intent": None,
+            }
+        )
+        states.append(_capture_state())
+
+    _step_recorder = rec
+    try:
+        output = _advanced_auto_play(_engine, output)
+    finally:
+        _step_recorder = None
+
+    _branch_path = path
+    _branch_states = states
+    _branch_nodes_visited = len(path)
+    for i in range(1, len(path) + 1):
+        _branch_visited.add(_branch_path_key(path[:i]))
+    return output
 
 
 def _deck_to_json(deck: Deck | None) -> dict[str, Any] | None:
@@ -642,12 +696,50 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
             {"card": u.card, "location": u.location, "exhausted": u.exhausted}
             for u in gs.player_2_units
         ],
-        "player_1_spells": [{"card": s.card} for s in gs.player_1_spells],
-        "player_2_spells": [{"card": s.card} for s in gs.player_2_spells],
+        "player_1_spells": [
+            {"card": s.card, "targets": list(s.targets), "order": s.order}
+            for s in gs.player_1_spells
+        ],
+        "player_2_spells": [
+            {"card": s.card, "targets": list(s.targets), "order": s.order}
+            for s in gs.player_2_spells
+        ],
+        "player_1_gears": [
+            {"card": g.card, "location": g.location, "exhausted": g.exhausted}
+            for g in gs.player_1_gears
+        ],
+        "player_2_gears": [
+            {"card": g.card, "location": g.location, "exhausted": g.exhausted}
+            for g in gs.player_2_gears
+        ],
+        # Dead units (e.g. killed in combat), by card name, in death order.
+        "player_1_trash": list(gs.player_1_trash),
+        "player_2_trash": list(gs.player_2_trash),
         "pending_play": (
             None
             if gs.pending_play is None
             else {"actor": gs.pending_play.actor.value, "card": gs.pending_play.card}
+        ),
+        "pending_spell_choice": (
+            None
+            if gs.pending_spell_choice is None
+            else {
+                "actor": gs.pending_spell_choice.actor.value,
+                "card": gs.pending_spell_choice.card,
+                "requirement": gs.pending_spell_choice.requirement,
+            }
+        ),
+        "pending_chain": (
+            None
+            if gs.pending_chain is None
+            else {
+                "priority": gs.pending_chain.priority.value,
+                "consecutive_passes": gs.pending_chain.consecutive_passes,
+                "items": [
+                    {"actor": it.actor.value, "card": it.card, "targets": list(it.targets)}
+                    for it in gs.pending_chain.items
+                ],
+            }
         ),
         "pending_payment": (
             None

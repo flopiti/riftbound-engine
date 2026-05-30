@@ -20,11 +20,19 @@ the client sends back.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from .csv_data import card_domains_of, card_energy_of, card_power_of, card_type_of
+from .csv_data import (
+    card_domains_of,
+    card_energy_of,
+    card_is_reaction,
+    card_power_of,
+    card_type_of,
+)
 from .engine import GameEngine, RequiredTo, Rune
+from .requirements import spell_playable
 
 
 @dataclass(frozen=True)
@@ -238,8 +246,12 @@ def _plan_payments(
     card is already free-to-play (the engine surfaces play_unit directly
     in that case) or impossible to pay.
 
-    Subset enumeration is 2^n, but n is bounded by the rune pool size
-    (typically ≤ 10), so this stays well under a millisecond per card.
+    Only rune subsets up to ``energy_gap + power_gap`` in size are considered:
+    each rune contributes at most +1 Energy and +1 Power, so a MINIMAL plan
+    can never use more runes than that. Bounding the subset size (instead of
+    walking all 2**n subsets) keeps planning fast even with a full rune pool —
+    the old all-subsets walk blew up to millions of states for a 12-rune pool
+    and made both the UI poll and the advanced auto-pilot hang.
     """
     allowed = set(cost_domains)
     e_gap0 = max(0, energy_cost - current_energy)
@@ -251,16 +263,32 @@ def _plan_payments(
     if n == 0:
         return []
 
+    # Upper bound on a minimal plan's size (see docstring). Plans from a mask
+    # always use every rune in the mask, so mask popcount == plan length.
+    max_size = min(n, e_gap0 + p_gap0)
+    #: Safety cap on distinct domain-multiset plans collected. The UI only
+    #: ever shows a handful; this guards pathological high-cost enumerations.
+    PLAN_CAP = 64
+
     seen_action_keys: set[str] = set()
+    domain_keys_seen: set[str] = set()
     all_plans: list[list[ShortcutStep]] = []
-    total = 1 << n
-    for mask in range(1, total):
-        for plan in _solve_subset(mask, runes, allowed, e_gap0, p_gap0):
-            k = _canonical_key(plan)
-            if k in seen_action_keys:
-                continue
-            seen_action_keys.add(k)
-            all_plans.append(plan)
+    for size in range(1, max_size + 1):
+        for combo in itertools.combinations(range(n), size):
+            mask = 0
+            for i in combo:
+                mask |= 1 << i
+            for plan in _solve_subset(mask, runes, allowed, e_gap0, p_gap0):
+                k = _canonical_key(plan)
+                if k in seen_action_keys:
+                    continue
+                seen_action_keys.add(k)
+                all_plans.append(plan)
+                domain_keys_seen.add(_domain_multiset_key(plan))
+        # Smallest plans are found first (size ascending), so once we have
+        # plenty of distinct domain-multiset options we can stop.
+        if len(domain_keys_seen) >= PLAN_CAP:
+            break
 
     # Sort so the "preferred" plan per domain-multiset wins:
     #   1. Fewer exhaust_and_recycle actions (leaves more ready runes for
@@ -340,14 +368,30 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
     gs = engine._game_state
     if gs.pending_play is not None:
         return []
+    if gs.pending_spell_choice is not None:
+        return []
     if gs.pending_payment is not None:
         return []
     if gs.pending_showdown is not None:
         return []
+    if gs.pending_combat is not None:
+        # Mid-combat the only legal actions are the damage assignments
+        # surfaced by the engine — no cards may be played.
+        return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
         return []
-    if gs.current_player != actor:
-        return []
+    # During an open chain only the player holding priority gets a picker,
+    # and it's restricted to [Reaction] spells (responses). With no chain,
+    # only the active player gets the normal full picker.
+    chain = gs.pending_chain
+    if chain is not None:
+        if actor != chain.priority:
+            return []
+        reaction_only = True
+    else:
+        if gs.current_player != actor:
+            return []
+        reaction_only = False
 
     hand = gs.player_1_hand if actor == RequiredTo.PLAYER_1 else gs.player_2_hand
     if not hand:
@@ -369,7 +413,15 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
             # them at a time and the planning result is identical).
             continue
         card_type = card_type_of(card)
-        if card_type not in ("Unit", "Spell"):
+        if card_type not in ("Unit", "Spell", "Gear"):
+            continue
+        if reaction_only and not card_is_reaction(card):
+            continue
+        # Spells must also have a satisfiable Spell Choice Requirement —
+        # a valid target set on the current board — not just an affordable
+        # cost. See riftbound_engine/requirements.py. (Units have no such
+        # requirement today.)
+        if card_type == "Spell" and not spell_playable(gs, card):
             continue
         energy_cost = card_energy_of(card) or 0
         power_cost = card_power_of(card) or 0
@@ -384,7 +436,9 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         )
         if not plans:
             continue
-        play_action = "play_spell" if card_type == "Spell" else "play_unit"
+        play_action = {"Spell": "play_spell", "Gear": "play_gear"}.get(
+            card_type, "play_unit"
+        )
         combos = tuple(
             _build_shortcut(
                 actor=actor,
@@ -423,14 +477,28 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
     gs = engine._game_state
     if gs.pending_play is not None:
         return []
+    if gs.pending_spell_choice is not None:
+        return []
     if gs.pending_payment is not None:
         return []
     if gs.pending_showdown is not None:
         return []
+    if gs.pending_combat is not None:
+        return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
         return []
-    if gs.current_player != actor:
-        return []
+    # Mirror compute_play_intents: during an open chain only the priority
+    # holder gets options, restricted to [Reaction] spells; otherwise only
+    # the active player gets the full picker.
+    chain = gs.pending_chain
+    if chain is not None:
+        if actor != chain.priority:
+            return []
+        reaction_only = True
+    else:
+        if gs.current_player != actor:
+            return []
+        reaction_only = False
 
     hand = gs.player_1_hand if actor == RequiredTo.PLAYER_1 else gs.player_2_hand
     if not hand:
@@ -446,7 +514,13 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
     out: list[Shortcut] = []
     for i, card in enumerate(hand):
         card_type = card_type_of(card)
-        if card_type not in ("Unit", "Spell"):
+        if card_type not in ("Unit", "Spell", "Gear"):
+            continue
+        if reaction_only and not card_is_reaction(card):
+            continue
+        # Same requirement gate as compute_play_intents: a Spell only
+        # appears if it has a valid target set on the current board.
+        if card_type == "Spell" and not spell_playable(gs, card):
             continue
         energy_cost = card_energy_of(card) or 0
         power_cost = card_power_of(card) or 0
@@ -461,7 +535,9 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
         )
         if not plans:
             continue
-        play_action = "play_spell" if card_type == "Spell" else "play_unit"
+        play_action = {"Spell": "play_spell", "Gear": "play_gear"}.get(
+            card_type, "play_unit"
+        )
         for plan in plans:
             out.append(
                 _build_shortcut(

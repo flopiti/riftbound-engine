@@ -49,6 +49,16 @@ def _play_unit(ctx: ActionTurnContext) -> None:
     gs = ctx.engine._game_state
     if gs.pending_play is not None:
         raise ValueError("a play is already waiting for a location; choose one first")
+    if gs.pending_spell_choice is not None:
+        raise ValueError(
+            "cannot play a unit while a spell is waiting for target selection — "
+            "choose its targets first"
+        )
+    if gs.pending_chain is not None:
+        raise ValueError(
+            "cannot play a unit while the chain is open — pass priority (or "
+            "respond with a Reaction) until the chain resolves"
+        )
     if gs.pending_showdown is not None:
         raise ValueError(
             "cannot play units while a showdown is in progress — "
@@ -112,6 +122,116 @@ def _play_unit(ctx: ActionTurnContext) -> None:
     gs.pending_play = PendingPlay(actor=ctx.actor, card=card)
 
 
+@register_turn_action("play_gear")
+def _play_gear(ctx: ActionTurnContext) -> None:
+    """Play a card whose CSV ``Card Type`` is ``Gear``.
+
+    Payload is the 0-based hand index. Gears are paid exactly like units —
+    the same Energy + domain Power cost gates apply and both costs are
+    deducted up front — but they differ in how they enter play:
+
+      * there is NO ``pending_play`` / ``play:choose_location`` follow-up; the
+        gear is committed to the owner's ``base`` immediately, the way a spell
+        skips location selection; and
+      * it enters **ready** (``exhausted=False``), unlike a unit which enters
+        exhausted with summoning sickness.
+
+    A gear then stays at base for the rest of the match — it is never offered
+    a ``play:move_unit`` option (see engine option generation), so it cannot
+    move. Only cards whose CSV ``Card Type`` is ``Gear`` may be played here.
+    """
+    from ..csv_data import card_type_of
+    from ..engine import PlayedGear
+    from ..engine import RequiredTo as RT
+
+    payload = ctx.payload.strip()
+    if not payload:
+        raise ValueError("play:play_gear requires a hand index (e.g. play:play_gear:0)")
+    try:
+        index = int(payload)
+    except ValueError as e:
+        raise ValueError(f"play:play_gear index must be an integer, got {payload!r}") from e
+
+    gs = ctx.engine._game_state
+    # Same play gates as a unit: a gear is an action-timing play, not a
+    # reaction, so it can't be slipped in mid-resolution.
+    if gs.pending_play is not None:
+        raise ValueError("a play is already waiting for a location; choose one first")
+    if gs.pending_spell_choice is not None:
+        raise ValueError(
+            "cannot play a gear while a spell is waiting for target selection — "
+            "choose its targets first"
+        )
+    if gs.pending_chain is not None:
+        raise ValueError(
+            "cannot play a gear while the chain is open — pass priority (or "
+            "respond with a Reaction) until the chain resolves"
+        )
+    if gs.pending_showdown is not None:
+        raise ValueError(
+            "cannot play gears while a showdown is in progress — "
+            "resolve the showdown first"
+        )
+    if gs.pending_combat is not None:
+        raise ValueError(
+            "cannot play gears while a contested showdown is in combat — "
+            "commit your kills first"
+        )
+
+    if ctx.actor == RT.PLAYER_1:
+        hand = gs.player_1_hand
+        gears = gs.player_1_gears
+    elif ctx.actor == RT.PLAYER_2:
+        hand = gs.player_2_hand
+        gears = gs.player_2_gears
+    else:
+        raise ValueError("play_gear requires player_1 or player_2")
+
+    if hand is None:
+        raise ValueError("hand is not initialized")
+    if index < 0 or index >= len(hand):
+        raise ValueError(f"play_gear index out of range: {index} (hand size {len(hand)})")
+
+    # Peek the card before mutating state — if it's not a Gear, reject without
+    # disturbing the hand.
+    card = hand[index]
+    card_type = card_type_of(card)
+    if card_type != "Gear":
+        raise ValueError(
+            f"'{card}' cannot be played as a gear "
+            f"(CSV Card Type: {card_type or 'unknown'}; only 'Gear' is allowed)"
+        )
+
+    energy_cost = ctx.engine.card_energy_cost(card)
+    energy = ctx.engine.player_energy(ctx.actor)
+    if energy_cost > energy:
+        raise ValueError(
+            f"cannot play '{card}': costs {energy_cost} Energy but only {energy} available"
+            f" — exhaust runes first to produce Energy"
+        )
+
+    power_cost = ctx.engine.card_power_cost(card)
+    if power_cost > 0:
+        if not ctx.engine.can_afford_power_cost(ctx.actor, card):
+            domains = ctx.engine.card_domains(card)
+            domain_label = " / ".join(domains) if domains else "<no domain>"
+            pool = ctx.engine.player_power(ctx.actor)
+            available = sum(pool.get(d, 0) for d in domains)
+            raise ValueError(
+                f"cannot play '{card}': costs {power_cost} {domain_label} Power "
+                f"but only {available} available — recycle runes first to produce Power"
+            )
+
+    # Deduct both costs up front, then commit the gear straight to base in the
+    # READY state (no pending_play, no location pick).
+    if energy_cost > 0:
+        ctx.engine.add_energy(ctx.actor, -energy_cost)
+    if power_cost > 0:
+        ctx.engine._deduct_power_cost(ctx.actor, card)
+    hand.pop(index)
+    gears.append(PlayedGear(card=card, location="base", exhausted=False))
+
+
 @register_turn_action("play_spell")
 def _play_spell(ctx: ActionTurnContext) -> None:
     """Play a card whose CSV ``Card Type`` is ``Spell``.
@@ -144,6 +264,11 @@ def _play_spell(ctx: ActionTurnContext) -> None:
         raise ValueError(
             "cannot play a spell while a unit is waiting for a location — "
             "choose the location first"
+        )
+    if gs.pending_spell_choice is not None:
+        raise ValueError(
+            "cannot play a spell while another spell is waiting for target "
+            "selection — choose its targets first"
         )
     if gs.pending_showdown is not None:
         raise ValueError(
@@ -180,6 +305,25 @@ def _play_spell(ctx: ActionTurnContext) -> None:
             f"(CSV Card Type: {card_type or 'unknown'}; only 'Spell' is allowed)"
         )
 
+    # If a chain is already open, this is a RESPONSE: only the player holding
+    # priority may act, and only with a [Reaction] spell. The opening cast
+    # (no chain yet) can be any spell, played by the active player at action
+    # timing the way it always was.
+    chain = gs.pending_chain
+    if chain is not None:
+        from ..csv_data import card_is_reaction
+
+        if ctx.actor != chain.priority:
+            raise ValueError(
+                f"priority is with {chain.priority.value}; "
+                f"{ctx.actor.value} cannot play a spell right now"
+            )
+        if not card_is_reaction(card):
+            raise ValueError(
+                f"'{card}' is not a [Reaction] spell — only Reaction spells can "
+                "be played in response while the chain is open"
+            )
+
     energy_cost = ctx.engine.card_energy_cost(card)
     energy = ctx.engine.player_energy(ctx.actor)
     if energy_cost > energy:
@@ -200,13 +344,47 @@ def _play_spell(ctx: ActionTurnContext) -> None:
                 f"but only {available} available — recycle runes first to produce Power"
             )
 
-    # Deduct both costs up front, then commit the card to the spell stack.
+    # Requirement gate (defense-in-depth). The options/intents paths already
+    # hide spells with no valid target, but a direct apply_action must not be
+    # able to play one: it would park in pending_spell_choice with zero
+    # choosable sets and soft-lock the turn. Checked BEFORE any mutation so a
+    # rejection leaves hand/pools untouched.
+    from ..requirements import spell_playable
+
+    if not spell_playable(gs, card):
+        raise ValueError(
+            f"cannot play '{card}': its Spell Choice Requirement has no valid "
+            "target on the board"
+        )
+
+    # Deduct both costs up front and remove the card from hand.
     if energy_cost > 0:
         ctx.engine.add_energy(ctx.actor, -energy_cost)
     if power_cost > 0:
         ctx.engine._deduct_power_cost(ctx.actor, card)
     hand.pop(index)
-    spells.append(PlayedSpell(card=card))
+
+    # If the card's Spell Choice Requirement forces an explicit target pick
+    # (a single ANY-UNIT phrase with minimum >= 1), park it in
+    # pending_spell_choice and let the caster choose via
+    # play:choose_spell_targets:* — the spell only reaches the chain once a
+    # valid set is chosen. Otherwise (no requirement, min-0, an unknown
+    # selector, or a multi-phrase tree) it goes straight onto the chain,
+    # which opens (or refreshes) the priority window. The card no longer
+    # lands directly in the spell pile — it resolves off the chain once both
+    # players pass (see _resolve_chain / pass_priority).
+    from ..csv_data import card_spell_requirement_of
+    from ..requirements import selectable_unit_requirement
+
+    raw_req = card_spell_requirement_of(card)
+    if selectable_unit_requirement(raw_req) is not None:
+        from ..engine import PendingSpellChoice
+
+        gs.pending_spell_choice = PendingSpellChoice(
+            actor=ctx.actor, card=card, requirement=raw_req or ""
+        )
+    else:
+        ctx.engine._push_spell_to_chain(ctx.actor, card, [])
 
 
 @register_turn_action("choose_location")
@@ -252,6 +430,98 @@ def _choose_location(ctx: ActionTurnContext) -> None:
     # on the owner's next Awake (ABCD step A).
     units.append(PlayedUnit(card=pending.card, location=location, exhausted=True))
     gs.pending_play = None
+
+
+@register_turn_action("choose_spell_targets")
+def _choose_spell_targets(ctx: ActionTurnContext) -> None:
+    """Commit the target pick for a spell waiting in ``pending_spell_choice``.
+
+    Wire format: ``play:choose_spell_targets:<refs>`` where ``<refs>`` is a
+    comma-separated list of unit refs (``p1-0`` / ``p2-1`` — controller +
+    index into that player's units list). The chosen set must satisfy the
+    card's requirement (count within range, every unit passing the per-unit
+    filters, and any group constraint like SAME_LOC / SUM). On success the
+    spell lands on the caster's spell stack with its ``targets`` recorded
+    and ``pending_spell_choice`` is cleared.
+    """
+    from ..engine import PlayedSpell
+    from ..engine import RequiredTo as RT
+    from ..requirements import (
+        selectable_unit_requirement,
+        target_set_satisfies,
+        token_to_ref,
+    )
+
+    gs = ctx.engine._game_state
+    choice = gs.pending_spell_choice
+    if choice is None:
+        raise ValueError("no spell is waiting for target selection")
+    if choice.actor != ctx.actor:
+        raise ValueError(
+            f"only the caster ({choice.actor.value}) may choose this spell's targets"
+        )
+
+    req = selectable_unit_requirement(choice.requirement)
+    if req is None:
+        # Defensive: pending_spell_choice should only ever hold a selectable
+        # requirement. If it somehow doesn't, push the spell with no targets.
+        ctx.engine._push_spell_to_chain(ctx.actor, choice.card, [])
+        gs.pending_spell_choice = None
+        return
+
+    payload = ctx.payload.strip()
+    if not payload:
+        raise ValueError(
+            "play:choose_spell_targets requires target refs "
+            "(e.g. play:choose_spell_targets:p1-0)"
+        )
+    refs = [token_to_ref(tok) for tok in payload.split(",") if tok.strip()]
+    if not target_set_satisfies(req, gs, refs):
+        raise ValueError(
+            f"invalid target set for '{choice.card}': {payload} "
+            "(wrong count, a unit doesn't match the requirement, or a group "
+            "constraint is violated)"
+        )
+
+    # Targets locked in — the spell now goes onto the chain (opening/refreshing
+    # the priority window). It reaches the spell pile when the chain resolves.
+    ctx.engine._push_spell_to_chain(
+        ctx.actor, choice.card, [f"{c}:{i}" for c, i in refs]
+    )
+    gs.pending_spell_choice = None
+
+
+@register_turn_action("pass_priority")
+def _pass_priority(ctx: ActionTurnContext) -> None:
+    """Pass priority on the open chain.
+
+    Wire format: ``play:pass_priority`` (no payload). Only the player holding
+    priority may pass. Passing hands priority to the opponent; when BOTH
+    players pass in a row (no spell added in between) the whole chain resolves
+    at once and play returns to the action turn — see
+    ``GameEngine._resolve_chain``. Casting a Reaction spell instead of passing
+    resets the pass count (handled in ``_push_spell_to_chain``).
+    """
+    gs = ctx.engine._game_state
+    chain = gs.pending_chain
+    if chain is None:
+        raise ValueError("no chain is open; there is no priority to pass")
+    if gs.pending_spell_choice is not None:
+        raise ValueError(
+            "finish choosing the pending spell's targets before passing priority"
+        )
+    if ctx.actor != chain.priority:
+        raise ValueError(
+            f"priority is with {chain.priority.value}, not {ctx.actor.value}"
+        )
+
+    chain.consecutive_passes += 1
+    if chain.consecutive_passes >= 2:
+        # Both players passed in a row — resolve the chain and reopen the
+        # action turn exactly where it was before the first spell was cast.
+        ctx.engine._resolve_chain()
+    else:
+        chain.priority = ctx.engine.opponent_of(chain.priority)
 
 
 @register_turn_action("move_unit")
@@ -312,6 +582,16 @@ def _move_unit(ctx: ActionTurnContext) -> None:
         raise ValueError(
             "cannot move units while a play is waiting for a location — "
             "choose the location first"
+        )
+    if gs.pending_spell_choice is not None:
+        raise ValueError(
+            "cannot move units while a spell is waiting for target selection — "
+            "choose its targets first"
+        )
+    if gs.pending_chain is not None:
+        raise ValueError(
+            "cannot move units while the chain is open — resolve it first "
+            "(pass priority or respond with a Reaction)"
         )
     if gs.pending_showdown is not None:
         raise ValueError(
@@ -440,14 +720,14 @@ def _pass_showdown(ctx: ActionTurnContext) -> None:
         if contested:
             # Both players have units here — open a simultaneous
             # damage-distribution combat. Each side's damage budget is
-            # their TOTAL might at this BF; they'll commit a target
-            # list via play:commit_kills:<csv-of-target-indices>.
+            # their TOTAL might at this BF; they'll assign it as lethal
+            # damage to enemy units via play:assign_damage:<csv-of-target-indices>.
             # 0-might attackers auto-commit to [] (they get to skip
             # their damage step but still have to wait for the
             # opponent's commit before combat resolves).
             from ..engine import PendingCombat
-            p1_might = ctx.engine.might_at_battlefield(RequiredTo.PLAYER_1, bf)
-            p2_might = ctx.engine.might_at_battlefield(RequiredTo.PLAYER_2, bf)
+            p1_might = ctx.engine.might_at_battlefield(RT.PLAYER_1, bf)
+            p2_might = ctx.engine.might_at_battlefield(RT.PLAYER_2, bf)
             gs.pending_combat = PendingCombat(
                 battlefield=bf,
                 player_1_might=p1_might,
@@ -525,8 +805,13 @@ def _exhaust_rune(ctx: ActionTurnContext) -> None:
             "cannot exhaust runes while a contested showdown is in combat — "
             "commit your kills first"
         )
-    if ctx.actor != gs.current_player:
-        raise ValueError("only the active player may exhaust runes")
+    if ctx.actor != gs.current_player and not (
+        gs.pending_chain is not None and ctx.actor == gs.pending_chain.priority
+    ):
+        raise ValueError(
+            "only the active player (or the priority holder while the chain is "
+            "open) may exhaust runes"
+        )
 
     pool = ctx.engine.runes_for(ctx.actor)
     if index < 0 or index >= len(pool):
@@ -564,8 +849,13 @@ def _take_rune_at_index(ctx: ActionTurnContext, index: int):
             "cannot recycle runes while a contested showdown is in combat — "
             "commit your kills first"
         )
-    if ctx.actor != gs.current_player:
-        raise ValueError("only the active player may recycle runes")
+    if ctx.actor != gs.current_player and not (
+        gs.pending_chain is not None and ctx.actor == gs.pending_chain.priority
+    ):
+        raise ValueError(
+            "only the active player (or the priority holder while the chain is "
+            "open) may recycle runes"
+        )
     pool = ctx.engine.runes_for(ctx.actor)
     if index < 0 or index >= len(pool):
         raise ValueError(
@@ -655,23 +945,30 @@ def _exhaust_and_recycle_rune(ctx: ActionTurnContext) -> None:
     ctx.engine.add_power(ctx.actor, domain, 1)
 
 
-@register_turn_action("commit_kills")
-def _commit_kills(ctx: ActionTurnContext) -> None:
-    """Commit one player's damage assignment in a PendingCombat.
+@register_turn_action("assign_damage")
+def _assign_damage(ctx: ActionTurnContext) -> None:
+    """Commit one player's combat damage assignment in a PendingCombat.
 
-    Payload is a comma-separated list of OPPONENT unit indices to kill
-    (empty payload = "I kill nothing"). The sum of the targets' Might
-    must not exceed the actor's total Might at the contested BF — that's
-    the "damage must kill" rule (no partial damage, no overflow). Each
-    target index must be unique and refer to an existing opponent unit
-    sitting AT the contested battlefield.
+    Payload is a comma-separated list of OPPONENT unit indices the player
+    assigns LETHAL damage to (i.e. the units they kill). Empty payload =
+    "I kill nothing". The assignment must obey Riftbound's damage rules:
 
-    Both players commit independently and BLIND; the engine doesn't
-    reveal the opponent's choice until both have committed. As soon as
-    both ``player_1_targets`` and ``player_2_targets`` are set, the
-    handler calls ``engine.resolve_combat()`` which applies all kills
-    simultaneously and then the move continues by reading the
-    post-combat state for control + scoring.
+      * the summed Might of the killed units must not exceed the actor's
+        damage budget (their total Might at the contested BF); and
+      * the assignment must be MAXIMAL — the leftover damage
+        (``budget − sum(killed Might)``) must be too small to also kill
+        any surviving enemy unit. You must assign lethal to a unit before
+        moving on and can't waste damage that could kill another unit.
+
+    Each target index must be unique and refer to an existing opponent
+    unit sitting AT the contested battlefield.
+
+    Both players commit independently and BLIND; the engine doesn't reveal
+    the opponent's choice until both have committed. As soon as both
+    ``player_1_targets`` and ``player_2_targets`` are set, the handler
+    calls ``engine.resolve_combat()`` which applies all kills
+    simultaneously (killed units → owner's trash) and then the move
+    continues by reading the post-combat state for control + scoring.
     """
     from ..csv_data import card_might_of
     from ..engine import RequiredTo as RT
@@ -679,9 +976,9 @@ def _commit_kills(ctx: ActionTurnContext) -> None:
     gs = ctx.engine._game_state
     pc = gs.pending_combat
     if pc is None:
-        raise ValueError("no contested combat is awaiting kill assignments")
+        raise ValueError("no contested combat is awaiting damage assignments")
     if ctx.actor not in (RT.PLAYER_1, RT.PLAYER_2):
-        raise ValueError("commit_kills requires player_1 or player_2")
+        raise ValueError("assign_damage requires player_1 or player_2")
 
     # Parse the index list. Empty payload is valid — "I kill nothing".
     payload = ctx.payload.strip()
@@ -690,50 +987,61 @@ def _commit_kills(ctx: ActionTurnContext) -> None:
             target_indices = [int(p.strip()) for p in payload.split(",") if p.strip()]
         except ValueError as e:
             raise ValueError(
-                f"play:commit_kills payload must be a comma-separated list of integers, got {payload!r}"
+                f"play:assign_damage payload must be a comma-separated list of integers, got {payload!r}"
             ) from e
     else:
         target_indices = []
     if len(set(target_indices)) != len(target_indices):
-        raise ValueError("play:commit_kills target indices must be unique")
+        raise ValueError("play:assign_damage target indices must be unique")
 
     # Resolve which list we're killing into and our damage budget.
     if ctx.actor == RT.PLAYER_1:
         if pc.player_1_targets is not None:
-            raise ValueError("player_1 has already committed their kills for this combat")
+            raise ValueError("player_1 has already committed their damage for this combat")
         opponent_units = gs.player_2_units
         budget = pc.player_1_might
     else:
         if pc.player_2_targets is not None:
-            raise ValueError("player_2 has already committed their kills for this combat")
+            raise ValueError("player_2 has already committed their damage for this combat")
         opponent_units = gs.player_1_units
         budget = pc.player_2_might
 
-    # Validate every target: in range, at the contested BF, and the
-    # total Might cost doesn't exceed our budget.
+    # Gather every assignable enemy unit (at the BF, with a Might value).
+    bf_targets: dict[int, int] = {}  # index -> might
+    for i, u in enumerate(opponent_units):
+        if u.location != pc.battlefield:
+            continue
+        m = card_might_of(u.card)
+        if m is None:
+            continue
+        bf_targets[i] = m
+
+    # Validate every target: assignable, and total Might within budget.
     total_cost = 0
     for idx in target_indices:
-        if idx < 0 or idx >= len(opponent_units):
+        if idx not in bf_targets:
             raise ValueError(
-                f"play:commit_kills target index out of range: {idx} "
-                f"(opponent has {len(opponent_units)} units)"
+                f"play:assign_damage target index {idx} is not an assignable enemy "
+                f"unit at the contested battlefield ({pc.battlefield})"
             )
-        unit = opponent_units[idx]
-        if unit.location != pc.battlefield:
-            raise ValueError(
-                f"play:commit_kills target index {idx} is not at the contested "
-                f"battlefield ({pc.battlefield})"
-            )
-        might = card_might_of(unit.card)
-        if might is None:
-            raise ValueError(
-                f"play:commit_kills target {unit.card!r} has no Might value in the CSV"
-            )
-        total_cost += might
+        total_cost += bf_targets[idx]
     if total_cost > budget:
         raise ValueError(
-            f"play:commit_kills total Might of targets ({total_cost}) exceeds "
+            f"play:assign_damage total Might of targets ({total_cost}) exceeds "
             f"available damage ({budget})"
+        )
+
+    # Enforce the maximal-kill rule: leftover damage must be unable to
+    # finish off any surviving enemy unit (otherwise you were required to
+    # assign lethal to it too — no wasting damage that could kill).
+    leftover = budget - total_cost
+    chosen = set(target_indices)
+    survivors = [m for i, m in bf_targets.items() if i not in chosen]
+    if survivors and leftover >= min(survivors):
+        raise ValueError(
+            f"play:assign_damage leaves {leftover} damage that must still be "
+            f"assigned as lethal to another enemy unit (cheapest survivor needs "
+            f"{min(survivors)}) — assign damage until no further unit can be killed"
         )
 
     # Record this player's commit.

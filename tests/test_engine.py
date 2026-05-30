@@ -12,11 +12,13 @@ from riftbound_engine.csv_data import (
     card_domains_of,
     card_energy_of,
     card_power_of,
+    card_spell_requirement_of,
     card_type_of,
     csv_cards,
 )
 from riftbound_engine.deck_files import list_deck_ids
 from riftbound_engine.engine import PlayedSpell, Rune
+from riftbound_engine.requirements import selectable_unit_requirement, spell_playable
 
 
 def _flood_runes(engine: GameEngine, actor: RequiredTo, count: int = 20) -> None:
@@ -349,6 +351,11 @@ class GameEngineTests(unittest.TestCase):
                 continue
             if card_type_of(card) != "Spell":
                 continue
+            # A spell is only offered if its Spell Choice Requirement can be
+            # met on the current board (no units are in play here, so any
+            # spell needing a unit target is correctly gated out).
+            if not spell_playable(ready.game_state, card):
+                continue
             seen.add(card)
             spell_opts.append(f"play:play_spell:{i}")
         expected = unit_opts + spell_opts + ["play:end_turn"]
@@ -477,6 +484,11 @@ class GameEngineTests(unittest.TestCase):
                 continue
             if card_type_of(card) != "Spell":
                 continue
+            # Mirror the engine's requirement gate (a unit is now on the
+            # board, so unit-target spells may or may not qualify depending
+            # on their per-unit filters).
+            if not spell_playable(settled.game_state, card):
+                continue
             seen.add(card)
             spell_opts.append(f"play:play_spell:{i}")
         expected = unit_opts + spell_opts + ["play:end_turn"]
@@ -565,6 +577,20 @@ class GameEngineTests(unittest.TestCase):
                 return i
         raise unittest.SkipTest("dealt hand contains no Spell-type cards")
 
+    def _first_directly_castable_spell_index(self, engine, hand: list[str]) -> int:
+        """First Spell that commits immediately on play — i.e. its requirement
+        forces no target pick (blank / min-0 / unknown selector) AND is
+        satisfiable on the current board. Such a spell lands straight on the
+        spell stack, which is what the cost/clear tests below assert. Spells
+        that park in pending_spell_choice (ANY UNIT min>=1) are skipped."""
+        for i, card in enumerate(hand):
+            if card_type_of(card) != "Spell":
+                continue
+            req = card_spell_requirement_of(card)
+            if selectable_unit_requirement(req) is None and spell_playable(engine._game_state, card):
+                return i
+        raise unittest.SkipTest("dealt hand has no directly-castable (no-target-pick) spell")
+
     def test_play_spell_moves_card_from_hand_to_spells_and_deducts_cost(self) -> None:
         """play_spell is the Spell counterpart to play_unit: same Energy/Power
         cost gates, but the card lands in player_X_spells with no
@@ -574,7 +600,7 @@ class GameEngineTests(unittest.TestCase):
         _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
         ready = engine.start()
         hand_before = list(ready.game_state.player_1_hand or [])
-        spell_idx = self._first_spell_index(hand_before)
+        spell_idx = self._first_directly_castable_spell_index(engine, hand_before)
         spell_card = hand_before[spell_idx]
 
         energy_before = engine.player_energy(RequiredTo.PLAYER_1)
@@ -587,31 +613,24 @@ class GameEngineTests(unittest.TestCase):
         # Hand had the card removed at spell_idx.
         expected_hand = hand_before[:spell_idx] + hand_before[spell_idx + 1 :]
         self.assertEqual(gs.player_1_hand, expected_hand)
-        # Card landed in player_1_spells.
+        # Energy was deducted up front, at play time.
+        self.assertEqual(gs.player_1_energy, energy_before - energy_cost)
+        self.assertIsNone(gs.pending_play)
+        # The spell shows in the pile/overlay immediately on cast AND opens
+        # the chain (priority window). Resolution just closes the chain.
+        self.assertIsNotNone(gs.pending_chain)
+        self.assertEqual([i.card for i in gs.pending_chain.items], [spell_card])
         self.assertEqual(len(gs.player_1_spells), 1)
         self.assertEqual(gs.player_1_spells[0].card, spell_card)
-        # No pending state — spells skip choose_location.
-        self.assertIsNone(gs.pending_play)
-        # Energy was deducted up front.
-        self.assertEqual(gs.player_1_energy, energy_before - energy_cost)
-        # play_spell options appear in subsequent action-turn output for the
-        # remaining affordable Spell cards. Duplicate spell names collapse
-        # to one option pointing at the leftmost copy.
-        seen_spells: set[str] = set()
-        affordable_spells: list[str] = []
-        for i, card in enumerate(expected_hand):
-            if card in seen_spells:
-                continue
-            if card_type_of(card) != "Spell":
-                continue
-            if engine.card_energy_cost(card) > engine.player_energy(RequiredTo.PLAYER_1):
-                continue
-            if not engine.can_afford_power_cost(RequiredTo.PLAYER_1, card):
-                continue
-            seen_spells.add(card)
-            affordable_spells.append(f"play:play_spell:{i}")
-        for opt in affordable_spells:
-            self.assertIn(opt, out.player_1_options)
+
+        engine.apply_action(action="play:pass_priority", actor=RequiredTo.PLAYER_1)
+        resolved = engine.apply_action(
+            action="play:pass_priority", actor=RequiredTo.PLAYER_2
+        )
+        gs = resolved.game_state
+        self.assertIsNone(gs.pending_chain)
+        self.assertEqual(len(gs.player_1_spells), 1)
+        self.assertEqual(gs.player_1_spells[0].card, spell_card)
 
     def test_play_spell_rejects_non_spell_cards_and_bad_indices(self) -> None:
         engine, ready = self._drive_to_action_turn()
@@ -653,13 +672,17 @@ class GameEngineTests(unittest.TestCase):
         _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
         ready = engine.start()
         hand = list(ready.game_state.player_1_hand or [])
-        spell_idx = self._first_spell_index(hand)
+        spell_idx = self._first_directly_castable_spell_index(engine, hand)
         spell_card = hand[spell_idx]
 
-        # P1 casts a spell, then ends the turn.
-        out = engine.apply_action(
+        # P1 casts a spell — it goes on the chain — then both players pass so
+        # the chain resolves it into P1's spell pile.
+        engine.apply_action(
             action=f"play:play_spell:{spell_idx}", actor=RequiredTo.PLAYER_1
         )
+        engine.apply_action(action="play:pass_priority", actor=RequiredTo.PLAYER_1)
+        out = engine.apply_action(action="play:pass_priority", actor=RequiredTo.PLAYER_2)
+        self.assertIsNone(out.game_state.pending_chain)
         self.assertEqual(len(out.game_state.player_1_spells), 1)
         self.assertEqual(out.game_state.player_1_spells[0].card, spell_card)
 
@@ -791,6 +814,10 @@ class PlayUnitEnergyCostTests(unittest.TestCase):
             if (card_energy_of(card) or 0) > 1:
                 continue
             if (card_power_of(card) or 0) > 0:
+                continue
+            # Beyond affordability, the spell must also have a valid target
+            # (empty board here ⇒ unit-target spells are gated out).
+            if not spell_playable(ready.game_state, card):
                 continue
             seen.add(card)
             spell_opts.append(f"play:play_spell:{i}")
@@ -1940,3 +1967,112 @@ class ScoringTests(unittest.TestCase):
         engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
         self.assertEqual(engine.player_score(RequiredTo.PLAYER_2), 1)
         self.assertEqual(engine.player_score(RequiredTo.PLAYER_1), 0)
+
+
+class PlayGearTests(unittest.TestCase):
+    """Gears pay like units (Energy + domain Power) but differ in play:
+    they enter READY, commit straight to base with no location step, and
+    are never offered a move. See action_turn/builtins.py::_play_gear."""
+
+    # CSV catalog entry: Card Type=Gear, Energy 3, no Power requirement.
+    GEAR_CARD = "Boots of Swiftness"
+    # CSV catalog entry: Card Type=Spell — used to prove the type gate.
+    SPELL_CARD = "Stacked Deck"
+
+    def _drive_to_action_turn(self) -> tuple[GameEngine, "EngineOutput"]:
+        rolls = iter([6, 2])
+        engine = GameEngine(dice_roller=lambda: next(rolls))
+        first = engine.start()
+        second = engine.apply_action(action=f"choose_deck:{first.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
+        fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
+        engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
+        engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
+        ready = engine.apply_action(
+            action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
+            actor=RequiredTo.PLAYER_2,
+        )
+        return engine, ready
+
+    def test_gear_card_is_recognized_as_gear_type(self) -> None:
+        self.assertEqual(card_type_of(self.GEAR_CARD), "Gear")
+        self.assertEqual(card_type_of(self.SPELL_CARD), "Spell")
+
+    def test_play_gear_enters_ready_at_base_with_no_location_step(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        # Put a known Gear at the front of the hand so the index is stable.
+        engine._game_state.player_1_hand = [self.GEAR_CARD] + list(
+            engine._game_state.player_1_hand or []
+        )
+        energy_before = engine.player_energy(RequiredTo.PLAYER_1)
+        cost = engine.card_energy_cost(self.GEAR_CARD)
+
+        out = engine.apply_action(action="play:play_gear:0", actor=RequiredTo.PLAYER_1)
+
+        # No location follow-up: unlike units, a gear never parks in pending_play.
+        self.assertIsNone(out.game_state.pending_play)
+        self.assertNotIn(
+            "play:choose_location:base",
+            out.player_1_options,
+            "a gear must not open a location prompt",
+        )
+        # It lands in the gears list at base, READY, and not among units.
+        gears = out.game_state.player_1_gears
+        self.assertEqual(len(gears), 1)
+        self.assertEqual(gears[0].card, self.GEAR_CARD)
+        self.assertEqual(gears[0].location, "base")
+        self.assertFalse(gears[0].exhausted, "gears enter ready, not exhausted")
+        self.assertEqual(out.game_state.player_1_units, [])
+        # The gear was consumed from hand and both costs were charged.
+        self.assertEqual(out.game_state.player_1_hand.count(self.GEAR_CARD), 0)
+        self.assertEqual(out.game_state.player_1_energy, energy_before - cost)
+
+    def test_gear_is_offered_as_a_play_option(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        engine._game_state.player_1_hand = [self.GEAR_CARD] + list(
+            engine._game_state.player_1_hand or []
+        )
+        out = engine.start()
+        self.assertIn("play:play_gear:0", out.player_1_options)
+
+    def test_gear_is_never_offered_a_move(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        engine._game_state.player_1_hand = [self.GEAR_CARD]
+        out = engine.apply_action(action="play:play_gear:0", actor=RequiredTo.PLAYER_1)
+        # The only thing on the board is the ready gear at base; if gears were
+        # move-eligible like a ready base unit, base→battlefield moves would
+        # appear here. They must not.
+        self.assertFalse(
+            any(o.startswith("play:move_unit:") for o in out.player_1_options),
+            f"gears must never be offered a move, got: {out.player_1_options}",
+        )
+
+    def test_play_gear_rejects_a_non_gear_card(self) -> None:
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        engine._game_state.player_1_hand = [self.SPELL_CARD] + list(
+            engine._game_state.player_1_hand or []
+        )
+        with self.assertRaises(ValueError) as ctx:
+            engine.apply_action(action="play:play_gear:0", actor=RequiredTo.PLAYER_1)
+        self.assertIn("cannot be played as a gear", str(ctx.exception))
+
+    def test_ready_all_gears_clears_a_later_exhaustion(self) -> None:
+        # Gears enter ready, but a future tap-style ability could exhaust one.
+        # Awake (step A) must re-ready it, mirroring units.
+        engine, _ = self._drive_to_action_turn()
+        _flood_runes(engine, RequiredTo.PLAYER_1)
+        _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        engine._game_state.player_1_hand = [self.GEAR_CARD]
+        engine.apply_action(action="play:play_gear:0", actor=RequiredTo.PLAYER_1)
+        engine._game_state.player_1_gears[0].exhausted = True
+        engine._ready_all_gears(RequiredTo.PLAYER_1)
+        self.assertFalse(engine._game_state.player_1_gears[0].exhausted)

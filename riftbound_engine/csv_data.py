@@ -275,6 +275,100 @@ def card_power_of(name: str) -> int | None:
 
 
 @lru_cache(maxsize=1)
+def _csv_card_requirement_index() -> dict[str, str]:
+    """Lowercased card name → raw CSV ``Spell Choice Requirement`` value.
+
+    The ``Spell Choice Requirement`` column (the last column of
+    ``riftbound_cards.csv``) encodes, for a Spell, the UNIT/GEAR/etc.
+    choices a player is REQUIRED to make in order to play that card. The
+    raw string uses the pipe-run grammar authored by the Spell Wizard
+    (``|`` AND-within-group, ``||`` OR-within-group, ``|||`` AND-between-
+    groups, ``||||`` OR-between-groups). Blank cells (no requirement) are
+    skipped. See :mod:`riftbound_engine.requirements` for parsing/eval.
+    """
+    rows = _csv_rows_raw()
+    if len(rows) < 2:
+        return {}
+    header = rows[0]
+    i_name = _header_index(header, "Name")
+    i_req = _header_index(header, "Spell Choice Requirement")
+    if i_name is None or i_req is None:
+        return {}
+    out: dict[str, str] = {}
+    for parts in rows[1:]:
+        if len(parts) <= max(i_name, i_req):
+            continue
+        name = parts[i_name].strip().lower()
+        req_raw = parts[i_req].strip()
+        if not name or not req_raw:
+            continue
+        if name not in out:
+            out[name] = req_raw
+    return out
+
+
+def card_spell_requirement_of(name: str) -> str | None:
+    """Look up the raw ``Spell Choice Requirement`` string for a card by name.
+
+    Returns ``None`` if the card isn't in the CSV or has a blank
+    requirement cell. Uses the same name-resolution fallback as
+    :func:`card_type_of` so "Miss Fortune, Bounty Hunter" matches the CSV
+    row "Bounty Hunter".
+    """
+    if not name:
+        return None
+    index = _csv_card_requirement_index()
+    direct = index.get(name.strip().lower())
+    if direct is not None:
+        return direct
+    sep = name.find(", ")
+    if sep >= 0:
+        return index.get(name[sep + 2 :].strip().lower())
+    return None
+
+
+@lru_cache(maxsize=1)
+def _csv_card_ability_index() -> dict[str, str]:
+    """Lowercased card name → raw CSV ``Ability`` text."""
+    rows = _csv_rows_raw()
+    if len(rows) < 2:
+        return {}
+    header = rows[0]
+    i_name = _header_index(header, "Name")
+    i_ability = _header_index(header, "Ability")
+    if i_name is None or i_ability is None:
+        return {}
+    out: dict[str, str] = {}
+    for parts in rows[1:]:
+        if len(parts) <= max(i_name, i_ability):
+            continue
+        name = parts[i_name].strip().lower()
+        if name and name not in out:
+            out[name] = parts[i_ability]
+    return out
+
+
+def card_ability_of(name: str) -> str:
+    """Raw ``Ability`` text for a card by name (case-insensitive), or ''."""
+    if not name:
+        return ""
+    index = _csv_card_ability_index()
+    direct = index.get(name.strip().lower())
+    if direct is None:
+        sep = name.find(", ")
+        if sep >= 0:
+            direct = index.get(name[sep + 2 :].strip().lower())
+    return direct or ""
+
+
+def card_is_reaction(name: str) -> bool:
+    """Whether the card carries the ``[Reaction]`` keyword (can be played in
+    response to a spell on the chain). Read straight from the ability text so
+    it doesn't depend on the derived Keywords column."""
+    return "[reaction]" in card_ability_of(name).lower()
+
+
+@lru_cache(maxsize=1)
 def _csv_card_domain_index() -> dict[str, str]:
     """Lowercased card name → raw CSV ``Domain`` field (may be 'Fury, Chaos')."""
     out: dict[str, str] = {}

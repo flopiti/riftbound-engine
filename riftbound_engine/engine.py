@@ -123,9 +123,46 @@ class PlayedSpell:
     screen. The engine has no per-spell resolution/effect step yet, but
     ``_advance_turn`` clears both players' spell stacks at end of turn so
     the overlay only shows spells cast during the current turn.
+
+    ``targets`` records the units chosen to satisfy the card's Spell Choice
+    Requirement (see ``PendingSpellChoice``), as ``"player_1:0"`` style
+    tokens. Empty when the card required no choice.
+
+    ``order`` is a per-turn cast index (0,1,2,…) assigned across BOTH players
+    when the spell is cast, so the shared spell overlay can stack every
+    spell in true chronological order regardless of who cast it. It resets
+    each turn because the spell piles are cleared at end of turn.
     """
 
     card: str
+    targets: list[str] = field(default_factory=list)
+    order: int = 0
+
+
+@dataclass
+class PlayedGear:
+    """A Gear-type card that has been played by paying its Energy/Power cost.
+
+    Gears pay the same Energy + domain Power cost as Units, but they differ in
+    two ways:
+
+      * they enter **ready** (``exhausted=False``) — no summoning sickness,
+        unlike Units which enter exhausted; and
+      * they **cannot move**. A Gear is permanently anchored at the owner's
+        ``base`` and is never offered a ``play:move_unit`` option, so its
+        location stays ``"base"`` for the whole match.
+
+    Because a Gear never leaves base it never participates in battlefield
+    showdowns or combat. ``location`` is kept (always ``"base"``) for parity
+    with ``PlayedUnit`` so the UI can render gears in the base zone, and
+    ``exhausted`` is kept so a later tap-style ability could exhaust one (it
+    re-readies on the owner's Awake step alongside units).
+    """
+
+    card: str
+    #: Always ``"base"`` — gears do not move.
+    location: str = "base"
+    exhausted: bool = False
 
 
 @dataclass
@@ -139,6 +176,61 @@ class PendingPlay:
 
     actor: RequiredTo
     card: str
+
+
+@dataclass
+class PendingSpellChoice:
+    """A Spell whose cost is paid and is now waiting for the caster to choose
+    the targets its Spell Choice Requirement demands.
+
+    Set by ``play:play_spell:*`` when the card's requirement parses to a
+    single ANY-UNIT phrase that forces a pick (minimum >= 1). While set, the
+    caster's options collapse to the enumerated
+    ``play:choose_spell_targets:<refs>`` sets (one per valid target
+    combination); all other actions are suppressed. Cleared by
+    ``play:choose_spell_targets:*`` once a valid set is chosen, which is when
+    the card finally lands on the spell stack (with ``PlayedSpell.targets``
+    recorded). ``requirement`` is the raw CSV requirement string so the
+    engine can re-derive the parsed phrase when enumerating / validating.
+    """
+
+    actor: RequiredTo
+    card: str
+    requirement: str
+
+
+@dataclass
+class ChainItem:
+    """One spell sitting on the chain (the priority stack).
+
+    ``actor`` is who cast it, ``targets`` the units chosen for its
+    requirement (``"player_1:0"`` tokens, same as PlayedSpell.targets). The
+    engine has no per-spell effect yet, so resolving the chain just moves
+    each item into its caster's spell pile — but the chain models the
+    priority window where Reaction spells can respond.
+    """
+
+    actor: RequiredTo
+    card: str
+    targets: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PendingChain:
+    """The priority stack opened whenever a spell is played.
+
+    ``items`` is ordered with the most recently added spell FIRST (index 0 =
+    top of the chain). ``priority`` is the player who may currently act:
+    they can cast a Reaction spell (which pushes onto the chain and hands
+    priority back to that caster, resetting the pass count) or pass. When
+    ``consecutive_passes`` reaches 2 (both players passed in a row with no
+    new spell), the whole chain resolves at once and play returns to the
+    action turn exactly as it was before the first spell was cast.
+    """
+
+    items: list[ChainItem]
+    priority: RequiredTo
+    consecutive_passes: int = 0
 
 
 @dataclass
@@ -172,17 +264,28 @@ class PendingCombat:
     distributions are "blind" (one player can't see what the other has
     committed yet) and applied simultaneously once both have committed.
 
-    Damage rule: each kill spends ``target.might`` damage from the
-    attacker's pool. You can only assign damage in chunks that exactly
-    kill a unit — there's no partial damage carried over. Excess damage
-    that can't kill anything (e.g. 1 left vs a 4-might survivor) is
-    wasted. A 0-might attacker auto-commits to ``[]`` on entry (skips
-    their damage step).
+    Damage rule (Riftbound combat): a player's damage budget is the SUM of
+    the Might of every unit they control at the battlefield. Damage is
+    ASSIGNED unit-by-unit and you must assign LETHAL damage (≥ the unit's
+    Might) to one enemy unit before moving on to the next. You may not
+    over-assign past lethal while another enemy unit could still be
+    assigned to. Consequence: a player kills a *maximal* set of enemy
+    units — any subset ``S`` whose summed Might ≤ budget AND where the
+    leftover (``budget − sum(S)``) is smaller than every surviving enemy
+    unit's Might (so no further kill was possible). Leftover that can't
+    finish off another unit is dealt as non-lethal damage and, since this
+    game keeps no persistent damage, simply has no effect.
 
-    Targets are stored as indices into the OPPONENT's ``player_X_units``
-    list at the moment combat was entered. ``None`` means the player
-    hasn't committed yet; ``[]`` means committed but chose to kill
-    nothing.
+    Assigning is not dealing: both players commit their assignments BLIND
+    (one can't see the other's), then all assignments are applied
+    SIMULTANEOUSLY. Killed units leave play and go to their owner's trash.
+
+    ``player_X_targets`` stores the indices (into the OPPONENT's
+    ``player_X_units`` list at the moment combat opened) of the units that
+    player assigned lethal damage to — i.e. the units they kill. ``None``
+    means not committed yet; ``[]`` means committed to killing nothing
+    (only legal when the budget can't kill any enemy unit). A 0-might
+    attacker auto-commits to ``[]`` on entry.
     """
 
     battlefield: str  # "battlefield_1" or "battlefield_2"
@@ -260,8 +363,28 @@ class GameState:
     #: The engine doesn't resolve spell effects yet; the card just sits here.
     player_1_spells: list[PlayedSpell] = field(default_factory=list)
     player_2_spells: list[PlayedSpell] = field(default_factory=list)
+    #: Cards played as gears this match, in play order. Gears are paid like
+    #: units (Energy + domain Power) but enter READY and stay anchored at the
+    #: owner's base — they never move and never enter ``pending_play``. See
+    #: PlayedGear and action_turn/builtins.py::_play_gear.
+    player_1_gears: list[PlayedGear] = field(default_factory=list)
+    player_2_gears: list[PlayedGear] = field(default_factory=list)
+    #: Units that have died (e.g. killed in combat) go here, in death order,
+    #: by card name. A dead unit leaves play entirely — it's removed from
+    #: ``player_X_units`` and appended to its owner's trash. See
+    #: ``resolve_combat``.
+    player_1_trash: list[str] = field(default_factory=list)
+    player_2_trash: list[str] = field(default_factory=list)
     #: Set while a `play:play_unit:*` is waiting for `play:choose_location:*`.
     pending_play: PendingPlay | None = None
+    #: Set while a `play:play_spell:*` whose requirement forces a target pick
+    #: is waiting for `play:choose_spell_targets:*`. See PendingSpellChoice.
+    pending_spell_choice: "PendingSpellChoice | None" = None
+    #: The priority stack. Set the moment a spell is played and cleared when
+    #: both players pass in a row (the chain resolves). While set, the player
+    #: holding priority may cast a Reaction spell or `play:pass_priority`.
+    #: See PendingChain.
+    pending_chain: "PendingChain | None" = None
     #: Set after a play has been committed to a location but the active player
     #: still owes ``remaining`` Energy in exhausted runes (cost > 0). Cleared
     #: when the last rune is exhausted.
@@ -412,17 +535,50 @@ class GameEngine:
                 for u in self._game_state.player_2_units
             ],
             player_1_spells=[
-                PlayedSpell(card=s.card) for s in self._game_state.player_1_spells
+                PlayedSpell(card=s.card, targets=list(s.targets), order=s.order)
+                for s in self._game_state.player_1_spells
             ],
             player_2_spells=[
-                PlayedSpell(card=s.card) for s in self._game_state.player_2_spells
+                PlayedSpell(card=s.card, targets=list(s.targets), order=s.order)
+                for s in self._game_state.player_2_spells
             ],
+            player_1_gears=[
+                PlayedGear(card=g.card, location=g.location, exhausted=g.exhausted)
+                for g in self._game_state.player_1_gears
+            ],
+            player_2_gears=[
+                PlayedGear(card=g.card, location=g.location, exhausted=g.exhausted)
+                for g in self._game_state.player_2_gears
+            ],
+            player_1_trash=list(self._game_state.player_1_trash),
+            player_2_trash=list(self._game_state.player_2_trash),
             pending_play=(
                 None
                 if self._game_state.pending_play is None
                 else PendingPlay(
                     actor=self._game_state.pending_play.actor,
                     card=self._game_state.pending_play.card,
+                )
+            ),
+            pending_spell_choice=(
+                None
+                if self._game_state.pending_spell_choice is None
+                else PendingSpellChoice(
+                    actor=self._game_state.pending_spell_choice.actor,
+                    card=self._game_state.pending_spell_choice.card,
+                    requirement=self._game_state.pending_spell_choice.requirement,
+                )
+            ),
+            pending_chain=(
+                None
+                if self._game_state.pending_chain is None
+                else PendingChain(
+                    items=[
+                        ChainItem(actor=it.actor, card=it.card, targets=list(it.targets))
+                        for it in self._game_state.pending_chain.items
+                    ],
+                    priority=self._game_state.pending_chain.priority,
+                    consecutive_passes=self._game_state.pending_chain.consecutive_passes,
                 )
             ),
             pending_payment=(
@@ -612,6 +768,15 @@ class GameEngine:
             raise ValueError("cannot end the turn while a play is waiting for a location")
         if self._game_state.pending_showdown is not None:
             raise ValueError("cannot end the turn while a showdown is in progress")
+        if self._game_state.pending_combat is not None:
+            raise ValueError(
+                "cannot end the turn while a contested combat is unresolved — "
+                "both players must assign their combat damage first"
+            )
+        if self._game_state.pending_spell_choice is not None:
+            raise ValueError("cannot end the turn while a spell is waiting for target selection")
+        if self._game_state.pending_chain is not None:
+            raise ValueError("cannot end the turn while the chain is open — resolve it first")
         # Energy and Power are per-turn: clear both players' pools so nothing
         # carries into the next turn.
         self._game_state.player_1_energy = 0
@@ -781,19 +946,129 @@ class GameEngine:
         self.add_score(actor, 1)
         return True
 
-    def _commit_kills_options(self, actor: RequiredTo) -> list[str]:
-        """Enumerate every valid ``play:commit_kills:<csv>`` an attacker
-        can submit for the current PendingCombat.
+    def _spell_choice_options(self, choice: "PendingSpellChoice") -> list[str]:
+        """Enumerate every valid ``play:choose_spell_targets:<refs>`` for the
+        spell currently waiting on a target pick.
 
-        A valid commit is any subset of opponent units at the contested
-        battlefield whose summed Might ≤ the attacker's damage budget
-        (their total Might at the BF). The empty subset is included —
-        it represents "skip my damage, kill nothing". Returns ``[]`` if
-        there's no active combat or the actor isn't player_1 / player_2.
+        One option per valid target set (combination of units that satisfies
+        the card's requirement — count, per-unit filters, and group
+        constraints). Refs are ``p1-<i>`` / ``p2-<i>`` tokens identifying a
+        unit by its position in that player's units list. Returns ``[]`` if
+        the requirement somehow isn't a selectable one (defensive — the
+        pending choice is only ever set for selectable requirements)."""
+        from .requirements import (
+            enumerate_unit_target_sets,
+            ref_to_token,
+            selectable_unit_requirement,
+        )
 
-        2^N enumeration is acceptable here because both players' units
-        at a single battlefield are bounded by their hand size + a few
-        movements per turn — N stays small in practice.
+        req = selectable_unit_requirement(choice.requirement)
+        if req is None:
+            return []
+        return [
+            "play:choose_spell_targets:" + ",".join(ref_to_token(r) for r in combo)
+            for combo in enumerate_unit_target_sets(req, self._game_state)
+        ]
+
+    def _push_spell_to_chain(
+        self, actor: RequiredTo, card: str, targets: list[str]
+    ) -> None:
+        """Put a just-played spell onto the chain and (re)open priority.
+
+        The newest spell goes to the FRONT (``items[0]`` = top of chain).
+        Priority lands on the caster and the consecutive-pass counter resets
+        — exactly the "the player who cast the spell gains priority" rule,
+        whether this is the opening cast or a Reaction response.
+
+        The spell is ALSO dropped into the caster's spell pile right now so
+        it shows in the spell overlay the moment it's cast (not only after
+        the chain resolves). The chain just tracks the open priority window;
+        ``_resolve_chain`` closes it without touching the pile."""
+        item = ChainItem(actor=actor, card=card, targets=list(targets))
+        chain = self._game_state.pending_chain
+        if chain is None:
+            self._game_state.pending_chain = PendingChain(
+                items=[item], priority=actor, consecutive_passes=0
+            )
+        else:
+            chain.items.insert(0, item)
+            chain.priority = actor
+            chain.consecutive_passes = 0
+
+        # Per-turn cast index across BOTH players, so the shared overlay can
+        # stack spells in true chronological order. Computed BEFORE the append.
+        order = len(self._game_state.player_1_spells) + len(
+            self._game_state.player_2_spells
+        )
+        spells = (
+            self._game_state.player_1_spells
+            if actor == RequiredTo.PLAYER_1
+            else self._game_state.player_2_spells
+        )
+        spells.append(PlayedSpell(card=card, targets=list(targets), order=order))
+
+    def _resolve_chain(self) -> None:
+        """Resolve the whole chain at once: close the priority window and
+        return to the action turn where it left off. The chained spells are
+        already sitting in their casters' piles (added at cast time, see
+        ``_push_spell_to_chain``) and there are no per-spell effects yet, so
+        resolution just clears the chain."""
+        self._game_state.pending_chain = None
+
+    def _reaction_play_options(self, actor: RequiredTo) -> list[str]:
+        """``play:play_spell:<i>`` for each Reaction spell ``actor`` could play
+        in response on the chain: a Spell with the [Reaction] keyword that's
+        affordable from their CURRENT pools and whose Spell Choice Requirement
+        is satisfiable. Duplicate names collapse to the leftmost copy."""
+        from .csv_data import card_is_reaction
+        from .requirements import spell_playable
+
+        hand = (
+            self._game_state.player_1_hand
+            if actor == RequiredTo.PLAYER_1
+            else self._game_state.player_2_hand
+        )
+        energy = self.player_energy(actor)
+        seen: set[str] = set()
+        out: list[str] = []
+        for i, card in enumerate(hand or []):
+            if card in seen:
+                continue
+            if card_type_of(card) != "Spell":
+                continue
+            if not card_is_reaction(card):
+                continue
+            if self.card_energy_cost(card) > energy:
+                continue
+            if not self.can_afford_power_cost(actor, card):
+                continue
+            if not spell_playable(self._game_state, card):
+                continue
+            seen.add(card)
+            out.append(f"play:play_spell:{i}")
+        return out
+
+    def _assign_damage_options(self, actor: RequiredTo) -> list[str]:
+        """Enumerate every valid ``play:assign_damage:<csv>`` a player can
+        submit for the current PendingCombat.
+
+        The payload is the set of OPPONENT unit indices the player assigns
+        LETHAL damage to (the units they kill). A set ``S`` is valid iff:
+
+          * ``sum(Might of S) <= budget`` (the player's total Might at the
+            BF — you can't assign more damage than you have), and
+          * ``budget - sum(Might of S) < min(Might of survivors)`` — i.e.
+            the leftover can't finish off any remaining enemy unit, so the
+            kill is *maximal* (you must assign lethal before moving on and
+            can't waste damage that could kill another unit).
+
+        With no survivors the second clause is vacuously true (you killed
+        everything you could afford). The empty set is therefore only
+        offered when the budget can't kill the cheapest enemy unit.
+
+        Returns ``[]`` if there's no active combat or the actor isn't
+        player_1 / player_2. 2^N enumeration is fine — N (enemy units at a
+        single BF) stays small in practice.
         """
         import itertools
         from .csv_data import card_might_of
@@ -821,12 +1096,20 @@ class GameEngine:
         options: list[str] = []
         for size in range(0, len(targets) + 1):
             for combo in itertools.combinations(targets, size):
-                cost = sum(m for _, m in combo)
-                if cost > budget:
+                spent = sum(m for _, m in combo)
+                if spent > budget:
                     continue
-                indices = sorted(i for i, _ in combo)
+                leftover = budget - spent
+                chosen = {i for i, _ in combo}
+                survivors = [m for i, m in targets if i not in chosen]
+                # Maximal-kill rule: leftover must be unable to kill any
+                # surviving enemy unit, else the player was REQUIRED to
+                # assign lethal to one of them too.
+                if survivors and leftover >= min(survivors):
+                    continue
+                indices = sorted(chosen)
                 options.append(
-                    "play:commit_kills:" + ",".join(str(i) for i in indices)
+                    "play:assign_damage:" + ",".join(str(i) for i in indices)
                 )
         return options
 
@@ -872,10 +1155,18 @@ class GameEngine:
         pc = gs.pending_combat
         if pc is None or pc.battlefield != battlefield:
             return
-        p1_targets = set(pc.player_1_targets or [])
-        p2_targets = set(pc.player_2_targets or [])
-        # Apply simultaneously: snapshot both lists, then drop targeted
-        # units from each.
+        p1_targets = set(pc.player_1_targets or [])  # P2 units P1 killed
+        p2_targets = set(pc.player_2_targets or [])  # P1 units P2 killed
+        # Apply simultaneously: snapshot both lists first, then split each
+        # into survivors (kept) and casualties (→ owner's trash). Killed
+        # units leave play entirely and are appended to their owner's
+        # trash in index order.
+        gs.player_2_trash.extend(
+            u.card for i, u in enumerate(gs.player_2_units) if i in p1_targets
+        )
+        gs.player_1_trash.extend(
+            u.card for i, u in enumerate(gs.player_1_units) if i in p2_targets
+        )
         gs.player_2_units = [
             u for i, u in enumerate(gs.player_2_units) if i not in p1_targets
         ]
@@ -1017,6 +1308,22 @@ class GameEngine:
         for unit in units:
             unit.exhausted = False
 
+    def _ready_all_gears(self, actor: RequiredTo) -> None:
+        """Step A (Awake): flip every exhausted gear owned by ``actor`` back to ready.
+
+        Gears enter ready, so this is a no-op for freshly played ones; it
+        exists so a later tap-style ability that exhausts a gear gets cleared
+        on the owner's next Awake, mirroring units.
+        """
+        if actor == RequiredTo.PLAYER_1:
+            gears = self._game_state.player_1_gears
+        elif actor == RequiredTo.PLAYER_2:
+            gears = self._game_state.player_2_gears
+        else:
+            return
+        for gear in gears:
+            gear.exhausted = False
+
     def _apply_abcd_letter(self, letter: str, actor: RequiredTo) -> None:
         gs = self._game_state
         if actor != gs.current_player:
@@ -1028,6 +1335,7 @@ class GameEngine:
             # A = Awake: ready all the active player's exhausted runes and units.
             self._ready_all_runes(actor)
             self._ready_all_units(actor)
+            self._ready_all_gears(actor)
             gs.abcd_a_done = True
         elif key == "b":
             if not gs.abcd_a_done:
@@ -1153,38 +1461,69 @@ class GameEngine:
 
             combat = self._game_state.pending_combat
             if combat is not None:
-                # Mid-combat: each player INDEPENDENTLY commits a kill list
-                # using their total Might at the contested BF. Surfaces
-                # every valid `play:commit_kills:<csv>` (sum of target
-                # mights ≤ budget; empty target list = "skip") for each
-                # player who hasn't committed yet. A player who's already
-                # committed (or auto-committed via the 0-might rule) has
-                # no further options — they wait for the other side.
-                p1_options = (
-                    self._commit_kills_options(RequiredTo.PLAYER_1)
-                    if combat.player_1_targets is None
-                    else []
-                )
-                p2_options = (
-                    self._commit_kills_options(RequiredTo.PLAYER_2)
-                    if combat.player_2_targets is None
-                    else []
-                )
+                # Mid-combat: each player assigns their total Might at the
+                # contested BF as damage to the enemy units. The two
+                # assignments are independent and applied simultaneously,
+                # but we surface them ONE PLAYER AT A TIME (player_1 first,
+                # then player_2) so the menu — and the branch tree — only
+                # ever shows a single side's choices. Whoever's turn it is
+                # gets every valid `play:assign_damage:<csv>` (the maximal
+                # kill-sets under the lethal-first rule); the other side's
+                # menu is empty until it's their turn. A player who has
+                # already committed (or auto-committed via the 0-might rule)
+                # is skipped.
                 if combat.player_1_targets is None:
                     next_actor = RequiredTo.PLAYER_1
+                    p1_options = self._assign_damage_options(RequiredTo.PLAYER_1)
+                    p2_options: list[str] = []
                 elif combat.player_2_targets is None:
                     next_actor = RequiredTo.PLAYER_2
+                    p1_options = []
+                    p2_options = self._assign_damage_options(RequiredTo.PLAYER_2)
                 else:
                     # Both committed — resolution happens inside the
-                    # commit_kills handler, so reaching this branch
-                    # without pending_combat being cleared shouldn't
-                    # happen. Defensive fallback.
+                    # assign_damage handler, so reaching this branch without
+                    # pending_combat being cleared shouldn't happen.
+                    # Defensive fallback.
                     next_actor = RequiredTo.BOTH
+                    p1_options = []
+                    p2_options = []
                 return EngineOutput(
                     game_state=self.game_state,
                     player_1_options=p1_options,
                     player_2_options=p2_options,
                     required_action=_required_action(next_actor, RequiredStep.ACTION_TURN),
+                )
+
+            spell_choice = self._game_state.pending_spell_choice
+            if spell_choice is not None:
+                # Mid-cast: a played spell is waiting for its required target
+                # pick. The caster's menu collapses to the enumerated valid
+                # target sets (play:choose_spell_targets:<refs>); everything
+                # else is suppressed until a set is chosen. See
+                # PendingSpellChoice and action_turn/builtins.py.
+                opts = self._spell_choice_options(spell_choice)
+                chooser = spell_choice.actor
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=opts if chooser == RequiredTo.PLAYER_1 else [],
+                    player_2_options=opts if chooser == RequiredTo.PLAYER_2 else [],
+                    required_action=_required_action(chooser, RequiredStep.ACTION_TURN),
+                )
+
+            chain = self._game_state.pending_chain
+            if chain is not None:
+                # Chain open: only the priority holder may act, and only by
+                # casting a [Reaction] spell or passing priority. Everything
+                # else (units, moves, end turn, the opponent's menu) is
+                # suppressed until both players pass and the chain resolves.
+                holder = chain.priority
+                opts = self._reaction_play_options(holder) + ["play:pass_priority"]
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=opts if holder == RequiredTo.PLAYER_1 else [],
+                    player_2_options=opts if holder == RequiredTo.PLAYER_2 else [],
+                    required_action=_required_action(holder, RequiredStep.ACTION_TURN),
                 )
 
             pending = self._game_state.pending_play
@@ -1255,6 +1594,15 @@ class GameEngine:
                 # gates as units. Unlike units they don't go to a location;
                 # the handler places them directly into ``player_X_spells``.
                 # See action_turn/builtins.py::_play_spell.
+                #
+                # On top of the cost gate, a spell is only offered if its
+                # "Spell Choice Requirement" (CSV) can be met on the current
+                # board — i.e. there is at least one VALID set of targets for
+                # the choices the card requires. See
+                # riftbound_engine/requirements.py. Cards with no requirement
+                # (blank cell) pass this gate unconditionally.
+                from .requirements import spell_playable
+
                 for i, card in enumerate(active_hand or []):
                     if card in seen_play_card:
                         continue
@@ -1264,8 +1612,26 @@ class GameEngine:
                         continue
                     if not self.can_afford_power_cost(active, card):
                         continue
+                    if not spell_playable(self._game_state, card):
+                        continue
                     seen_play_card.add(card)
                     options.append(f"play:play_spell:{i}")
+
+                # Gears are gated by the same Energy + domain Power cost gates
+                # as units, but they have no Spell Choice Requirement and no
+                # location pick: the handler commits them straight to base in
+                # the ready state. See action_turn/builtins.py::_play_gear.
+                for i, card in enumerate(active_hand or []):
+                    if card in seen_play_card:
+                        continue
+                    if card_type_of(card) != "Gear":
+                        continue
+                    if self.card_energy_cost(card) > energy:
+                        continue
+                    if not self.can_afford_power_cost(active, card):
+                        continue
+                    seen_play_card.add(card)
+                    options.append(f"play:play_gear:{i}")
 
                 # Movement: each READY unit owned by the active player can
                 # move base ↔ a battlefield. Destination control drives the

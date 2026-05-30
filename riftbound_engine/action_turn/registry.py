@@ -50,9 +50,13 @@ def parse_play_command(action: str) -> tuple[str, str]:
 
 #: Verbs the OPPONENT (non-active player) is allowed to send. Most action-turn
 #: plays are gated to ``current_player``, but a few are interactive responses
-#: (e.g. passing during a showdown) and must accept the opponent as actor.
+#: that BOTH players take part in and must accept the opponent as actor:
+#:   * ``pass_showdown`` — initiator then opponent each pass.
+#:   * ``assign_damage`` — a contested combat needs BOTH sides to assign their
+#:     combat damage (the defender is the non-active player), otherwise the
+#:     combat can never resolve.
 #: Handlers in this set are responsible for their own actor validation.
-_OPPONENT_OK_VERBS: frozenset[str] = frozenset({"pass_showdown"})
+_OPPONENT_OK_VERBS: frozenset[str] = frozenset({"pass_showdown", "assign_damage"})
 
 
 def dispatch_turn_play(engine, actor, action: str) -> None:
@@ -66,7 +70,19 @@ def dispatch_turn_play(engine, actor, action: str) -> None:
     if not is_abcd_done(gs):
         raise ValueError("ABCD must be finished before the action turn")
     verb, payload = parse_play_command(action)
-    if verb not in _OPPONENT_OK_VERBS and actor != gs.current_player:
+    # While the chain is open, the player HOLDING PRIORITY may act even if
+    # they're not the active player (e.g. the opponent responding with a
+    # Reaction, paying for it, or passing). The individual handlers do their
+    # own priority/Reaction validation, so it's safe to let the verb through
+    # here. Outside a chain, only the active player (plus the always-allowed
+    # opponent verbs like pass_showdown) may play.
+    chain = getattr(gs, "pending_chain", None)
+    holder_has_priority = chain is not None and actor == chain.priority
+    if (
+        verb not in _OPPONENT_OK_VERBS
+        and actor != gs.current_player
+        and not holder_has_priority
+    ):
         raise ValueError("only the active player may take action-turn plays")
     if actor not in (RT.PLAYER_1, RT.PLAYER_2):
         raise ValueError("action turn requires player_1 or player_2")
