@@ -3,6 +3,53 @@
 A running list of Riftbound rules the engine actually enforces (or fakes well
 enough to drive the UI). Add new entries to the top of the list as they ship.
 
+## Trigger / event system
+
+Cards' triggered abilities (authored in the front-end taxonomy wizard,
+`riftbound/data/card_taxonomy.json`) now fire during play.
+
+### Pieces
+
+- `triggers.py` — `GameEvent` (an immutable "what just happened" record),
+  the event-kind vocabulary (`ON_PLAY_UNIT`, `ON_PLAY_SPELL`, `ON_DEATH`,
+  `ON_CONQUER`, `TURN_START`, `ON_CHANNEL`, `ON_DRAW`), and
+  `TRIGGER_EVENT_MAP` mapping each wizard trigger code to an event + a scope
+  (`SELF` / `FRIENDLY` / `ENEMY` / `ANY` / `HERE`). `trigger_matches` is the
+  pure predicate deciding whether a card's trigger responds to an event.
+- `abilities.py` — loads the taxonomy and bridges its id-keyed assignments to
+  the card *names* the engine plays with. Absent file ⇒ no abilities (engine
+  runs exactly as before). Path overridable via `RIFTBOUND_TAXONOMY_PATH`.
+- `effects.py` — a `@register_effect("CODE")` registry mirroring the
+  action-turn registry. Implemented so far: `DRAW_1`, `SCORE_1_POINT`,
+  `CHANNEL_1_RUNE`, `CHANNEL_1_RUNE_EXHAUSTED`,
+  `EACH_PLAYER_CHANNEL_1_RUNE_EXHAUSTED`,
+  `PUT_TOP_2_CARDS_OF_MAIN_DECK_INTO_TRASH`, `OPPONENT_DISCARD_1`,
+  `DISCARD_1_DRAW_1`, `GIVE_ME_+1`, `GIVE_ME_+2M`, `ADDITIONAL_2M`.
+  Unregistered codes resolve as a recorded no-op (logged, never an error) so
+  the chain always drains; the Implementation Planner tab tracks the rest.
+
+### Flow
+
+`GameEngine._emit(event)` is called at each state transition (unit enters
+play, spell cast, unit dies in combat, battlefield conquered/held, turn
+start, channel, draw). It scans cards in play *at that moment* for matching
+triggered abilities and queues them. `_drain_triggers()` then pushes each onto
+the **chain** as a `ChainItem` carrying a `TriggeredEffect` (APNAP order —
+the active player's go on first, so they resolve last under LIFO). The single
+drain point sits in `start()` right after ABCD, which every action routes back
+through. When the chain resolves an item (`_resolve_chain`), a triggered
+ability runs each of its effect codes through the effect registry; cast spells
+remain no-ops as before.
+
+### On-screen
+
+`GameState.event_feed` records what happened ("event"), what went on the chain
+("trigger") and what resolved ("effect"); it is serialized to the wire
+alongside the generalized `pending_chain` items (each now exposes `label` and,
+for a triggered ability, its `effect` payload) and the new per-unit
+`bonus_might`. Buffs (`GIVE_ME_+1` etc.) add to `bonus_might`, which
+`might_at_battlefield` now folds into combat strength.
+
 ## 0. Playing a spell
 
 Spells are the second card type the engine can play, alongside Units.

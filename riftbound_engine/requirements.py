@@ -55,7 +55,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterable
 
-from .csv_data import card_might_of
+from .csv_data import card_energy_of, card_might_of, card_power_of, card_type_of
 
 if TYPE_CHECKING:  # avoid an import cycle at module load
     from .engine import GameState
@@ -140,6 +140,11 @@ class UnitRequirement:
 
     min_count: int
     max_count: int | None  # None ⇒ unbounded ("n")
+    # Controller scope relative to the CASTER: None ⇒ either side counts
+    # ("ANY UNIT"); "friendly" ⇒ only the caster's units; "enemy" ⇒ only the
+    # opponent's. Resolving friendly/enemy needs to know who is casting, so
+    # ``unit_matches`` takes the caster's controller string.
+    side: str | None = None
     # Per-unit predicates (every selected unit must satisfy all of these):
     require_battlefield: bool = False
     require_base: bool = False
@@ -153,8 +158,20 @@ class UnitRequirement:
     # If True the phrase can never be satisfied (e.g. references EQUIPMENT,
     # which the engine doesn't model yet).
     impossible: bool = False
+    # If True this is a MOVE phrase: after the unit is picked the caster also
+    # picks a destination location. Doesn't change which units MATCH (any
+    # matching unit can be moved); it only signals the extra destination pick.
+    move: bool = False
 
-    def unit_matches(self, unit: UnitView) -> bool:
+    def unit_matches(self, unit: UnitView, caster: str | None = None) -> bool:
+        # Controller scope. ``caster`` is the casting player's controller
+        # string ("player_1"/"player_2"). When it's unknown (None) the side
+        # filter can't be resolved, so it's skipped rather than guessed.
+        if self.side is not None and caster is not None:
+            if self.side == "friendly" and unit.controller != caster:
+                return False
+            if self.side == "enemy" and unit.controller == caster:
+                return False
         if self.require_battlefield and not unit.at_battlefield:
             return False
         if self.require_base and not unit.at_base:
@@ -171,16 +188,115 @@ class UnitRequirement:
 
 
 @dataclass
-class Phrase:
-    """One requirement phrase. Either a handled unit requirement or unknown.
+class BattlefieldRequirement:
+    """A parsed ``BATTLEFIELD`` phrase — pick one battlefield.
 
-    ``unit`` is set for the ANY-UNIT family we evaluate. ``unknown`` means a
-    selector we don't handle yet (FRIENDLY UNIT, GEAR, …) — those default to
-    satisfiable so their cards keep working until wired up.
+    ``where_friendly`` ⇒ ``BATTLEFIELD[WHERE_FRIENDLY_UNITS]``: only a
+    battlefield where the caster has a unit may be chosen.
+    """
+
+    where_friendly: bool = False
+
+
+@dataclass
+class GearRequirement:
+    """A parsed ``GEAR`` phrase — pick ``min_count`` gear(s) on the board.
+
+    Gears carry no side qualifier in the card data (any player's gear may be
+    targeted). Bare ``GEAR`` is one gear; ``GEAR (0-1)`` is optional (min 0 ⇒
+    trivially satisfiable, no forced pick).
+    """
+
+    min_count: int = 1
+    max_count: int | None = 1
+
+
+@dataclass
+class TrashRequirement:
+    """A parsed ``... TRASH ...`` phrase — pick ``min_count`` card(s) from a
+    trash (discard) zone.
+
+    ``side`` scopes the zone relative to the caster (friendly = caster's trash,
+    enemy = opponent's, None = either). ``unit_only`` ⇒ the phrase said "TRASH
+    UNIT" (only Unit-type trash cards qualify). ``energy_max`` ⇒ a ``[<= NE]``
+    filter on the card's Energy cost.
+    """
+
+    min_count: int = 1
+    max_count: int | None = 1
+    side: str | None = None
+    unit_only: bool = False
+    energy_max: int | None = None
+
+    def matches(self, card_name: str) -> bool:
+        if self.unit_only and card_type_of(card_name) != "Unit":
+            return False
+        if self.energy_max is not None:
+            e = card_energy_of(card_name)
+            if e is None or e > self.energy_max:
+                return False
+        return True
+
+
+@dataclass
+class SpellRequirement:
+    """A parsed ``... SPELL ...`` phrase — pick a spell on the chain (the
+    priority stack), e.g. for a counterspell.
+
+    ``side`` scopes relative to the caster (enemy = opponent's spell, None =
+    any). ``energy_max`` / ``power_max`` come from a ``(<= NE AND <= NP)``
+    filter on the TARGET spell's printed cost.
+    """
+
+    min_count: int = 1
+    max_count: int | None = 1
+    side: str | None = None
+    energy_max: int | None = None
+    power_max: int | None = None
+
+    def matches(self, item_actor: str, item_card: str, caster: str | None) -> bool:
+        if self.side == "enemy" and (caster is None or item_actor == caster):
+            return False
+        if self.side == "friendly" and (caster is None or item_actor != caster):
+            return False
+        if self.energy_max is not None:
+            e = card_energy_of(item_card)
+            if e is None or e > self.energy_max:
+                return False
+        if self.power_max is not None:
+            p = card_power_of(item_card) or 0
+            if p > self.power_max:
+                return False
+        return True
+
+
+@dataclass
+class LocationRequirement:
+    """A parsed ``LOCATION`` phrase — pick one location (base / either
+    battlefield). No filters appear in the card data, so it's a plain pick."""
+
+    pass
+
+
+@dataclass
+class Phrase:
+    """One requirement phrase. Either a handled unit / battlefield / gear /
+    trash / spell / location requirement or unknown.
+
+    ``unit`` is set for the unit-selector family (ANY / FRIENDLY / ENEMY UNIT,
+    incl. MOVE). ``battlefield`` is set for BATTLEFIELD phrases, ``gear`` for
+    GEAR, ``trash`` for trash-zone, ``spell`` for chain-spell, ``location`` for
+    LOCATION phrases. ``unknown`` means a selector we don't handle yet
+    (ABILITY, …) — those default to satisfiable so their cards keep working.
     """
 
     raw: str
     unit: UnitRequirement | None = None
+    battlefield: BattlefieldRequirement | None = None
+    gear: GearRequirement | None = None
+    trash: TrashRequirement | None = None
+    spell: SpellRequirement | None = None
+    location: LocationRequirement | None = None
     unknown: bool = False
 
 
@@ -191,6 +307,8 @@ _COUNT_RE = re.compile(r"^\s*(n|\d+(?:\s*-\s*\d+)?)\s*(?:\[(.*)\])?\s*$", re.IGN
 _MIGHT_LE_RE = re.compile(r"<=\s*(\d+)\s*M", re.IGNORECASE)
 _MIGHT_GE_RE = re.compile(r">=\s*(\d+)\s*M", re.IGNORECASE)
 _SUM_LE_RE = re.compile(r"SUM\s*<=\s*(\d+)\s*M", re.IGNORECASE)
+_ENERGY_LE_RE = re.compile(r"<=\s*(\d+)\s*E", re.IGNORECASE)
+_POWER_LE_RE = re.compile(r"<=\s*(\d+)\s*P", re.IGNORECASE)
 
 
 def _parse_count(token: str) -> tuple[int, int | None]:
@@ -253,13 +371,113 @@ def parse_phrase(raw: str) -> Phrase:
     if "EQUIPMENT" in upper:
         return Phrase(raw=text, unit=UnitRequirement(min_count=1, max_count=1, impossible=True))
 
-    # We only handle the ANY UNIT family in this slice. Everything else is
-    # left ungated (satisfiable) so existing cards keep working.
-    if not upper.startswith("ANY UNIT"):
+    # MOVE phrases ("MOVE FRIENDLY UNIT (1)") are unit selectors PLUS a
+    # destination pick: the unit-selection half is identical to the plain
+    # selector, so strip the MOVE prefix and parse the remainder as one, with
+    # the ``move`` flag set. The body (`parse_body` below) handles the rest.
+    move = False
+    body = text
+    body_upper = upper
+    if body_upper.startswith("MOVE"):
+        # MOVE + TRASH (a trash-zone move) still needs a ref namespace we don't
+        # model — leave it ungated.
+        if "TRASH" in body_upper:
+            return Phrase(raw=text, unknown=True)
+        move = True
+        body = text[len("MOVE"):].strip()
+        body_upper = body.upper()
+
+    # TRASH-zone targeting: pick card(s) from a trash pile. "TRASH UNIT" limits
+    # to Unit-type cards; a "(1[<= 2E])" filter caps the card's Energy cost.
+    # MOVE-from-trash was already short-circuited above (needs a destination).
+    if "TRASH" in body_upper:
+        if body_upper.startswith("FRIENDLY"):
+            t_side: str | None = "friendly"
+        elif body_upper.startswith("ENEMY"):
+            t_side = "enemy"
+        else:
+            t_side = None
+        unit_only = "TRASH UNIT" in body_upper
+        t_paren = re.search(r"\(([^)]*)\)", body)
+        if t_paren is None:
+            return Phrase(
+                raw=text,
+                trash=TrashRequirement(min_count=1, max_count=1, side=t_side, unit_only=unit_only),
+            )
+        tm = _COUNT_RE.match(t_paren.group(1))
+        if tm is None:
+            return Phrase(raw=text, unknown=True)
+        lo, hi = _parse_count(tm.group(1))
+        e_le = _ENERGY_LE_RE.search(tm.group(2) or "")
+        energy_max = int(e_le.group(1)) if e_le else None
+        return Phrase(
+            raw=text,
+            trash=TrashRequirement(
+                min_count=lo, max_count=hi, side=t_side, unit_only=unit_only, energy_max=energy_max
+            ),
+        )
+
+    # BATTLEFIELD: pick one battlefield. ``[WHERE_FRIENDLY_UNITS]`` restricts
+    # to a battlefield where the caster has a unit. (MOVE doesn't apply to a
+    # battlefield pick, so a stray MOVE prefix is just ignored here.)
+    if body_upper.startswith("BATTLEFIELD"):
+        where_friendly = "WHERE_FRIENDLY_UNITS" in body_upper
+        return Phrase(raw=text, battlefield=BattlefieldRequirement(where_friendly=where_friendly))
+
+    # GEAR: pick gear(s) on the board (any player's). Bare "GEAR" defaults to
+    # one; an explicit count in parens ("GEAR (0-1)") overrides it.
+    if body_upper.startswith("GEAR"):
+        gear_paren = re.search(r"\(([^)]*)\)", body)
+        if gear_paren is None:
+            return Phrase(raw=text, gear=GearRequirement(min_count=1, max_count=1))
+        cm = _COUNT_RE.match(gear_paren.group(1))
+        if cm is None:
+            return Phrase(raw=text, unknown=True)
+        lo, hi = _parse_count(cm.group(1))
+        return Phrase(raw=text, gear=GearRequirement(min_count=lo, max_count=hi))
+
+    # SPELL: pick a spell on the chain (counterspell-style). ABILITY isn't
+    # modelled (no ability stack), so a phrase mentioning ABILITY stays
+    # deferred. Cost filters "(<= NE AND <= NP)" cap the TARGET spell's cost.
+    if "SPELL" in body_upper and "ABILITY" not in body_upper:
+        if body_upper.startswith("FRIENDLY"):
+            s_side: str | None = "friendly"
+        elif body_upper.startswith("ENEMY"):
+            s_side = "enemy"
+        else:
+            s_side = None
+        e_le = _ENERGY_LE_RE.search(body)
+        p_le = _POWER_LE_RE.search(body)
+        return Phrase(
+            raw=text,
+            spell=SpellRequirement(
+                min_count=1,
+                max_count=1,
+                side=s_side,
+                energy_max=int(e_le.group(1)) if e_le else None,
+                power_max=int(p_le.group(1)) if p_le else None,
+            ),
+        )
+
+    # LOCATION: pick one location (base or either battlefield).
+    if body_upper.startswith("LOCATION"):
+        return Phrase(raw=text, location=LocationRequirement())
+
+    # Unit selectors we evaluate: ANY / FRIENDLY / ENEMY UNIT. ``side`` scopes
+    # the controller relative to the caster (None = either side counts).
+    # Everything else (GEAR, SPELL, BATTLEFIELD, …) is left ungated so those
+    # cards keep working until they're wired up.
+    if body_upper.startswith("ANY UNIT"):
+        side: str | None = None
+    elif body_upper.startswith("FRIENDLY UNIT"):
+        side = "friendly"
+    elif body_upper.startswith("ENEMY UNIT"):
+        side = "enemy"
+    else:
         return Phrase(raw=text, unknown=True)
 
     # Count + optional inner (per-unit) bracket live in the first (...).
-    paren = re.search(r"\(([^)]*)\)", text)
+    paren = re.search(r"\(([^)]*)\)", body)
     if paren is None:
         # Malformed — be lenient and don't block the card.
         return Phrase(raw=text, unknown=True)
@@ -268,11 +486,11 @@ def parse_phrase(raw: str) -> Phrase:
     if m is None:
         return Phrase(raw=text, unknown=True)
     min_count, max_count = _parse_count(m.group(1))
-    req = UnitRequirement(min_count=min_count, max_count=max_count)
+    req = UnitRequirement(min_count=min_count, max_count=max_count, side=side, move=move)
     _apply_filter_tokens(req, (m.group(2) or "").strip(), is_group=False)
 
     # Any bracket AFTER the parentheses is a group-level constraint.
-    after = text[paren.end():]
+    after = body[paren.end():]
     for grp in re.findall(r"\[(.*?)\]", after):
         _apply_filter_tokens(req, grp.strip(), is_group=True)
 
@@ -346,14 +564,16 @@ def parse_tree(raw: str | None) -> RequirementTree:
 # --------------------------------------------------------------------------
 # Satisfiability
 # --------------------------------------------------------------------------
-def _unit_phrase_satisfiable(req: UnitRequirement, units: Iterable[UnitView]) -> bool:
+def _unit_phrase_satisfiable(
+    req: UnitRequirement, units: Iterable[UnitView], caster: str | None = None
+) -> bool:
     if req.impossible:
         return False
     # Minimum of 0 (e.g. "n" or "0-3") is trivially satisfiable ⇒ always offer.
     if req.min_count <= 0:
         return True
 
-    matching = [u for u in units if req.unit_matches(u)]
+    matching = [u for u in units if req.unit_matches(u, caster)]
     if len(matching) < req.min_count:
         return False
 
@@ -375,11 +595,95 @@ def _unit_phrase_satisfiable(req: UnitRequirement, units: Iterable[UnitView]) ->
     return True
 
 
-def _phrase_satisfiable(phrase: Phrase, units: list[UnitView]) -> bool:
+def _battlefield_phrase_satisfiable(
+    req: BattlefieldRequirement, units: Iterable[UnitView], caster: str | None = None
+) -> bool:
+    # Plain BATTLEFIELD: the two battlefield slots always exist in a live game,
+    # so it's always satisfiable. WHERE_FRIENDLY_UNITS needs a battlefield where
+    # the caster has at least one unit.
+    if not req.where_friendly:
+        return True
+    if caster is None:
+        return True  # can't resolve scope → don't block the card
+    return any(u.controller == caster and u.at_battlefield for u in units)
+
+
+def matching_trash_refs(
+    req: TrashRequirement,
+    trash_p1: list[str],
+    trash_p2: list[str],
+    caster: str | None = None,
+) -> list[TargetRef]:
+    """(controller, index) refs for trash cards matching ``req`` in the
+    caster-scoped zone(s). Shared by satisfiability and the engine's option
+    enumeration so they agree on what's pickable."""
+    sides: list[tuple[str, list[str]]] = []
+    if req.side == "friendly":
+        sides = [("player_1", trash_p1)] if caster == "player_1" else [("player_2", trash_p2)]
+        if caster is None:
+            sides = [("player_1", trash_p1), ("player_2", trash_p2)]
+    elif req.side == "enemy":
+        if caster == "player_1":
+            sides = [("player_2", trash_p2)]
+        elif caster == "player_2":
+            sides = [("player_1", trash_p1)]
+        else:
+            sides = [("player_1", trash_p1), ("player_2", trash_p2)]
+    else:
+        sides = [("player_1", trash_p1), ("player_2", trash_p2)]
+    out: list[TargetRef] = []
+    for controller, pile in sides:
+        for i, name in enumerate(pile):
+            if req.matches(name):
+                out.append((controller, i))
+    return out
+
+
+def matching_spell_refs(
+    req: SpellRequirement,
+    chain_items: list[tuple[str, str]],
+    caster: str | None = None,
+) -> list[int]:
+    """Indices of chain spells (``chain_items`` = (actor, card) pairs, index 0 =
+    top of chain) that match ``req`` for ``caster``. Shared by satisfiability
+    and the engine's option enumeration."""
+    return [
+        i for i, (actor, card) in enumerate(chain_items) if req.matches(actor, card, caster)
+    ]
+
+
+def _phrase_satisfiable(
+    phrase: Phrase,
+    units: list[UnitView],
+    caster: str | None = None,
+    *,
+    gear_count: int = 0,
+    trash_p1: list[str] | None = None,
+    trash_p2: list[str] | None = None,
+    chain_items: list[tuple[str, str]] | None = None,
+) -> bool:
     if phrase.unknown:
         return True  # selector not handled yet → don't block the card
     if phrase.unit is not None:
-        return _unit_phrase_satisfiable(phrase.unit, units)
+        return _unit_phrase_satisfiable(phrase.unit, units, caster)
+    if phrase.battlefield is not None:
+        return _battlefield_phrase_satisfiable(phrase.battlefield, units, caster)
+    if phrase.gear is not None:
+        # Min 0 (e.g. "GEAR (0-1)") is trivially satisfiable; otherwise need
+        # enough gears on the board (either player's).
+        return phrase.gear.min_count <= 0 or gear_count >= phrase.gear.min_count
+    if phrase.trash is not None:
+        if phrase.trash.min_count <= 0:
+            return True
+        refs = matching_trash_refs(phrase.trash, trash_p1 or [], trash_p2 or [], caster)
+        return len(refs) >= phrase.trash.min_count
+    if phrase.spell is not None:
+        if phrase.spell.min_count <= 0:
+            return True
+        refs = matching_spell_refs(phrase.spell, chain_items or [], caster)
+        return len(refs) >= phrase.spell.min_count
+    if phrase.location is not None:
+        return True  # base + two battlefields always exist in a live game
     return True
 
 
@@ -394,38 +698,104 @@ def _fold(values: list[bool], connectors: list[str]) -> bool:
     return acc
 
 
-def tree_satisfiable(tree: RequirementTree, units: list[UnitView]) -> bool:
+def tree_satisfiable(
+    tree: RequirementTree,
+    units: list[UnitView],
+    caster: str | None = None,
+    *,
+    gear_count: int = 0,
+    trash_p1: list[str] | None = None,
+    trash_p2: list[str] | None = None,
+    chain_items: list[tuple[str, str]] | None = None,
+) -> bool:
     if not tree.groups:
         return True
     group_values = [
-        _fold([_phrase_satisfiable(p, units) for p in g.phrases], g.connectors)
+        _fold(
+            [
+                _phrase_satisfiable(
+                    p,
+                    units,
+                    caster,
+                    gear_count=gear_count,
+                    trash_p1=trash_p1,
+                    trash_p2=trash_p2,
+                    chain_items=chain_items,
+                )
+                for p in g.phrases
+            ],
+            g.connectors,
+        )
         for g in tree.groups
     ]
     return _fold(group_values, tree.connectors)
 
 
-def requirement_satisfiable(raw: str | None, state: "GameState") -> bool:
+def _norm_caster(caster: "str | None") -> str | None:
+    """Accept a ``RequiredTo`` enum member or a controller string and return
+    the plain controller string ("player_1"/"player_2"), or None."""
+    if caster is None:
+        return None
+    value = getattr(caster, "value", caster)
+    return value if value in ("player_1", "player_2") else None
+
+
+def requirement_satisfiable(
+    raw: str | None, state: "GameState", caster: "str | None" = None
+) -> bool:
     """Whether ``raw``'s requirement has at least one valid target set now.
 
-    Empty/blank requirements are always satisfiable (no choice needed).
+    ``caster`` is the casting player (a ``RequiredTo`` or controller string);
+    it's needed to resolve FRIENDLY / ENEMY selectors. Empty/blank
+    requirements are always satisfiable (no choice needed).
     """
     if not raw or not raw.strip():
         return True
+    caster = _norm_caster(caster)
     tree = parse_tree(raw)
-    return tree_satisfiable(tree, board_units(state))
+    gear_count = len(getattr(state, "player_1_gears", None) or []) + len(
+        getattr(state, "player_2_gears", None) or []
+    )
+    trash_p1 = list(getattr(state, "player_1_trash", None) or [])
+    trash_p2 = list(getattr(state, "player_2_trash", None) or [])
+    chain = getattr(state, "pending_chain", None)
+    chain_items = (
+        [(getattr(it.actor, "value", it.actor), it.card) for it in chain.items]
+        if chain is not None
+        else []
+    )
+    if not tree_satisfiable(
+        tree,
+        board_units(state),
+        caster,
+        gear_count=gear_count,
+        trash_p1=trash_p1,
+        trash_p2=trash_p2,
+        chain_items=chain_items,
+    ):
+        return False
+    # A pure-AND requirement that forces more than one pick additionally needs
+    # a DISTINCT unit for each pick — tree_satisfiable only checks each phrase
+    # in isolation, so confirm a full disjoint assignment exists before the
+    # card is offered (otherwise the caster could soft-lock mid-selection).
+    plan = spell_target_plan(raw)
+    if len(plan) > 1:
+        return plan_feasible(plan, state, caster)
+    return True
 
 
-def spell_playable(state: "GameState", card: str) -> bool:
+def spell_playable(state: "GameState", card: str, caster: "str | None" = None) -> bool:
     """True if ``card``'s Spell Choice Requirement can be met on the board.
 
     Convenience wrapper used by the engine's action generator: looks up the
-    card's raw requirement from the CSV and evaluates it. Cards with no
+    card's raw requirement from the CSV and evaluates it. ``caster`` is the
+    casting player, needed for FRIENDLY / ENEMY selectors. Cards with no
     requirement are always playable (subject to the engine's cost gates,
     which are checked separately).
     """
     from .csv_data import card_spell_requirement_of
 
-    return requirement_satisfiable(card_spell_requirement_of(card), state)
+    return requirement_satisfiable(card_spell_requirement_of(card), state, caster)
 
 
 # --------------------------------------------------------------------------
@@ -450,27 +820,215 @@ def token_to_ref(token: str) -> TargetRef:
     return (_REF_LONG[short], int(idx))
 
 
+def _selectable_phrase_req(phrase: Phrase) -> UnitRequirement | None:
+    """The UnitRequirement for a phrase that forces an explicit pick, or None.
+
+    A phrase forces a pick when it's a handled ANY-UNIT requirement with a
+    minimum of at least 1 and isn't impossible. Unknown selectors (GEAR,
+    FRIENDLY UNIT, …), min-0 phrases (``n`` / ``0-N``), and EQUIPMENT-style
+    impossible phrases never force a pick.
+    """
+    if phrase.unit is None or phrase.unknown or phrase.unit.impossible:
+        return None
+    if phrase.unit.min_count < 1:
+        return None
+    return phrase.unit
+
+
 def selectable_unit_requirement(raw: str | None) -> UnitRequirement | None:
     """Return the single ANY-UNIT requirement that needs an explicit pick.
 
-    This is the first slice of the choice system: it only fires for a
-    requirement that parses to EXACTLY one group with one unit phrase whose
-    minimum is >= 1 (so a real choice is forced) and isn't impossible.
-    Anything else — blank, min-0 (``n``/``0-N``), an unknown selector, or a
-    multi-phrase/multi-group tree — returns ``None``, and the engine commits
-    the spell immediately the way it always has.
+    Fires only for a requirement that parses to EXACTLY one group with one
+    unit phrase whose minimum is >= 1 (so a real choice is forced) and isn't
+    impossible. Anything else — blank, min-0 (``n``/``0-N``), an unknown
+    selector, or a multi-phrase/multi-group tree — returns ``None``.
+
+    For multi-phrase ANY-UNIT requirements use :func:`spell_target_plan`,
+    which returns one requirement per pick the caster must make.
     """
     if not raw or not raw.strip():
         return None
     tree = parse_tree(raw)
     if len(tree.groups) != 1 or len(tree.groups[0].phrases) != 1:
         return None
-    phrase = tree.groups[0].phrases[0]
-    if phrase.unit is None or phrase.unknown or phrase.unit.impossible:
-        return None
-    if phrase.unit.min_count < 1:
-        return None
-    return phrase.unit
+    return _selectable_phrase_req(tree.groups[0].phrases[0])
+
+
+def spell_target_plan(raw: str | None) -> list[UnitRequirement]:
+    """Ordered list of the ANY-UNIT picks a spell forces the caster to make.
+
+    Each entry is a :class:`UnitRequirement` the caster must satisfy with a
+    distinct set of units, in order. The plan is non-empty only for a *pure
+    conjunction* (every connector — within and between groups — is ``AND``)
+    that contains at least one pick-forcing ANY-UNIT phrase; phrases that
+    don't force a pick (unknown selectors like GEAR, min-0 phrases, EQUIPMENT)
+    are simply omitted from the plan.
+
+    Anything involving an OR connector returns ``[]`` — the caster would have
+    to choose *which* branch to satisfy, which the choice system doesn't model
+    yet, so those spells commit immediately the way they always have.
+
+    Single-phrase requirements yield a one-entry plan, matching
+    :func:`selectable_unit_requirement`.
+    """
+    if not raw or not raw.strip():
+        return []
+    tree = parse_tree(raw)
+    if any(c == "OR" for c in tree.connectors):
+        return []
+    plan: list[UnitRequirement] = []
+    for group in tree.groups:
+        if any(c == "OR" for c in group.connectors):
+            return []
+        for phrase in group.phrases:
+            req = _selectable_phrase_req(phrase)
+            if req is not None:
+                plan.append(req)
+    return plan
+
+
+def battlefield_picks(raw: str | None) -> list[BattlefieldRequirement]:
+    """Ordered BATTLEFIELD requirements a spell forces the caster to pick.
+
+    One entry per BATTLEFIELD phrase, in tree order. Like the unit plan, this
+    is only populated for a pure conjunction (no OR), so OR'd requirements
+    commit immediately as they always have.
+    """
+    if not raw or not raw.strip():
+        return []
+    tree = parse_tree(raw)
+    if any(c == "OR" for c in tree.connectors):
+        return []
+    out: list[BattlefieldRequirement] = []
+    for group in tree.groups:
+        if any(c == "OR" for c in group.connectors):
+            return []
+        for phrase in group.phrases:
+            if phrase.battlefield is not None:
+                out.append(phrase.battlefield)
+    return out
+
+
+def gear_picks(raw: str | None) -> list[GearRequirement]:
+    """Ordered GEAR requirements a spell forces the caster to pick (min >= 1).
+
+    Optional gear phrases (``GEAR (0-1)``, min 0) and OR'd requirements force
+    no pick, mirroring the unit plan.
+    """
+    if not raw or not raw.strip():
+        return []
+    tree = parse_tree(raw)
+    if any(c == "OR" for c in tree.connectors):
+        return []
+    out: list[GearRequirement] = []
+    for group in tree.groups:
+        if any(c == "OR" for c in group.connectors):
+            return []
+        for phrase in group.phrases:
+            if phrase.gear is not None and phrase.gear.min_count >= 1:
+                out.append(phrase.gear)
+    return out
+
+
+def trash_picks(raw: str | None) -> list[TrashRequirement]:
+    """Ordered TRASH requirements a spell forces the caster to pick (min >= 1).
+
+    Optional (min 0) and OR'd requirements force no pick, mirroring the others.
+    """
+    if not raw or not raw.strip():
+        return []
+    tree = parse_tree(raw)
+    if any(c == "OR" for c in tree.connectors):
+        return []
+    out: list[TrashRequirement] = []
+    for group in tree.groups:
+        if any(c == "OR" for c in group.connectors):
+            return []
+        for phrase in group.phrases:
+            if phrase.trash is not None and phrase.trash.min_count >= 1:
+                out.append(phrase.trash)
+    return out
+
+
+def spell_picks(raw: str | None) -> list[SpellRequirement]:
+    """Ordered SPELL requirements a spell forces the caster to pick (min >= 1).
+
+    OR'd requirements force no pick (the caster would choose a branch, which the
+    choice system doesn't model), mirroring the other pick helpers.
+    """
+    if not raw or not raw.strip():
+        return []
+    tree = parse_tree(raw)
+    if any(c == "OR" for c in tree.connectors):
+        return []
+    out: list[SpellRequirement] = []
+    for group in tree.groups:
+        if any(c == "OR" for c in group.connectors):
+            return []
+        for phrase in group.phrases:
+            if phrase.spell is not None and phrase.spell.min_count >= 1:
+                out.append(phrase.spell)
+    return out
+
+
+def location_picks(raw: str | None) -> list[LocationRequirement]:
+    """Ordered LOCATION requirements a spell forces the caster to pick.
+
+    One per LOCATION phrase, in tree order; OR'd requirements force no pick.
+    """
+    if not raw or not raw.strip():
+        return []
+    tree = parse_tree(raw)
+    if any(c == "OR" for c in tree.connectors):
+        return []
+    out: list[LocationRequirement] = []
+    for group in tree.groups:
+        if any(c == "OR" for c in group.connectors):
+            return []
+        for phrase in group.phrases:
+            if phrase.location is not None:
+                out.append(phrase.location)
+    return out
+
+
+def moved_unit_refs(raw: str | None, chosen: list[list[str]]) -> list[TargetRef]:
+    """The (controller, index) refs the caster has picked for MOVE phrases,
+    in pick order. Each one still needs a destination location chosen for it.
+
+    ``chosen`` is ``PendingSpellChoice.chosen`` — one inner list of wire tokens
+    per resolved phrase, aligned with ``spell_target_plan(raw)``.
+    """
+    plan = spell_target_plan(raw)
+    out: list[TargetRef] = []
+    for i, picks in enumerate(chosen):
+        if i < len(plan) and plan[i].move:
+            out.extend(token_to_ref(tok) for tok in picks)
+    return out
+
+
+def plan_feasible(
+    plan: list[UnitRequirement],
+    state: "GameState",
+    caster: "str | None" = None,
+    used: "frozenset[TargetRef] | set[TargetRef]" = frozenset(),
+) -> bool:
+    """Whether every requirement in ``plan`` can be satisfied with DISTINCT
+    units simultaneously (no unit reused across picks).
+
+    Backtracking assignment: try each valid target set for the first
+    requirement, mark its units used, recurse on the rest. ``caster`` resolves
+    FRIENDLY / ENEMY scopes; ``used`` seeds the refs already committed
+    (mid-selection). Boards are tiny so the search is cheap;
+    ``enumerate_unit_target_sets``'s cap bounds each level.
+    """
+    if not plan:
+        return True
+    head, rest = plan[0], plan[1:]
+    used = set(used)
+    for combo in enumerate_unit_target_sets(head, state, caster=caster, exclude=used):
+        if plan_feasible(rest, state, caster, used | set(combo)):
+            return True
+    return False
 
 
 def _group_ok(req: UnitRequirement, combo: tuple[UnitView, ...]) -> bool:
@@ -482,18 +1040,33 @@ def _group_ok(req: UnitRequirement, combo: tuple[UnitView, ...]) -> bool:
 
 
 def enumerate_unit_target_sets(
-    req: UnitRequirement, state: "GameState", *, cap: int = 256
+    req: UnitRequirement,
+    state: "GameState",
+    *,
+    caster: "str | None" = None,
+    cap: int = 256,
+    exclude: "frozenset[TargetRef] | set[TargetRef]" = frozenset(),
 ) -> list[tuple[TargetRef, ...]]:
     """All valid target sets for ``req`` on the current board.
 
     Each result is a tuple of ``(controller, index)`` refs. Set sizes range
     over ``[min_count, max_count]`` (``max_count`` None ⇒ up to every
-    matching unit). Per-unit filters are applied first; group constraints
-    (SAME_LOC / SUM) are checked per candidate set. Capped at ``cap`` sets.
+    matching unit). ``caster`` resolves FRIENDLY / ENEMY scopes; per-unit
+    filters are applied first; group constraints (SAME_LOC / SUM) are checked
+    per candidate set. Capped at ``cap`` sets.
+
+    ``exclude`` is a set of refs already committed to earlier phrases of a
+    multi-phrase requirement — they're filtered out so the same unit can't
+    satisfy two different picks of the same spell.
     """
     import itertools
 
-    matching = [u for u in board_units(state) if req.unit_matches(u)]
+    caster = _norm_caster(caster)
+    matching = [
+        u
+        for u in board_units(state)
+        if req.unit_matches(u, caster) and (u.controller, u.index) not in exclude
+    ]
     if len(matching) < req.min_count:
         return []
     hi = len(matching) if req.max_count is None else min(req.max_count, len(matching))
@@ -511,19 +1084,32 @@ def enumerate_unit_target_sets(
 
 
 def target_set_satisfies(
-    req: UnitRequirement, state: "GameState", refs: list[TargetRef]
+    req: UnitRequirement,
+    state: "GameState",
+    refs: list[TargetRef],
+    *,
+    caster: "str | None" = None,
+    exclude: "frozenset[TargetRef] | set[TargetRef]" = frozenset(),
 ) -> bool:
-    """Validate a concrete chosen set of refs against ``req``."""
+    """Validate a concrete chosen set of refs against ``req``.
+
+    ``caster`` resolves FRIENDLY / ENEMY scopes. ``exclude`` holds refs
+    already committed to earlier phrases of the same multi-phrase requirement;
+    reusing one of them is rejected.
+    """
+    caster = _norm_caster(caster)
     units = board_units(state)
     by_ref = {(u.controller, u.index): u for u in units}
     if len(set(refs)) != len(refs):
         return False  # no duplicate targets
+    if any(r in exclude for r in refs):
+        return False  # already used by an earlier phrase
     if not (req.min_count <= len(refs) and (req.max_count is None or len(refs) <= req.max_count)):
         return False
     chosen: list[UnitView] = []
     for r in refs:
         u = by_ref.get(r)
-        if u is None or not req.unit_matches(u):
+        if u is None or not req.unit_matches(u, caster):
             return False
         chosen.append(u)
     return _group_ok(req, tuple(chosen))

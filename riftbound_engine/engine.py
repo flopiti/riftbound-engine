@@ -7,9 +7,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable
 
+from . import abilities as _abilities
+from . import effects as _effects
 from .csv_data import card_domains_of, card_energy_of, card_power_of, card_type_of
 from .deck_files import deck_data_for_id, list_deck_ids
 from .protocol import ApplyVerb, RequiredStep, apply_prefix
+from .triggers import EventLogEntry, GameEvent, TriggeredEffect, trigger_matches
 
 
 DECK_BATTLEFIELD_COUNT = 3
@@ -112,6 +115,11 @@ class PlayedUnit:
     #: One of UNIT_LOCATIONS.
     location: str
     exhausted: bool = True
+    #: Persistent Might modifier applied by resolved effects (e.g. a
+    #: "+1 Might" buff). Added on top of the card's printed Might wherever
+    #: combat strength is computed (see ``might_at_battlefield``). Defaults
+    #: to 0 so untouched units behave exactly as before.
+    bonus_might: int = 0
 
 
 @dataclass
@@ -163,6 +171,9 @@ class PlayedGear:
     #: Always ``"base"`` — gears do not move.
     location: str = "base"
     exhausted: bool = False
+    #: For Equipment gears: the unit it's attached to, as a "controller:index"
+    #: ref ("player_1:0") into that player's units list, or None if unequipped.
+    attached_to: str | None = None
 
 
 @dataclass
@@ -192,11 +203,41 @@ class PendingSpellChoice:
     the card finally lands on the spell stack (with ``PlayedSpell.targets``
     recorded). ``requirement`` is the raw CSV requirement string so the
     engine can re-derive the parsed phrase when enumerating / validating.
+
+    Multi-phrase requirements (a pure-AND tree like ``ANY UNIT (1[BF])|ANY
+    UNIT (1)``) force one pick per phrase, made sequentially. ``chosen``
+    records the picks committed so far — one inner list of ``p1-0`` / ``p2-1``
+    wire tokens per resolved phrase. The phrase currently being chosen is
+    ``spell_target_plan(requirement)[len(chosen)]``; the spell only lands once
+    ``len(chosen)`` reaches the plan length. Single-phrase spells resolve on
+    the first pick, exactly as before.
     """
 
     actor: RequiredTo
     card: str
     requirement: str
+    chosen: list[list[str]] = field(default_factory=list)
+    #: For MOVE phrases, the destination location chosen for each moved unit,
+    #: in the same order as ``requirements.moved_unit_refs``. Collected AFTER
+    #: all unit picks via ``play:choose_spell_destination:<location>``; the
+    #: spell only lands once every moved unit has a destination.
+    destinations: list[str] = field(default_factory=list)
+    #: For BATTLEFIELD phrases, the battlefield slot chosen for each (in
+    #: ``requirements.battlefield_picks`` order). Collected via
+    #: ``play:choose_spell_battlefield:<slot>``.
+    battlefields: list[str] = field(default_factory=list)
+    #: For GEAR phrases, the chosen gear refs ("g1-0" / "g2-0"). Collected
+    #: via ``play:choose_spell_gear:<gref>``.
+    gears: list[str] = field(default_factory=list)
+    #: For TRASH phrases, the chosen trash refs ("t1-0" / "t2-0"). Collected
+    #: via ``play:choose_spell_trash:<tref>``.
+    trash: list[str] = field(default_factory=list)
+    #: For SPELL phrases, the chosen chain-spell refs ("c-0" = top of chain).
+    #: Collected via ``play:choose_spell_chain:<cref>``.
+    spells: list[str] = field(default_factory=list)
+    #: For LOCATION phrases, the chosen location(s) ("base"/"battlefield_1"/…).
+    #: Collected last, via ``play:choose_spell_location:<loc>``.
+    locations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -211,8 +252,17 @@ class ChainItem:
     """
 
     actor: RequiredTo
-    card: str
+    #: For a cast spell, the spell's card name. ``None`` for a triggered
+    #: ability item (which carries an ``effect`` instead).
+    card: str | None = None
     targets: list[str] = field(default_factory=list)
+    #: Set when this item is a TRIGGERED ABILITY rather than a cast spell.
+    #: On resolution the engine runs each of ``effect.effects`` via the
+    #: effect registry (see ``_resolve_chain``); a spell item (``effect is
+    #: None``) still resolves as the historical no-op.
+    effect: "TriggeredEffect | None" = None
+    #: Human-readable label for the UI ("Garen — WHEN_YOU_PLAY_ME").
+    label: str = ""
 
 
 @dataclass
@@ -224,8 +274,10 @@ class PendingChain:
     they can cast a Reaction spell (which pushes onto the chain and hands
     priority back to that caster, resetting the pass count) or pass. When
     ``consecutive_passes`` reaches 2 (both players passed in a row with no
-    new spell), the whole chain resolves at once and play returns to the
-    action turn exactly as it was before the first spell was cast.
+    new spell), only the TOP item resolves (LIFO) — the chain shrinks by
+    one and the OWNER of the newly-revealed top item gains priority to
+    respond, with the pass counter reset. The chain closes once its last
+    item resolves; play then returns to where it was before the first cast.
     """
 
     items: list[ChainItem]
@@ -239,18 +291,46 @@ class PendingShowdown:
 
     Opened when the active player moves a unit onto a battlefield they
     don't already control — either an uncontrolled BF or one held by the
-    opponent. While set, both players' options collapse to a single
-    ``play:pass_showdown`` action — first the initiator passes, then the
-    opponent. When both have passed the showdown resolves: the
-    battlefield's controller is set to the showdown's initiator (in the
-    current minimal model the initiator always "wins"; that's a placeholder
-    until proper unit-vs-unit resolution lands), and this field is cleared.
+    opponent.
+
+    MUSTER window: right after the first unit walks in, the showdown is
+    "unlocked" (``locked == False``). While unlocked, the initiator hasn't
+    committed yet and may keep MOVING additional ready units onto the same
+    battlefield (reinforce before the fight) instead of being forced to
+    pass immediately. The initiator may also play an [Action]/[Reaction]
+    spell during this window; doing so LOCKS the showdown (``locked =
+    True``) — the fight has begun, so no more units can be mustered in.
+    Passing also ends mustering.
+
+    FOCUS (the showdown's equivalent of priority): exactly one player holds
+    focus at a time, starting with the initiator. The focus holder may play
+    [Action]/[Reaction] spells (each opens a chain that runs the normal
+    priority/Reaction sub-loop), and — if they're the initiator and the
+    fight hasn't started — muster more units. When they're done they PASS
+    FOCUS to the opponent. Playing a spell resets the focus-pass counter
+    (the fight continues); two consecutive focus passes (``focus_passes``
+    reaches 2) end the showdown: if only one side has units it's a clean
+    conquest, if both do it opens a ``PendingCombat`` damage step. The
+    field is cleared on resolution.
     """
 
     battlefield: str  # "battlefield_1" or "battlefield_2"
     initiator: RequiredTo
-    initiator_passed: bool = False
-    opponent_passed: bool = False
+    #: Who currently holds FOCUS. ``None`` is normalized to the initiator
+    #: (the starting holder) via :attr:`focus_holder`.
+    focus: "RequiredTo | None" = None
+    #: Consecutive focus passes with no intervening play. Reaches 2 ⇒ both
+    #: players passed focus in a row ⇒ the showdown resolves.
+    focus_passes: int = 0
+    #: True once the fight has "started" — a card was played in the
+    #: showdown. While False (and focus is with the initiator) the
+    #: initiator may still muster additional units onto the battlefield.
+    locked: bool = False
+
+    @property
+    def focus_holder(self) -> RequiredTo:
+        """The player on the clock — defaults to the initiator when unset."""
+        return self.focus if self.focus is not None else self.initiator
 
 
 @dataclass
@@ -266,15 +346,17 @@ class PendingCombat:
 
     Damage rule (Riftbound combat): a player's damage budget is the SUM of
     the Might of every unit they control at the battlefield. Damage is
-    ASSIGNED unit-by-unit and you must assign LETHAL damage (≥ the unit's
-    Might) to one enemy unit before moving on to the next. You may not
-    over-assign past lethal while another enemy unit could still be
-    assigned to. Consequence: a player kills a *maximal* set of enemy
-    units — any subset ``S`` whose summed Might ≤ budget AND where the
-    leftover (``budget − sum(S)``) is smaller than every surviving enemy
-    unit's Might (so no further kill was possible). Leftover that can't
-    finish off another unit is dealt as non-lethal damage and, since this
-    game keeps no persistent damage, simply has no effect.
+    ASSIGNED unit-by-unit and you must assign LETHAL damage to one enemy
+    unit before moving on to the next. A unit's lethal threshold is
+    ``max(Might, 1)`` — a 0-Might unit still needs 1 damage to die, so it
+    is never free to kill. You may not over-assign past lethal while another
+    enemy unit could still be assigned to. Consequence: a player kills a
+    *maximal* set of enemy units — any subset ``S`` whose summed lethal cost
+    ≤ budget AND where the leftover (``budget − sum(S)``) is smaller than
+    every surviving enemy unit's lethal threshold (so no further kill was
+    possible). Leftover that can't finish off another unit is dealt as
+    non-lethal damage and, since this game keeps no persistent damage,
+    simply has no effect.
 
     Assigning is not dealing: both players commit their assignments BLIND
     (one can't see the other's), then all assignments are applied
@@ -342,6 +424,10 @@ class GameState:
     #: deep-copy (branch-tree snapshots) automatically; reset gets a
     #: fresh GameState with the log empty.
     action_log: list[ActionLogEntry] = field(default_factory=list)
+    #: On-screen feed of trigger/effect activity (events fired, abilities that
+    #: went on the chain, effects that resolved). Like ``action_log`` it lives
+    #: on the state so it travels with branch snapshots and goto/restore.
+    event_feed: list[EventLogEntry] = field(default_factory=list)
     first_turn_choice: RequiredTo | None = None
     first_turn: RequiredTo | None = None
     battlefield_1: str | None = None
@@ -430,6 +516,12 @@ class GameState:
     player_2_deck: Deck | None = None
     player_1_deck_id: str | None = None
     player_2_deck_id: str | None = None
+    #: The chosen champion (a fixed Unit from the deck) starts available
+    #: beside the board and can be played at action timing like a hand card
+    #: once affordable. These flags flip True the moment that play STARTS
+    #: (the champion enters ``pending_play``), so it can't be played twice.
+    player_1_champion_played: bool = False
+    player_2_champion_played: bool = False
     #: Match score per player. Players score by gaining control of a
     #: battlefield (winning a showdown) and by HOLDing a battlefield at
     #: the start of B (ABCD step B). The per-turn cap is enforced by
@@ -500,6 +592,10 @@ class GameEngine:
         self._max_counter = max_counter
         self._dice_roller = dice_roller or (lambda: random.randint(1, 6))
         self._rng = rng or random.Random()
+        #: Triggered abilities collected by ``_emit`` during the current
+        #: action, awaiting ``_drain_triggers`` to push them onto the chain.
+        #: Transient (not part of GameState) — always empty between actions.
+        self._trigger_queue: list[TriggeredEffect] = []
 
     @property
     def game_state(self) -> GameState:
@@ -508,6 +604,10 @@ class GameEngine:
             action_log=[
                 ActionLogEntry(sequence=e.sequence, actor=e.actor, action=e.action)
                 for e in self._game_state.action_log
+            ],
+            event_feed=[
+                EventLogEntry(sequence=e.sequence, kind=e.kind, text=e.text)
+                for e in self._game_state.event_feed
             ],
             first_turn_choice=self._game_state.first_turn_choice,
             first_turn=self._game_state.first_turn,
@@ -527,11 +627,11 @@ class GameEngine:
             player_1_hand=list(self._game_state.player_1_hand) if self._game_state.player_1_hand is not None else None,
             player_2_hand=list(self._game_state.player_2_hand) if self._game_state.player_2_hand is not None else None,
             player_1_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might)
                 for u in self._game_state.player_1_units
             ],
             player_2_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might)
                 for u in self._game_state.player_2_units
             ],
             player_1_spells=[
@@ -543,11 +643,11 @@ class GameEngine:
                 for s in self._game_state.player_2_spells
             ],
             player_1_gears=[
-                PlayedGear(card=g.card, location=g.location, exhausted=g.exhausted)
+                PlayedGear(card=g.card, location=g.location, exhausted=g.exhausted, attached_to=g.attached_to)
                 for g in self._game_state.player_1_gears
             ],
             player_2_gears=[
-                PlayedGear(card=g.card, location=g.location, exhausted=g.exhausted)
+                PlayedGear(card=g.card, location=g.location, exhausted=g.exhausted, attached_to=g.attached_to)
                 for g in self._game_state.player_2_gears
             ],
             player_1_trash=list(self._game_state.player_1_trash),
@@ -567,6 +667,13 @@ class GameEngine:
                     actor=self._game_state.pending_spell_choice.actor,
                     card=self._game_state.pending_spell_choice.card,
                     requirement=self._game_state.pending_spell_choice.requirement,
+                    chosen=[list(picks) for picks in self._game_state.pending_spell_choice.chosen],
+                    destinations=list(self._game_state.pending_spell_choice.destinations),
+                    battlefields=list(self._game_state.pending_spell_choice.battlefields),
+                    gears=list(self._game_state.pending_spell_choice.gears),
+                    trash=list(self._game_state.pending_spell_choice.trash),
+                    spells=list(self._game_state.pending_spell_choice.spells),
+                    locations=list(self._game_state.pending_spell_choice.locations),
                 )
             ),
             pending_chain=(
@@ -574,7 +681,13 @@ class GameEngine:
                 if self._game_state.pending_chain is None
                 else PendingChain(
                     items=[
-                        ChainItem(actor=it.actor, card=it.card, targets=list(it.targets))
+                        ChainItem(
+                            actor=it.actor,
+                            card=it.card,
+                            targets=list(it.targets),
+                            effect=it.effect,
+                            label=it.label,
+                        )
                         for it in self._game_state.pending_chain.items
                     ],
                     priority=self._game_state.pending_chain.priority,
@@ -595,8 +708,9 @@ class GameEngine:
                 else PendingShowdown(
                     battlefield=self._game_state.pending_showdown.battlefield,
                     initiator=self._game_state.pending_showdown.initiator,
-                    initiator_passed=self._game_state.pending_showdown.initiator_passed,
-                    opponent_passed=self._game_state.pending_showdown.opponent_passed,
+                    focus=self._game_state.pending_showdown.focus,
+                    focus_passes=self._game_state.pending_showdown.focus_passes,
+                    locked=self._game_state.pending_showdown.locked,
                 )
             ),
             pending_combat=(
@@ -649,6 +763,8 @@ class GameEngine:
             player_2_deck=self._game_state.player_2_deck,
             player_1_deck_id=self._game_state.player_1_deck_id,
             player_2_deck_id=self._game_state.player_2_deck_id,
+            player_1_champion_played=self._game_state.player_1_champion_played,
+            player_2_champion_played=self._game_state.player_2_champion_played,
             total_turn_number=self._game_state.total_turn_number,
             player_1_turn_number=self._game_state.player_1_turn_number,
             player_2_turn_number=self._game_state.player_2_turn_number,
@@ -801,6 +917,9 @@ class GameEngine:
         else:
             self._game_state.player_2_turn_number += 1
         self._reset_abcd_flags()
+        # A new turn begins for ``nxt`` — fire start-of-turn ("beginning
+        # phase") triggers. Queued now, drained at the start() choke point.
+        self._emit(GameEvent(kind="TURN_START", controller=nxt.value))
 
     @staticmethod
     def opponent_of(actor: RequiredTo) -> RequiredTo:
@@ -859,6 +978,7 @@ class GameEngine:
         for _ in range(n):
             pool.append(pile.pop(0))
         self._game_state.global_channel_count += 1
+        self._emit(GameEvent(kind="ON_CHANNEL", controller=actor.value))
 
     def _execute_draw(self, actor: RequiredTo) -> None:
         """Draw (D): draw one card from the main deck (library) into hand."""
@@ -875,6 +995,7 @@ class GameEngine:
         if not library:
             raise ValueError("cannot draw: main deck is empty")
         hand.append(library.pop(0))
+        self._emit(GameEvent(kind="ON_DRAW", controller=actor.value))
 
     def runes_for(self, actor: RequiredTo) -> list[Rune]:
         """Active rune pool for ``actor`` (the live list — caller may mutate)."""
@@ -944,31 +1065,250 @@ class GameEngine:
             return False
         self._game_state.scored_bfs_this_turn.add(battlefield)
         self.add_score(actor, 1)
+        # Conquer/hold/score-here triggers fire when the point lands.
+        self._emit(
+            GameEvent(kind="ON_CONQUER", controller=actor.value, battlefield=battlefield)
+        )
         return True
 
     def _spell_choice_options(self, choice: "PendingSpellChoice") -> list[str]:
         """Enumerate every valid ``play:choose_spell_targets:<refs>`` for the
-        spell currently waiting on a target pick.
+        phrase the spell is currently waiting on.
 
         One option per valid target set (combination of units that satisfies
-        the card's requirement — count, per-unit filters, and group
-        constraints). Refs are ``p1-<i>`` / ``p2-<i>`` tokens identifying a
-        unit by its position in that player's units list. Returns ``[]`` if
-        the requirement somehow isn't a selectable one (defensive — the
-        pending choice is only ever set for selectable requirements)."""
+        the current phrase — count, per-unit filters, and group constraints).
+        Refs are ``p1-<i>`` / ``p2-<i>`` tokens identifying a unit by its
+        position in that player's units list.
+
+        For a multi-phrase requirement only the phrase at index
+        ``len(choice.chosen)`` is offered; units already committed to earlier
+        phrases are excluded, and a candidate is dropped if picking it would
+        leave a later phrase with no distinct units (so the caster can never
+        paint themselves into a soft-lock). Returns ``[]`` once every phrase
+        is chosen or if the requirement forces no pick (defensive)."""
         from .requirements import (
             enumerate_unit_target_sets,
+            moved_unit_refs,
+            plan_feasible,
             ref_to_token,
-            selectable_unit_requirement,
+            spell_target_plan,
+            token_to_ref,
         )
 
-        req = selectable_unit_requirement(choice.requirement)
-        if req is None:
+        plan = spell_target_plan(choice.requirement)
+        idx = len(choice.chosen)
+        if idx >= len(plan):
+            # All unit picks are in. Then MOVE phrases need a destination per
+            # moved unit, BATTLEFIELD phrases a battlefield, and GEAR phrases a
+            # gear — offered in that order.
+            dest = self._spell_destination_options(choice)
+            if dest:
+                return dest
+            bf = self._spell_battlefield_options(choice)
+            if bf:
+                return bf
+            gear = self._spell_gear_options(choice)
+            if gear:
+                return gear
+            trash = self._spell_trash_options(choice)
+            if trash:
+                return trash
+            spell = self._spell_chain_options(choice)
+            if spell:
+                return spell
+            return self._spell_location_options(choice)
+        caster = choice.actor
+        used = {token_to_ref(tok) for picks in choice.chosen for tok in picks}
+        req = plan[idx]
+        rest = plan[idx + 1 :]
+        options: list[str] = []
+        for combo in enumerate_unit_target_sets(
+            req, self._game_state, caster=caster, exclude=used
+        ):
+            if not plan_feasible(rest, self._game_state, caster, used | set(combo)):
+                continue
+            options.append(
+                "play:choose_spell_targets:" + ",".join(ref_to_token(r) for r in combo)
+            )
+        return options
+
+    def _spell_destination_options(self, choice: "PendingSpellChoice") -> list[str]:
+        """``play:choose_spell_destination:<location>`` options for the next
+        moved unit awaiting a destination, or ``[]`` if none are pending.
+
+        Per the agreed rules, a MOVE spell may send the unit anywhere — any
+        location EXCEPT the one it's already at (a free relocation). Showdown
+        triggering on a contested battlefield is part of the (deferred) effect,
+        not the choice, so it isn't applied here."""
+        from .requirements import moved_unit_refs
+
+        moved = moved_unit_refs(choice.requirement, choice.chosen)
+        if len(choice.destinations) >= len(moved):
             return []
+        controller, index = moved[len(choice.destinations)]
+        units = (
+            self._game_state.player_1_units
+            if controller == "player_1"
+            else self._game_state.player_2_units
+        )
+        current = units[index].location if 0 <= index < len(units) else None
         return [
-            "play:choose_spell_targets:" + ",".join(ref_to_token(r) for r in combo)
-            for combo in enumerate_unit_target_sets(req, self._game_state)
+            f"play:choose_spell_destination:{loc}"
+            for loc in UNIT_LOCATIONS
+            if loc != current
         ]
+
+    def _spell_battlefield_options(self, choice: "PendingSpellChoice") -> list[str]:
+        """``play:choose_spell_battlefield:<slot>`` options for the next
+        BATTLEFIELD pick a spell is waiting on, or ``[]`` if none are pending.
+
+        Only battlefield slots that exist are offered; a
+        ``WHERE_FRIENDLY_UNITS`` phrase further restricts to a battlefield
+        where the caster has a unit."""
+        from .requirements import battlefield_picks
+
+        picks = battlefield_picks(choice.requirement)
+        if len(choice.battlefields) >= len(picks):
+            return []
+        req = picks[len(choice.battlefields)]
+        caster = choice.actor
+        options: list[str] = []
+        for slot in ("battlefield_1", "battlefield_2"):
+            if getattr(self._game_state, slot) is None:
+                continue  # not chosen yet (shouldn't happen mid-game)
+            if req.where_friendly and not self._caster_has_unit_at(caster, slot):
+                continue
+            options.append(f"play:choose_spell_battlefield:{slot}")
+        return options
+
+    def _caster_has_unit_at(self, caster: RequiredTo, slot: str) -> bool:
+        units = (
+            self._game_state.player_1_units
+            if caster == RequiredTo.PLAYER_1
+            else self._game_state.player_2_units
+        )
+        return any(u.location == slot for u in units)
+
+    def _all_gear_refs(self) -> list[str]:
+        """Every gear on the board as a ``g1-<i>`` / ``g2-<i>`` ref token."""
+        refs: list[str] = []
+        for prefix, gears in (
+            ("g1", self._game_state.player_1_gears),
+            ("g2", self._game_state.player_2_gears),
+        ):
+            refs.extend(f"{prefix}-{i}" for i in range(len(gears)))
+        return refs
+
+    def _spell_gear_options(self, choice: "PendingSpellChoice") -> list[str]:
+        """``play:choose_spell_gear:<gref>`` options for the next gear pick a
+        spell is waiting on, or ``[]`` if none are pending. Gears already picked
+        for this spell are excluded so the same one can't be chosen twice."""
+        from .requirements import gear_picks
+
+        needed = sum(g.min_count for g in gear_picks(choice.requirement))
+        if len(choice.gears) >= needed:
+            return []
+        taken = set(choice.gears)
+        return [
+            f"play:choose_spell_gear:{ref}"
+            for ref in self._all_gear_refs()
+            if ref not in taken
+        ]
+
+    def _spell_trash_options(self, choice: "PendingSpellChoice") -> list[str]:
+        """``play:choose_spell_trash:<tref>`` options for the next trash pick a
+        spell is waiting on, or ``[]`` if none are pending. Only trash cards
+        matching the current TRASH phrase (side scope, unit-only, energy cap)
+        are offered; already-picked refs are excluded."""
+        from .requirements import matching_trash_refs, trash_picks
+
+        picks = trash_picks(choice.requirement)
+        needed = sum(t.min_count for t in picks)
+        if len(choice.trash) >= needed:
+            return []
+        # The phrase governing the next pick (picks have min_count 1 in the data).
+        req = picks[min(len(choice.trash), len(picks) - 1)]
+        refs = matching_trash_refs(
+            req,
+            list(self._game_state.player_1_trash),
+            list(self._game_state.player_2_trash),
+            choice.actor.value,
+        )
+        taken = set(choice.trash)
+        out: list[str] = []
+        for controller, idx in refs:
+            tok = f"{'t1' if controller == 'player_1' else 't2'}-{idx}"
+            if tok not in taken:
+                out.append(f"play:choose_spell_trash:{tok}")
+        return out
+
+    def _chain_items_for_match(self) -> list[tuple[str, str]]:
+        chain = self._game_state.pending_chain
+        if chain is None:
+            return []
+        return [(it.actor.value, it.card) for it in chain.items]
+
+    def _spell_chain_options(self, choice: "PendingSpellChoice") -> list[str]:
+        """``play:choose_spell_chain:c-<i>`` options for the next SPELL phrase a
+        spell is waiting on, or ``[]`` if none are pending. Only chain spells
+        matching the phrase (side scope, cost caps) are offered; already-picked
+        refs are excluded."""
+        from .requirements import matching_spell_refs, spell_picks
+
+        picks = spell_picks(choice.requirement)
+        needed = sum(s.min_count for s in picks)
+        if len(choice.spells) >= needed:
+            return []
+        req = picks[min(len(choice.spells), len(picks) - 1)]
+        refs = matching_spell_refs(req, self._chain_items_for_match(), choice.actor.value)
+        taken = set(choice.spells)
+        return [f"play:choose_spell_chain:c-{i}" for i in refs if f"c-{i}" not in taken]
+
+    def _spell_location_options(self, choice: "PendingSpellChoice") -> list[str]:
+        """``play:choose_spell_location:<loc>`` options for the next LOCATION
+        pick a spell is waiting on, or ``[]`` if none are pending. Offers base
+        plus any battlefield slot that exists."""
+        from .requirements import location_picks
+
+        if len(choice.locations) >= len(location_picks(choice.requirement)):
+            return []
+        opts = ["play:choose_spell_location:base"]
+        for slot in ("battlefield_1", "battlefield_2"):
+            if getattr(self._game_state, slot) is not None:
+                opts.append(f"play:choose_spell_location:{slot}")
+        return opts
+
+    def _spell_choice_complete(self, choice: "PendingSpellChoice") -> bool:
+        """True when every pick a spell's requirement forces — unit phrases,
+        MOVE destinations, BATTLEFIELD, GEAR, TRASH, chain-SPELL, and LOCATION
+        picks — has been made."""
+        from .requirements import (
+            battlefield_picks,
+            gear_picks,
+            location_picks,
+            moved_unit_refs,
+            spell_picks,
+            spell_target_plan,
+            trash_picks,
+        )
+
+        if len(choice.chosen) < len(spell_target_plan(choice.requirement)):
+            return False
+        if len(choice.destinations) < len(
+            moved_unit_refs(choice.requirement, choice.chosen)
+        ):
+            return False
+        if len(choice.battlefields) < len(battlefield_picks(choice.requirement)):
+            return False
+        if len(choice.gears) < sum(g.min_count for g in gear_picks(choice.requirement)):
+            return False
+        if len(choice.trash) < sum(t.min_count for t in trash_picks(choice.requirement)):
+            return False
+        if len(choice.spells) < sum(s.min_count for s in spell_picks(choice.requirement)):
+            return False
+        if len(choice.locations) < len(location_picks(choice.requirement)):
+            return False
+        return True
 
     def _push_spell_to_chain(
         self, actor: RequiredTo, card: str, targets: list[str]
@@ -1007,13 +1347,170 @@ class GameEngine:
         )
         spells.append(PlayedSpell(card=card, targets=list(targets), order=order))
 
+        # Announce the cast so spell-triggered abilities ("when you play a
+        # spell…") can respond. Collected now; pushed onto the chain at the
+        # next drain so they sit ABOVE this spell and resolve first.
+        self._emit(GameEvent(kind="ON_PLAY_SPELL", controller=actor.value, source=None))
+
     def _resolve_chain(self) -> None:
-        """Resolve the whole chain at once: close the priority window and
-        return to the action turn where it left off. The chained spells are
-        already sitting in their casters' piles (added at cast time, see
-        ``_push_spell_to_chain``) and there are no per-spell effects yet, so
-        resolution just clears the chain."""
-        self._game_state.pending_chain = None
+        """Resolve the TOP (most recent) item of the chain — LIFO, one at a
+        time. Both players passing in a row resolves only that single top
+        spell; the chain shrinks by one. If items remain, the OWNER of the
+        new top item gains priority (they may respond to it), and the
+        consecutive-pass counter resets. When the last item resolves, the
+        chain closes and play returns to the action turn (or showdown) where
+        it left off.
+
+        Cast spells already sit in their casters' piles (added at cast time,
+        see ``_push_spell_to_chain``) and still have no per-spell effect, so
+        resolving a spell item just removes it. A TRIGGERED-ABILITY item
+        (``ChainItem.effect`` set), however, RUNS its effects here via the
+        effect registry — this is where "add the effect to the chain" pays
+        off."""
+        chain = self._game_state.pending_chain
+        if chain is None:
+            return
+        if chain.items:
+            resolved = chain.items.pop(0)  # resolve the most-recently-added item
+            self._execute_chain_item(resolved)
+        if chain.items:
+            # A new top item is revealed — its owner gets priority to respond.
+            chain.priority = chain.items[0].actor
+            chain.consecutive_passes = 0
+        else:
+            self._game_state.pending_chain = None
+        # Resolving an item may itself fire events (e.g. an effect kills a
+        # unit). Push any it produced before play continues.
+        self._drain_triggers()
+
+    def _execute_chain_item(self, item: "ChainItem") -> None:
+        """Run a resolving chain item. Spells are still no-ops; a triggered
+        ability runs each of its effect codes through the effect registry,
+        logging what resolved (or that a code is not yet implemented)."""
+        eff = item.effect
+        if eff is None:
+            return
+        try:
+            controller = RequiredTo(eff.controller)
+        except ValueError:
+            return
+        for code in eff.effects:
+            ctx = _effects.EffectContext(
+                engine=self,
+                controller=controller,
+                source=eff.source,
+                code=code,
+                trigger=eff.trigger,
+                event_kind=eff.event_kind,
+            )
+            ran = _effects.execute_effect(ctx)
+            label = item.label or eff.source or code
+            if ran:
+                self._log_event("effect", f"{label}: {code}")
+            else:
+                self._log_event("effect", f"{label}: {code} (not implemented)")
+
+    # ----------------------------------------------------------------- #
+    # Trigger / event plumbing
+    # ----------------------------------------------------------------- #
+    def _log_event(self, kind: str, text: str) -> None:
+        """Append a line to the on-screen trigger/effect feed."""
+        self._game_state.event_feed.append(
+            EventLogEntry(sequence=len(self._game_state.event_feed), kind=kind, text=text)
+        )
+
+    def _abilities_in_play(self):
+        """Yield ``(ref, controller, location, card, ability)`` for every
+        triggered ability on a unit currently in play (both players)."""
+        gs = self._game_state
+        for side, units in (
+            (RequiredTo.PLAYER_1, gs.player_1_units),
+            (RequiredTo.PLAYER_2, gs.player_2_units),
+        ):
+            for idx, unit in enumerate(units):
+                for ability in _abilities.triggered_abilities_for(unit.card):
+                    if not ability.triggers or not ability.active_effects:
+                        continue
+                    yield (f"{side.value}:{idx}", side.value, unit.location, unit.card, ability)
+
+    def _emit(self, event: GameEvent) -> None:
+        """Announce a state transition. Scans cards in play RIGHT NOW for
+        triggered abilities that respond to ``event`` and queues them (they're
+        pushed onto the chain by ``_drain_triggers``). Scanning at emit time —
+        not at drain — means an ability on a unit that's about to leave play
+        (e.g. a DEATHKNELL emitted just before the unit is removed) is still
+        found."""
+        self._log_event("event", self._describe_event(event))
+        for ref, controller, location, card, ability in self._abilities_in_play():
+            matched = [
+                t
+                for t in ability.triggers
+                if trigger_matches(
+                    t,
+                    event,
+                    owner_controller=controller,
+                    owner_location=location,
+                    owner_ref=ref,
+                )
+            ]
+            if not matched:
+                continue
+            self._trigger_queue.append(
+                TriggeredEffect(
+                    controller=controller,
+                    source=ref,
+                    trigger=matched[0],
+                    event_kind=event.kind,
+                    effects=tuple(ability.active_effects),
+                    conditions=tuple(ability.conditions),
+                    label=f"{card} — {matched[0]}",
+                )
+            )
+
+    @staticmethod
+    def _describe_event(event: GameEvent) -> str:
+        bits = [event.kind]
+        if event.controller:
+            bits.append(event.controller)
+        if event.battlefield:
+            bits.append(f"@{event.battlefield}")
+        return " ".join(bits)
+
+    def _drain_triggers(self) -> None:
+        """Push every queued triggered ability onto the chain, then clear the
+        queue. APNAP order: the active player's triggers go on FIRST so they
+        end up BELOW the opponent's and resolve LAST (LIFO). Each push opens
+        or extends the chain via the same priority machinery spells use."""
+        if not self._trigger_queue:
+            return
+        queued = self._trigger_queue
+        self._trigger_queue = []
+        active = self._game_state.current_player
+
+        def _order(te: TriggeredEffect) -> int:
+            return 0 if te.controller == getattr(active, "value", active) else 1
+
+        for te in sorted(queued, key=_order):
+            self._push_effect_to_chain(te)
+
+    def _push_effect_to_chain(self, te: TriggeredEffect) -> None:
+        """Place a triggered ability on top of the chain, handing priority to
+        its controller (the same window spells use to respond)."""
+        try:
+            actor = RequiredTo(te.controller)
+        except ValueError:
+            return
+        item = ChainItem(actor=actor, card=None, targets=[], effect=te, label=te.label)
+        chain = self._game_state.pending_chain
+        if chain is None:
+            self._game_state.pending_chain = PendingChain(
+                items=[item], priority=actor, consecutive_passes=0
+            )
+        else:
+            chain.items.insert(0, item)
+            chain.priority = actor
+            chain.consecutive_passes = 0
+        self._log_event("trigger", f"{te.label} → chain")
 
     def _reaction_play_options(self, actor: RequiredTo) -> list[str]:
         """``play:play_spell:<i>`` for each Reaction spell ``actor`` could play
@@ -1042,7 +1539,7 @@ class GameEngine:
                 continue
             if not self.can_afford_power_cost(actor, card):
                 continue
-            if not spell_playable(self._game_state, card):
+            if not spell_playable(self._game_state, card, caster=actor):
                 continue
             seen.add(card)
             out.append(f"play:play_spell:{i}")
@@ -1084,14 +1581,17 @@ class GameEngine:
         else:
             return []
 
-        targets: list[tuple[int, int]] = []  # (opponent-unit-index, might)
+        # (opponent-unit-index, lethal-cost). Lethal cost is max(Might, 1): a
+        # 0-Might unit still needs 1 damage to die, so it can't be killed for
+        # free (and leftover damage can't force-kill it unless ≥ 1).
+        targets: list[tuple[int, int]] = []
         for i, u in enumerate(opponent_units):
             if u.location != combat.battlefield:
                 continue
             m = card_might_of(u.card)
             if m is None:
                 continue
-            targets.append((i, m))
+            targets.append((i, max(m, 1)))
 
         options: list[str] = []
         for size in range(0, len(targets) + 1):
@@ -1129,9 +1629,9 @@ class GameEngine:
             if unit.location != battlefield:
                 continue
             m = card_might_of(unit.card)
-            if m is None:
-                continue
-            total += m
+            # A unit with non-zero printed Might OR a buff contributes; a
+            # unit with no printed Might still counts its bonus.
+            total += (m or 0) + unit.bonus_might
         return total
 
     def resolve_combat(self, battlefield: str) -> None:
@@ -1157,6 +1657,30 @@ class GameEngine:
             return
         p1_targets = set(pc.player_1_targets or [])  # P2 units P1 killed
         p2_targets = set(pc.player_2_targets or [])  # P1 units P2 killed
+        # Fire death triggers BEFORE pruning, while the dying units are still
+        # in play — so a unit's own DEATHKNELL (and "when a unit dies" watchers)
+        # can still see it. Each death is its own event, tagged with the dead
+        # unit's owner + ref and the battlefield it fell on.
+        for i in p2_targets:
+            if 0 <= i < len(gs.player_1_units):
+                self._emit(
+                    GameEvent(
+                        kind="ON_DEATH",
+                        controller=RequiredTo.PLAYER_1.value,
+                        source=f"{RequiredTo.PLAYER_1.value}:{i}",
+                        battlefield=battlefield,
+                    )
+                )
+        for i in p1_targets:
+            if 0 <= i < len(gs.player_2_units):
+                self._emit(
+                    GameEvent(
+                        kind="ON_DEATH",
+                        controller=RequiredTo.PLAYER_2.value,
+                        source=f"{RequiredTo.PLAYER_2.value}:{i}",
+                        battlefield=battlefield,
+                    )
+                )
         # Apply simultaneously: snapshot both lists first, then split each
         # into survivors (kept) and casualties (→ owner's trash). Killed
         # units leave play entirely and are appended to their owner's
@@ -1280,6 +1804,43 @@ class GameEngine:
                 f"internal error: still {remaining} Power short after deducting from "
                 f"{', '.join(self.card_domains(card)) or '<no domains>'}"
             )
+
+    def can_afford_equip_cost(self, actor: RequiredTo, cost: dict[str, object]) -> bool:
+        """True iff ``actor`` can pay an ``[Equip]`` cost (``card_equip_cost``
+        shape: energy + per-domain power + any-type power). Specific-domain
+        requirements are reserved first; the any-type requirement draws from
+        whatever Power remains across all domains."""
+        if self.player_energy(actor) < int(cost.get("energy", 0)):
+            return False
+        pool = dict(self.player_power(actor))
+        for domain, amount in dict(cost.get("power", {})).items():
+            if pool.get(domain, 0) < amount:
+                return False
+            pool[domain] = pool.get(domain, 0) - amount
+        return sum(pool.values()) >= int(cost.get("any_power", 0))
+
+    def _deduct_equip_cost(self, actor: RequiredTo, cost: dict[str, object]) -> None:
+        """Spend an [Equip] cost: energy, then specific-domain Power, then the
+        any-type Power from whatever domains have Power left (greedy)."""
+        energy = int(cost.get("energy", 0))
+        if energy:
+            self.add_energy(actor, -energy)
+        for domain, amount in dict(cost.get("power", {})).items():
+            if amount:
+                self.add_power(actor, domain, -int(amount))
+        remaining = int(cost.get("any_power", 0))
+        if remaining <= 0:
+            return
+        pool = self.player_power(actor)
+        for domain in list(pool.keys()):
+            if remaining <= 0:
+                break
+            take = min(pool.get(domain, 0), remaining)
+            if take:
+                self.add_power(actor, domain, -take)
+                remaining -= take
+        if remaining > 0:
+            raise ValueError("internal error: still short on any-type Power for equip")
 
     def _ready_all_runes(self, actor: RequiredTo) -> None:
         """Step A (Awake): flip every exhausted rune in the active player's pool back to ready."""
@@ -1437,26 +1998,86 @@ class GameEngine:
             if not is_abcd_done(self._game_state):
                 self._complete_abcd_for_current_player()
                 return self.start()
+            # Single drain choke point: every action routes back through
+            # start() (play handlers `return self.start()`; ABCD recurses
+            # above), so flushing queued triggers onto the chain here — after
+            # ABCD, before any options are built — covers triggers fired by
+            # both ABCD steps and discretionary plays. The chain-priority
+            # block below then surfaces them for resolution.
+            self._drain_triggers()
             active = self._game_state.current_player
             showdown = self._game_state.pending_showdown
-            if showdown is not None:
-                # Mid-showdown: collapse both players' menus to a single
-                # pass_showdown for whichever side is next on the clock
-                # (initiator first, then opponent). All other actions are
-                # suppressed until the showdown resolves.
-                if not showdown.initiator_passed:
-                    next_actor = showdown.initiator
-                else:
-                    next_actor = self.opponent_of(showdown.initiator)
+            # Only drive the showdown menu when nothing finer-grained is
+            # mid-resolution. A spell played IN the showdown opens a chain
+            # (or a target pick); those blocks below own the menu until the
+            # spell resolves, after which we return here.
+            if (
+                showdown is not None
+                and self._game_state.pending_chain is None
+                and self._game_state.pending_spell_choice is None
+            ):
+                from .csv_data import card_playable_in_showdown
+                from .requirements import spell_playable
+
+                # The FOCUS holder is on the clock. They may play an
+                # [Action]/[Reaction] spell, the initiator may MUSTER more
+                # units (only while the fight hasn't started), and either
+                # way they can PASS FOCUS.
+                focus = showdown.focus_holder
+                opts: list[str] = []
+
+                # MUSTER: only the initiator, only while they hold focus and
+                # the fight hasn't started, brings ready base units onto the
+                # contested battlefield.
+                if focus == showdown.initiator and not showdown.locked:
+                    init_units = (
+                        self._game_state.player_1_units
+                        if showdown.initiator == RequiredTo.PLAYER_1
+                        else self._game_state.player_2_units
+                    )
+                    for ui, u in enumerate(init_units):
+                        if not u.exhausted and u.location == "base":
+                            opts.append(
+                                f"play:move_unit:{ui}:{showdown.battlefield}"
+                            )
+
+                # Play an [Action]/[Reaction] spell from the focus holder's
+                # hand. Doing so starts the fight (locks mustering) and opens
+                # a chain. We surface a bare play_spell ONLY for spells already
+                # affordable from the current pools (mirroring the normal action
+                # turn). Spells that still need Energy/Power are offered instead
+                # as pre-costed picker chips (player_X_intents, computed in
+                # shortcuts.py for the focus holder), which expand into the
+                # rune-payment + cast chain — so the focus holder never has to
+                # tap runes by hand. Standalone rune actions are intentionally
+                # NOT surfaced here, exactly like the action turn.
+                focus_hand = (
+                    self._game_state.player_1_hand
+                    if focus == RequiredTo.PLAYER_1
+                    else self._game_state.player_2_hand
+                ) or []
+                energy = self.player_energy(focus)
+                seen_spell: set[str] = set()
+                for hi, c in enumerate(focus_hand):
+                    if c in seen_spell:
+                        continue
+                    if card_type_of(c) != "Spell" or not card_playable_in_showdown(c):
+                        continue
+                    if self.card_energy_cost(c) > energy:
+                        continue
+                    if not self.can_afford_power_cost(focus, c):
+                        continue
+                    if not spell_playable(self._game_state, c, caster=focus):
+                        continue
+                    seen_spell.add(c)
+                    opts.append(f"play:play_spell:{hi}")
+
+                opts.append("play:pass_showdown")
                 return EngineOutput(
                     game_state=self.game_state,
-                    player_1_options=(
-                        ["play:pass_showdown"] if next_actor == RequiredTo.PLAYER_1 else []
-                    ),
-                    player_2_options=(
-                        ["play:pass_showdown"] if next_actor == RequiredTo.PLAYER_2 else []
-                    ),
-                    required_action=_required_action(next_actor, RequiredStep.ACTION_TURN),
+                    player_1_options=opts if focus == RequiredTo.PLAYER_1 else [],
+                    player_2_options=opts if focus == RequiredTo.PLAYER_2 else [],
+                    required_action=_required_action(focus, RequiredStep.ACTION_TURN),
                 )
 
             combat = self._game_state.pending_combat
@@ -1612,7 +2233,7 @@ class GameEngine:
                         continue
                     if not self.can_afford_power_cost(active, card):
                         continue
-                    if not spell_playable(self._game_state, card):
+                    if not spell_playable(self._game_state, card, caster=active):
                         continue
                     seen_play_card.add(card)
                     options.append(f"play:play_spell:{i}")
@@ -1632,6 +2253,30 @@ class GameEngine:
                         continue
                     seen_play_card.add(card)
                     options.append(f"play:play_gear:{i}")
+
+                # The chosen champion plays like a hand unit (action timing),
+                # surfaced as a flat option when it hasn't been played yet and
+                # is affordable from the CURRENT pools. (When it needs rune
+                # payment instead, compute_play_intents offers a combo chip —
+                # same split as hand cards.) See action_turn::_play_champion.
+                champ_deck = (
+                    self._game_state.player_1_deck
+                    if active == RequiredTo.PLAYER_1
+                    else self._game_state.player_2_deck
+                )
+                champ_played = (
+                    self._game_state.player_1_champion_played
+                    if active == RequiredTo.PLAYER_1
+                    else self._game_state.player_2_champion_played
+                )
+                champ = champ_deck.chosen_champion if champ_deck is not None else None
+                if (
+                    champ
+                    and not champ_played
+                    and self.card_energy_cost(champ) <= energy
+                    and self.can_afford_power_cost(active, champ)
+                ):
+                    options.append("play:play_champion")
 
                 # Movement: each READY unit owned by the active player can
                 # move base ↔ a battlefield. Destination control drives the
@@ -1662,6 +2307,12 @@ class GameEngine:
                     else:
                         # Battlefield → base only. (BF ↔ BF rejected.)
                         options.append(f"play:move_unit:{unit_idx}:base")
+
+                # NOTE: equipping is surfaced via pre-costed picker chips
+                # (compute_equip_intents) rather than flat options — the chip's
+                # chain produces the [Equip] cost from runes and then applies
+                # play:equip. The raw play:equip action handler still validates
+                # + pays when that chain runs. See shortcuts.py.
 
                 options.append("play:end_turn")
             return EngineOutput(

@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .action_label import label_for_action
 from .csv_data import card_domains_of, card_energy_of, card_power_of
 from .deck_files import DECKS_DIR, deck_file_path, list_deck_ids, load_deck_file
 from .engine import Deck, EngineOutput, GameEngine, GameState, RequiredTo
@@ -27,7 +28,20 @@ from .fake_fill import (
     update_config as update_fake_fill_config,
 )
 from .protocol import ApplyVerb, RequiredStep
-from .shortcuts import Shortcut, compute_play_intents, serialize_play_intent
+from .saved_games import (
+    add_saved_game,
+    delete_saved_game,
+    get_saved_game,
+    list_saved_games,
+)
+from .shortcuts import (
+    Shortcut,
+    compute_equip_intents,
+    compute_move_intents,
+    compute_play_intents,
+    compute_shortcuts,
+    serialize_play_intent,
+)
 
 # Reentrant: several of the endpoint handlers acquire this lock and then call
 # helpers that internally re-acquire it (e.g. /branch handlers wrap
@@ -155,6 +169,58 @@ def _battlefield_contested(gs: GameState) -> bool:
     return bool(p1_bfs & p2_bfs)
 
 
+def _expand_synthetic_action(
+    engine: GameEngine, actor: RequiredTo, action: str
+) -> list[str]:
+    """Translate a synthetic branch action into the concrete engine actions
+    that execute it, re-derived against the engine's CURRENT state.
+
+    The branch tree records card plays under synthetic identifiers — a
+    tier-1 intent (``intent:<card_index>``) or a specific rune-payment combo
+    (``shortcut:<play_action>:<card_index>:<key>``) — while the real engine
+    actions live only in the (unsaved) ``chain``. So a saved game's move
+    list can contain these synthetic strings, which ``apply_action`` would
+    reject ("unknown action"). Because the setup + library shuffle are
+    seeded, the same intent/shortcut resolves identically on replay, so we
+    recompute it here and expand to the real rune+play actions.
+
+    Plain engine actions (``play:...``) pass through unchanged."""
+    if action.startswith("shortcut:"):
+        rest = action[len("shortcut:") :]
+        try:
+            play_action, card_index_s, key = rest.split(":", 2)
+            card_index = int(card_index_s)
+        except ValueError as e:
+            raise ValueError(f"malformed shortcut action {action!r}") from e
+        for sc in compute_shortcuts(engine, actor):
+            if (
+                sc.play_action == play_action
+                and sc.card_index == card_index
+                and sc.key == key
+            ):
+                return _shortcut_to_actions(sc)
+        raise ValueError(
+            f"could not resolve {action!r} for {actor.value} in the replayed state"
+        )
+    if action.startswith("intent:"):
+        try:
+            card_index = int(action[len("intent:") :])
+        except ValueError as e:
+            raise ValueError(f"malformed intent action {action!r}") from e
+        for intent in compute_play_intents(engine, actor):
+            if intent.card_index == card_index:
+                if not intent.combos:
+                    raise ValueError(
+                        f"intent {action!r} has no affordable combo in the replayed state"
+                    )
+                # The client auto-applies the first combo for a tier-1 click.
+                return _shortcut_to_actions(intent.combos[0])
+        raise ValueError(
+            f"could not resolve {action!r} for {actor.value} in the replayed state"
+        )
+    return [action]
+
+
 def _shortcut_to_actions(shortcut: Shortcut) -> list[str]:
     """Expand one Shortcut into the engine-action strings that execute it.
 
@@ -262,40 +328,44 @@ def _ready_unit_at_base(gs: GameState, actor: RequiredTo) -> int | None:
 
 #: When set (only during reset's advanced fast-forward), every action the
 #: auto-play applies is reported here so reset_engine can rebuild the
-#: branch-tree path/states from the exact moves it made. None ⇒ no recording.
-_step_recorder: "Callable[[str, str], None] | None" = None
+#: branch-tree path/states from the exact moves it made. Receives
+#: (actor_value, action, label). None ⇒ no recording.
+_step_recorder: "Callable[[str, str, str], None] | None" = None
 
 
 def _apply(engine: GameEngine, action: str, actor: RequiredTo) -> EngineOutput:
     """Apply one auto-play action AND report it to the active step recorder
     (if any), so each fast-forwarded move becomes a branch-tree node instead
-    of vanishing into a single 'start' node."""
+    of vanishing into a single 'start' node.
+
+    The human label is derived from the PRE-action state (the state the action
+    is an option in), matching how the interactive client labels a live option,
+    so fast-forwarded nodes read identically to hand-played ones."""
+    label = label_for_action(engine._game_state, actor, action) if _step_recorder is not None else action
     out = engine.apply_action(action=action, actor=actor)
     if _step_recorder is not None:
-        _step_recorder(actor.value, action)
+        _step_recorder(actor.value, action, label)
     return out
 
 
 def _resolve_pending_showdown(engine: GameEngine, output: EngineOutput) -> EngineOutput:
     """Both players pass any pending showdown.
 
-    Advanced auto-play is non-interactive: we don't play "showdown spells",
-    so the deterministic resolution is simply initiator passes, then
-    opponent passes. The engine takes care of awarding the battlefield to
-    the initiator.
+    Advanced auto-play is non-interactive: we don't play "showdown spells"
+    or muster extra units, so the deterministic resolution is simply the
+    current FOCUS holder passing focus, repeatedly, until two consecutive
+    passes resolve the showdown. The engine awards the battlefield (or opens
+    combat) on the second pass.
     """
+    guard = 0
     while output.game_state.pending_showdown is not None:
         sd = output.game_state.pending_showdown
-        if not sd.initiator_passed:
-            output = _apply(engine, "play:pass_showdown", sd.initiator)
-            continue
-        opp = GameEngine.opponent_of(sd.initiator)
-        if not sd.opponent_passed:
-            output = _apply(engine, "play:pass_showdown", opp)
-            continue
-        # Both flagged passed but pending_showdown still set — shouldn't
-        # happen, but guard against an infinite loop.
-        break
+        output = _apply(engine, "play:pass_showdown", sd.focus_holder)
+        guard += 1
+        if guard > 8:
+            # Defensive: a healthy showdown resolves in 2 passes. Bail to
+            # avoid any chance of an infinite loop.
+            break
     return output
 
 
@@ -557,7 +627,7 @@ def _serialize_fake_fill(cfg: FakeFillConfig) -> dict[str, Any]:
     }
 
 
-def reset_engine() -> EngineOutput:
+def reset_engine(replay_moves: list[dict[str, Any]] | None = None) -> EngineOutput:
     """Recreate the engine, run start(), then apply fake-fill auto-pilot.
 
     In ADVANCED mode the engine is constructed with a SEEDED RNG so the
@@ -566,6 +636,11 @@ def reset_engine() -> EngineOutput:
     valid across resets. EARLY mode (and the case when fake-fill is
     disabled entirely) uses a fresh ``random.Random()``, matching the
     original non-deterministic behaviour.
+
+    ``replay_moves`` (used when LOADING a saved game) is an explicit list of
+    ``{actor, action}`` dicts to apply on top of the setup baseline. When
+    given it fully defines the position, so the advanced auto fast-forward is
+    skipped — otherwise an advanced saved game would double-apply its opening.
     """
     global _engine, _last_output, _initial_state, _branch_states
     cfg = get_fake_fill_config()
@@ -582,11 +657,15 @@ def reset_engine() -> EngineOutput:
     _branch_states = []
     _reset_branch_tree()
 
-    # ADVANCED: fast-forward the opening moves ONCE, recording each as a
-    # branch node so the tree reflects the jumped-forward position (and the
-    # moves are rewindable). EARLY mode lands at the action turn with an
-    # empty path, as before.
-    if (
+    if replay_moves:
+        # Loaded saved game with an explicit move list: replay exactly those,
+        # recording each as a branch node. Do NOT also auto fast-forward.
+        _last_output = _replay_moves_as_branch(_last_output, replay_moves)
+    elif (
+        # ADVANCED: fast-forward the opening moves ONCE, recording each as a
+        # branch node so the tree reflects the jumped-forward position (and the
+        # moves are rewindable). EARLY mode lands at the action turn with an
+        # empty path, as before.
         cfg.enabled
         and cfg.mode == FakeFillMode.ADVANCED
         and _last_output.required_action is not None
@@ -594,6 +673,72 @@ def reset_engine() -> EngineOutput:
     ):
         _last_output = _record_advanced_fast_forward(_last_output)
     return _last_output
+
+
+def _replay_moves_as_branch(
+    output: EngineOutput, moves: list[dict[str, Any]]
+) -> EngineOutput:
+    """Apply an explicit ``{actor, action}`` move list on top of the current
+    baseline, recording each as a branch-tree node with a computed label (the
+    same machinery the advanced fast-forward uses). Raises ValueError if a move
+    is illegal in the replayed state (e.g. the saved game no longer matches the
+    decks)."""
+    global _step_recorder, _branch_path, _branch_states, _branch_nodes_visited
+    path: list[BranchStep] = []
+    states: list[GameState] = []
+
+    def rec(actor_val: str, action: str, label: str, applied: list[dict[str, str]]) -> None:
+        path.append(
+            {
+                "actor": actor_val,
+                "action": action,
+                "label": label,
+                "intent_only": False,
+                "shortcut": None,
+                "intent": None,
+                # The CONCRETE engine actions this node applied. Storing them
+                # means re-saving a loaded game captures real actions again
+                # (rather than the synthetic action), so save→load→save→load
+                # stays stable.
+                "chain": applied,
+            }
+        )
+        states.append(_capture_state())
+
+    try:
+        for mv in moves:
+            actor = RequiredTo(mv["actor"])
+            action = mv["action"]
+            label = mv.get("label") or action
+            chain = mv.get("chain")
+            applied: list[dict[str, str]] = []
+            if chain:
+                # Newer saves persist the real engine actions directly — apply
+                # them verbatim (most robust; no re-derivation needed).
+                for c in chain:
+                    output = _engine.apply_action(
+                        action=c["action"], actor=RequiredTo(c["actor"])
+                    )
+                    applied.append({"actor": c["actor"], "action": c["action"]})
+            else:
+                # Legacy save (no stored chain): the move may be a synthetic
+                # intent/shortcut, so re-derive the concrete engine actions
+                # against the current (seeded) replay state.
+                for engine_action in _expand_synthetic_action(_engine, actor, action):
+                    output = _engine.apply_action(action=engine_action, actor=actor)
+                    applied.append({"actor": actor.value, "action": engine_action})
+            # Record ONE branch node for the whole move (matching how it was
+            # recorded when first played).
+            rec(actor.value, action, label, applied)
+    finally:
+        _step_recorder = None
+
+    _branch_path = path
+    _branch_states = states
+    _branch_nodes_visited = len(path)
+    for i in range(1, len(path) + 1):
+        _branch_visited.add(_branch_path_key(path[:i]))
+    return output
 
 
 def _record_advanced_fast_forward(output: EngineOutput) -> EngineOutput:
@@ -604,12 +749,12 @@ def _record_advanced_fast_forward(output: EngineOutput) -> EngineOutput:
     path: list[BranchStep] = []
     states: list[GameState] = []
 
-    def rec(actor_val: str, action: str) -> None:
+    def rec(actor_val: str, action: str, label: str) -> None:
         path.append(
             {
                 "actor": actor_val,
                 "action": action,
-                "label": action,
+                "label": label,
                 "intent_only": False,
                 "shortcut": None,
                 "intent": None,
@@ -670,6 +815,10 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
             {"sequence": e.sequence, "actor": e.actor, "action": e.action}
             for e in gs.action_log
         ],
+        "event_feed": [
+            {"sequence": e.sequence, "kind": e.kind, "text": e.text}
+            for e in gs.event_feed
+        ],
         "started": gs.started,
         "total_turn_number": gs.total_turn_number,
         "player_1_turn_number": gs.player_1_turn_number,
@@ -684,16 +833,31 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
         "mulligan_player_2_resolved": gs.mulligan_player_2_resolved,
         "player_1_deck_id": gs.player_1_deck_id,
         "player_2_deck_id": gs.player_2_deck_id,
+        # Each player's Legend — a single fixed card that sits beside their
+        # rune base (it never enters the deck/hand). Sourced from the
+        # selected deck; null until decks are chosen.
+        "player_1_legend": gs.player_1_deck.legend if gs.player_1_deck else None,
+        "player_2_legend": gs.player_2_deck.legend if gs.player_2_deck else None,
+        # Chosen champion: the fixed Unit beside the board. `available` is True
+        # until it's been played onto the board.
+        "player_1_champion": gs.player_1_deck.chosen_champion if gs.player_1_deck else None,
+        "player_2_champion": gs.player_2_deck.chosen_champion if gs.player_2_deck else None,
+        "player_1_champion_available": (
+            gs.player_1_deck is not None and not gs.player_1_champion_played
+        ),
+        "player_2_champion_available": (
+            gs.player_2_deck is not None and not gs.player_2_champion_played
+        ),
         "player_1_hand": list(gs.player_1_hand) if gs.player_1_hand is not None else None,
         "player_2_hand": list(gs.player_2_hand) if gs.player_2_hand is not None else None,
         "player_1_hand_costs": _serialize_hand_costs(gs.player_1_hand),
         "player_2_hand_costs": _serialize_hand_costs(gs.player_2_hand),
         "player_1_units": [
-            {"card": u.card, "location": u.location, "exhausted": u.exhausted}
+            {"card": u.card, "location": u.location, "exhausted": u.exhausted, "bonus_might": u.bonus_might}
             for u in gs.player_1_units
         ],
         "player_2_units": [
-            {"card": u.card, "location": u.location, "exhausted": u.exhausted}
+            {"card": u.card, "location": u.location, "exhausted": u.exhausted, "bonus_might": u.bonus_might}
             for u in gs.player_2_units
         ],
         "player_1_spells": [
@@ -705,11 +869,11 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
             for s in gs.player_2_spells
         ],
         "player_1_gears": [
-            {"card": g.card, "location": g.location, "exhausted": g.exhausted}
+            {"card": g.card, "location": g.location, "exhausted": g.exhausted, "attached_to": g.attached_to}
             for g in gs.player_1_gears
         ],
         "player_2_gears": [
-            {"card": g.card, "location": g.location, "exhausted": g.exhausted}
+            {"card": g.card, "location": g.location, "exhausted": g.exhausted, "attached_to": g.attached_to}
             for g in gs.player_2_gears
         ],
         # Dead units (e.g. killed in combat), by card name, in death order.
@@ -736,7 +900,25 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 "priority": gs.pending_chain.priority.value,
                 "consecutive_passes": gs.pending_chain.consecutive_passes,
                 "items": [
-                    {"actor": it.actor.value, "card": it.card, "targets": list(it.targets)}
+                    {
+                        "actor": it.actor.value,
+                        "card": it.card,
+                        "targets": list(it.targets),
+                        "label": it.label,
+                        # A triggered-ability item carries its effect codes; a
+                        # cast-spell item leaves this null.
+                        "effect": (
+                            None
+                            if it.effect is None
+                            else {
+                                "controller": it.effect.controller,
+                                "source": it.effect.source,
+                                "trigger": it.effect.trigger,
+                                "event_kind": it.effect.event_kind,
+                                "effects": list(it.effect.effects),
+                            }
+                        ),
+                    }
                     for it in gs.pending_chain.items
                 ],
             }
@@ -752,8 +934,9 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
             else {
                 "battlefield": gs.pending_showdown.battlefield,
                 "initiator": gs.pending_showdown.initiator.value,
-                "initiator_passed": gs.pending_showdown.initiator_passed,
-                "opponent_passed": gs.pending_showdown.opponent_passed,
+                "focus": gs.pending_showdown.focus_holder.value,
+                "focus_passes": gs.pending_showdown.focus_passes,
+                "locked": gs.pending_showdown.locked,
             }
         ),
         "pending_combat": (
@@ -819,8 +1002,25 @@ def _serialize_output(out: EngineOutput) -> dict[str, Any]:
     # Returns [] for any player who isn't the active actor or whose
     # state is mid-resolution (pending_play / pending_payment /
     # showdown).
-    p1_intents = [serialize_play_intent(i) for i in compute_play_intents(_engine, RequiredTo.PLAYER_1)]
-    p2_intents = [serialize_play_intent(i) for i in compute_play_intents(_engine, RequiredTo.PLAYER_2)]
+    # Equip intents (pre-costed chips for attaching board Equipment to a unit)
+    # are appended after the hand-play intents — same chip shape, so the client
+    # renders them with no changes.
+    p1_intents = [
+        serialize_play_intent(i)
+        for i in (
+            *compute_play_intents(_engine, RequiredTo.PLAYER_1),
+            *compute_move_intents(_engine, RequiredTo.PLAYER_1),
+            *compute_equip_intents(_engine, RequiredTo.PLAYER_1),
+        )
+    ]
+    p2_intents = [
+        serialize_play_intent(i)
+        for i in (
+            *compute_play_intents(_engine, RequiredTo.PLAYER_2),
+            *compute_move_intents(_engine, RequiredTo.PLAYER_2),
+            *compute_equip_intents(_engine, RequiredTo.PLAYER_2),
+        )
+    ]
     return {
         "state": _serialize_state(out.game_state),
         "player_1_options": list(out.player_1_options),
@@ -953,6 +1153,13 @@ class FakeFillUpdateBody(BaseModel):
     )
 
 
+class SaveGameBody(BaseModel):
+    """Save the current setup (+ branch-path moves) as a named saved game."""
+
+    name: str = Field(..., min_length=1, description="display name; id is a slug of it")
+    description: str | None = Field(default=None, description="optional note")
+
+
 class DeckSaveBody(BaseModel):
     """Save a deck file to riftbound-engine/decks/{id}.txt. Overwrites if it exists."""
 
@@ -1064,9 +1271,97 @@ def create_app() -> FastAPI:
 
     @app.put("/fake-fill")
     def fake_fill_put(body: FakeFillUpdateBody) -> dict[str, Any]:
+        global _last_output
         updates = body.model_dump(exclude_unset=True)
+        prev = get_fake_fill_config()
         cfg = update_fake_fill_config(updates)
+
+        # The fake-fill MODE (and, within advanced mode, the seed) defines how
+        # the game is built FROM SCRATCH — early hands control back at the
+        # action turn on a fresh shuffle; advanced uses a seeded shuffle and
+        # fast-forwards to a contested battlefield. There's no way to convert a
+        # live mid-game into the new mode's position without rebuilding it, so
+        # toggling mode used to silently do nothing until a manual reset.
+        # Apply it immediately by resetting here; other views pick up the new
+        # state on their next poll.
+        mode_changed = "mode" in updates and cfg.mode != prev.mode
+        seed_changed = (
+            "advanced_seed" in updates
+            and cfg.mode == FakeFillMode.ADVANCED
+            and cfg.advanced_seed != prev.advanced_seed
+        )
+        if mode_changed or seed_changed:
+            with _engine_lock:
+                _last_output = reset_engine()
         return _serialize_fake_fill(cfg)
+
+    @app.get("/saved-games")
+    def saved_games_list() -> dict[str, Any]:
+        return {"games": list_saved_games()}
+
+    @app.post("/saved-games")
+    def saved_games_create(body: SaveGameBody) -> dict[str, Any]:
+        """Capture the CURRENT setup + the live branch path as a new saved
+        game. The setup mirrors the fake-fill config; the moves are the real
+        (non-intent-only) engine actions recorded in the branch tree, so
+        loading the game later replays straight back to this position."""
+        with _engine_lock:
+            setup = {
+                k: v
+                for k, v in _serialize_fake_fill(get_fake_fill_config())["config"].items()
+            }
+            # One saved move per real (non-intent-only) branch node. We keep the
+            # display action/label AND the `chain` of raw engine actions — the
+            # latter is what replay applies, since `action` may be a synthetic
+            # UI string. Older nodes without a stored chain fall back to their
+            # own {actor, action} (true for plain engine moves).
+            moves = [
+                {
+                    "actor": s["actor"],
+                    "action": s["action"],
+                    "label": s.get("label", ""),
+                    "chain": s.get("chain") or [{"actor": s["actor"], "action": s["action"]}],
+                }
+                for s in _branch_path
+                if not s.get("intent_only")
+            ]
+        game = add_saved_game(
+            name=body.name,
+            description=body.description or "",
+            setup=setup,
+            moves=moves,
+        )
+        return {"games": list_saved_games(), "created": game}
+
+    @app.post("/saved-games/{game_id}/load")
+    def saved_games_load(game_id: str) -> dict[str, Any]:
+        """Apply a saved game's setup, reset to its baseline, then replay its
+        moves (or run the mode's fast-forward when it has none). Board, branch
+        tree, and Control view all follow on their next poll."""
+        game = get_saved_game(game_id)
+        if game is None:
+            raise HTTPException(status_code=404, detail=f"no saved game '{game_id}'")
+        with _engine_lock:
+            global _last_output
+            # Apply the saved setup to the fake-fill config so reset_engine
+            # builds the right decks / seed / mode. Force enabled so the setup
+            # auto-resolves rather than stalling at choose_deck.
+            update_fake_fill_config({**game.get("setup", {}), "enabled": True})
+            moves = game.get("moves") or None
+            try:
+                _last_output = reset_engine(replay_moves=moves)
+            except (ValueError, KeyError) as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"could not replay saved game '{game_id}': {e}",
+                ) from e
+            return _serialize_output(_last_output)
+
+    @app.delete("/saved-games/{game_id}")
+    def saved_games_delete(game_id: str) -> dict[str, Any]:
+        if not delete_saved_game(game_id):
+            raise HTTPException(status_code=404, detail=f"no saved game '{game_id}'")
+        return {"games": list_saved_games()}
 
     @app.post("/action")
     def action(body: ActionBody) -> dict[str, Any]:
@@ -1158,6 +1453,15 @@ def create_app() -> FastAPI:
                 "intent_only": body.intent_only,
                 "shortcut": body.shortcut,
                 "intent": body.intent,
+                # Persist the REAL engine actions applied (the combo chain, or
+                # the single {actor, action} for a plain move). `action` above
+                # is often a synthetic UI string ("intent:0", "shortcut:…") that
+                # the engine can't re-apply, so saved games replay from `chain`.
+                "chain": (
+                    [c.model_dump() for c in body.chain]
+                    if body.chain
+                    else ([] if body.intent_only else [{"actor": body.actor, "action": body.action}])
+                ),
             }
             _branch_path = [*_branch_path, step]
             _branch_states = [*_branch_states, saved]

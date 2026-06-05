@@ -27,12 +27,24 @@ from typing import Any, Iterator
 from .csv_data import (
     card_domains_of,
     card_energy_of,
+    card_equip_cost,
+    card_is_equipment,
     card_is_reaction,
+    card_playable_in_showdown,
     card_power_of,
     card_type_of,
 )
+
+_ALL_DOMAINS: tuple[str, ...] = ("Fury", "Calm", "Mind", "Body", "Chaos", "Order")
 from .engine import GameEngine, RequiredTo, Rune
 from .requirements import spell_playable
+
+#: Sentinel "card index" for the chosen champion's PlayIntent/Shortcut. The
+#: champion isn't a hand card, so it has no real hand index; this value is
+#: large enough to never collide with one, keeping its synthetic ids
+#: (``intent:<idx>`` / ``shortcut:play_champion:<idx>:<key>``) distinct. The
+#: ``play_champion`` handler ignores the index entirely.
+CHAMPION_CARD_INDEX = 10_000
 
 
 @dataclass(frozen=True)
@@ -69,6 +81,13 @@ class Shortcut:
     domain_counts: tuple[tuple[str, int], ...]  # ((domain, count), ...) sorted by domain
     key: str  # canonical multiset key, e.g. "Body×1#Mind×2"
     label: str  # pre-formatted human label, e.g. "Play Raven Bloom (1 Mind, 1 Body)"
+    #: When set, the chain ends with this raw action instead of
+    #: ``play:<play_action>:<card_index>``. Used by equip shortcuts whose final
+    #: step is ``play:equip:<gear>:<controller>:<unit>``.
+    final_action: str | None = None
+    #: Optional override for the shortcut's synthetic identity (branch layoutId
+    #: / visited key). Defaults to the play_action+card_index+key form.
+    synthetic: str | None = None
 
 
 @dataclass
@@ -93,6 +112,10 @@ class PlayIntent:
     power_cost: int
     cost_domains: tuple[str, ...]
     combos: tuple[Shortcut, ...]
+    #: Optional override for the intent's synthetic identity (branch layoutId /
+    #: visited key). Defaults to ``intent:<card_index>``. Equip intents set this
+    #: so distinct gear/unit chips don't collide on card_index.
+    synthetic: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +379,34 @@ def _build_shortcut(
     )
 
 
+def _picker_phase(gs, actor: RequiredTo) -> tuple[bool | None, bool]:
+    """Decide whether ``actor`` gets a play-picker right now and how it's
+    scoped, shared by ``compute_play_intents`` and ``compute_shortcuts``.
+
+    Returns ``(reaction_only, showdown_only)``:
+      • ``(None, False)`` — this actor gets NO picker right now.
+      • open chain → only the priority holder, ``(True, False)`` ([Reaction]
+        spells only).
+      • open showdown (no chain yet) → only the FOCUS holder, ``(False, True)``
+        (Action/Reaction spells the showdown rules allow). This is what makes
+        casting IN a showdown use the same pre-costed picker as a normal turn
+        instead of hand-tapping runes.
+      • otherwise → only the active player, ``(False, False)`` (any card).
+
+    Callers handle the coarse ``pending_play``/``pending_spell_choice``/
+    ``pending_payment``/``pending_combat`` short-circuits before calling this.
+    """
+    chain = gs.pending_chain
+    if chain is not None:
+        return (True, False) if actor == chain.priority else (None, False)
+    showdown = gs.pending_showdown
+    if showdown is not None:
+        return (False, True) if actor == showdown.focus_holder else (None, False)
+    if gs.current_player != actor:
+        return (None, False)
+    return (False, False)
+
+
 def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayIntent]:
     """Build the two-tier "play this card" picker for `actor`. One
     PlayIntent per playable hand card (deduplicated by card name so two
@@ -372,30 +423,20 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         return []
     if gs.pending_payment is not None:
         return []
-    if gs.pending_showdown is not None:
-        return []
     if gs.pending_combat is not None:
         # Mid-combat the only legal actions are the damage assignments
         # surfaced by the engine — no cards may be played.
         return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
         return []
-    # During an open chain only the player holding priority gets a picker,
-    # and it's restricted to [Reaction] spells (responses). With no chain,
-    # only the active player gets the normal full picker.
-    chain = gs.pending_chain
-    if chain is not None:
-        if actor != chain.priority:
-            return []
-        reaction_only = True
-    else:
-        if gs.current_player != actor:
-            return []
-        reaction_only = False
+    reaction_only, showdown_only = _picker_phase(gs, actor)
+    if reaction_only is None:
+        return []  # this actor gets no picker right now
 
-    hand = gs.player_1_hand if actor == RequiredTo.PLAYER_1 else gs.player_2_hand
-    if not hand:
-        return []
+    # Note: we do NOT early-return on an empty hand — the chosen champion can
+    # still be playable even when the hand is empty (see the champion block
+    # after the hand loop).
+    hand = (gs.player_1_hand if actor == RequiredTo.PLAYER_1 else gs.player_2_hand) or []
     runes = gs.player_1_runes if actor == RequiredTo.PLAYER_1 else gs.player_2_runes
     current_energy = (
         gs.player_1_energy if actor == RequiredTo.PLAYER_1 else gs.player_2_energy
@@ -415,13 +456,19 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         card_type = card_type_of(card)
         if card_type not in ("Unit", "Spell", "Gear"):
             continue
+        if showdown_only and not (
+            card_type == "Spell" and card_playable_in_showdown(card)
+        ):
+            # In a showdown only Action/Reaction spells can be cast — no
+            # fresh units/gears, and no spells the showdown rules forbid.
+            continue
         if reaction_only and not card_is_reaction(card):
             continue
         # Spells must also have a satisfiable Spell Choice Requirement —
         # a valid target set on the current board — not just an affordable
         # cost. See riftbound_engine/requirements.py. (Units have no such
         # requirement today.)
-        if card_type == "Spell" and not spell_playable(gs, card):
+        if card_type == "Spell" and not spell_playable(gs, card, caster=actor):
             continue
         energy_cost = card_energy_of(card) or 0
         power_cost = card_power_of(card) or 0
@@ -465,6 +512,270 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
                 combos=combos,
             )
         )
+
+    # The chosen champion — a fixed Unit beside the board — is playable at
+    # normal action timing like a hand unit (but never as a reaction or in a
+    # showdown). Offered once, until it's been played. Uses a sentinel
+    # card_index so its synthetic ids don't collide with any hand card's.
+    if not reaction_only and not showdown_only:
+        deck = gs.player_1_deck if actor == RequiredTo.PLAYER_1 else gs.player_2_deck
+        played = (
+            gs.player_1_champion_played
+            if actor == RequiredTo.PLAYER_1
+            else gs.player_2_champion_played
+        )
+        champ = deck.chosen_champion if deck is not None else None
+        if champ and not played:
+            energy_cost = card_energy_of(champ) or 0
+            power_cost = card_power_of(champ) or 0
+            cost_domains = tuple(card_domains_of(champ))
+            plans = _plan_payments(
+                energy_cost,
+                power_cost,
+                cost_domains,
+                list(runes),
+                current_energy,
+                current_power,
+            )
+            if plans:
+                combos = tuple(
+                    _build_shortcut(
+                        actor=actor,
+                        card_index=CHAMPION_CARD_INDEX,
+                        card_name=champ,
+                        play_action="play_champion",
+                        energy_cost=energy_cost,
+                        power_cost=power_cost,
+                        cost_domains=cost_domains,
+                        plan=plan,
+                    )
+                    for plan in plans
+                )
+                out.append(
+                    PlayIntent(
+                        actor=actor,
+                        card_index=CHAMPION_CARD_INDEX,
+                        card_name=champ,
+                        play_action="play_champion",
+                        energy_cost=energy_cost,
+                        power_cost=power_cost,
+                        cost_domains=cost_domains,
+                        combos=combos,
+                    )
+                )
+    return out
+
+
+def _build_equip_shortcut(
+    actor: RequiredTo,
+    gear_index: int,
+    gear_name: str,
+    unit_name: str,
+    controller: str,
+    unit_index: int,
+    energy_cost: int,
+    power_cost: int,
+    cost_domains: tuple[str, ...],
+    plan: list[ShortcutStep],
+) -> Shortcut:
+    domain_counts = _domain_counts(plan)
+    base_key = _domain_multiset_key(plan)
+    # Tier-2 chip text: "To <unit> (<cost>)" — the gear is named on tier 1.
+    if domain_counts:
+        plan_desc = ", ".join(f"{n} {d}" for d, n in domain_counts)
+        label = f"To {unit_name} ({plan_desc})"
+    else:
+        label = f"To {unit_name}"
+    return Shortcut(
+        actor=actor,
+        card_index=gear_index,
+        card_name=gear_name,
+        play_action="equip",
+        energy_cost=energy_cost,
+        power_cost=power_cost,
+        cost_domains=cost_domains,
+        plan=tuple(plan),
+        domain_counts=tuple(domain_counts),
+        key=f"{base_key}@{controller}:{unit_index}",
+        label=label,
+        final_action=f"play:equip:{gear_index}:{controller}:{unit_index}",
+        synthetic=f"shortcut:equip:{gear_index}:{controller}:{unit_index}:{base_key}",
+    )
+
+
+def _equip_cost_to_pay(cost: dict[str, object]) -> tuple[int, int, tuple[str, ...]]:
+    """Flatten a parsed [Equip] cost into (energy, power_cost, cost_domains) for
+    the payment planner. A specific-domain cost keeps its domains; an
+    any-type cost spreads across all domains (data never mixes the two)."""
+    energy_cost = int(cost.get("energy", 0))
+    power = dict(cost.get("power", {}))
+    any_power = int(cost.get("any_power", 0))
+    if power:
+        return energy_cost, sum(power.values()), tuple(power.keys())
+    if any_power:
+        return energy_cost, any_power, _ALL_DOMAINS
+    return energy_cost, 0, ()
+
+
+def compute_equip_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayIntent]:
+    """Pre-costed picker chips for equipping Equipment gears the active player
+    has on the board onto ANY unit on the board. Each chip's combos carry the
+    rune-payment chain that produces the [Equip] cost, ending in the
+    ``play:equip:<gear>:<controller>:<unit>`` action — so the player can equip
+    straight from runes (no pre-banked power needed), exactly like playing a
+    card. Returns [] outside the active player's normal action turn."""
+    gs = engine._game_state
+    if (
+        gs.pending_play is not None
+        or gs.pending_spell_choice is not None
+        or gs.pending_payment is not None
+        or gs.pending_combat is not None
+    ):
+        return []
+    if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+        return []
+    reaction_only, showdown_only = _picker_phase(gs, actor)
+    # Equip is a normal-turn play — not a reaction or a showdown play.
+    if reaction_only is None or reaction_only or showdown_only:
+        return []
+
+    gears = gs.player_1_gears if actor == RequiredTo.PLAYER_1 else gs.player_2_gears
+    runes = gs.player_1_runes if actor == RequiredTo.PLAYER_1 else gs.player_2_runes
+    current_energy = (
+        gs.player_1_energy if actor == RequiredTo.PLAYER_1 else gs.player_2_energy
+    )
+    current_power = dict(
+        gs.player_1_power if actor == RequiredTo.PLAYER_1 else gs.player_2_power
+    )
+    # Equipment attaches only to a unit YOU control (per the card text), so
+    # the target candidates are the caster's own units.
+    own_controller = actor.value
+    own_units = gs.player_1_units if actor == RequiredTo.PLAYER_1 else gs.player_2_units
+    board_units = ((own_controller, own_units),)
+
+    out: list[PlayIntent] = []
+    for gi, gear in enumerate(gears):
+        if not card_is_equipment(gear.card):
+            continue
+        cost = card_equip_cost(gear.card)
+        if cost is None:
+            continue
+        energy_cost, power_cost, cost_domains = _equip_cost_to_pay(cost)
+        available = sum(current_power.get(d, 0) for d in cost_domains)
+        e_gap = max(0, energy_cost - current_energy)
+        p_gap = max(0, power_cost - available)
+        if e_gap == 0 and p_gap == 0:
+            plans: list[list[ShortcutStep]] = [[]]  # already affordable
+        else:
+            plans = _plan_payments(
+                energy_cost, power_cost, cost_domains, list(runes), current_energy, current_power
+            )
+            if not plans:
+                continue  # can't pay even by tapping/recycling runes
+        # One tier-1 chip per equipment ("Equip <gear>"); tier-2 combos are the
+        # target units × payment plans ("To <unit> (<cost>)").
+        combos = tuple(
+            _build_equip_shortcut(
+                actor, gi, gear.card, units[ui].card, controller, ui,
+                energy_cost, power_cost, cost_domains, plan,
+            )
+            for controller, units in board_units
+            for ui in range(len(units))
+            for plan in plans
+        )
+        if not combos:
+            continue  # no target units → nothing to equip
+        out.append(
+            PlayIntent(
+                actor=actor,
+                card_index=gi,
+                card_name=f"Equip {gear.card}",
+                play_action="equip",
+                energy_cost=energy_cost,
+                power_cost=power_cost,
+                cost_domains=cost_domains,
+                combos=combos,
+                synthetic=f"intent:equip:{gi}",
+            )
+        )
+    return out
+
+
+def _build_move_shortcut(
+    actor: RequiredTo, unit_index: int, unit_name: str, dest: str, dest_label: str
+) -> Shortcut:
+    return Shortcut(
+        actor=actor,
+        card_index=unit_index,
+        card_name=unit_name,
+        play_action="move",
+        energy_cost=0,
+        power_cost=0,
+        cost_domains=(),
+        plan=(),
+        domain_counts=(),
+        key=dest,
+        label=f"To {dest_label}",
+        final_action=f"play:move_unit:{unit_index}:{dest}",
+        synthetic=f"shortcut:move:{unit_index}:{dest}",
+    )
+
+
+def compute_move_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayIntent]:
+    """Two-tier move picker: one tier-1 chip per movable (ready) unit
+    ("Move <unit>"), whose tier-2 combos are the legal destinations
+    ("To Base" / "To <battlefield>"). A unit with a single destination
+    auto-applies on click; one with two drops into the tier-2 picker.
+
+    Mirrors the engine's own action-turn move rules (base ↔ battlefield only,
+    no BF↔BF). Returns [] outside the active player's normal action turn."""
+    gs = engine._game_state
+    if (
+        gs.pending_play is not None
+        or gs.pending_spell_choice is not None
+        or gs.pending_payment is not None
+        or gs.pending_combat is not None
+    ):
+        return []
+    if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+        return []
+    reaction_only, showdown_only = _picker_phase(gs, actor)
+    if reaction_only is None or reaction_only or showdown_only:
+        return []
+
+    units = gs.player_1_units if actor == RequiredTo.PLAYER_1 else gs.player_2_units
+    bf1, bf2 = gs.battlefield_1, gs.battlefield_2
+
+    same_bf_names = bool(bf1) and bf1 == bf2  # disambiguate identical names
+
+    def dest_label(loc: str) -> str:
+        if loc == "battlefield_1":
+            return f"{bf1} (BF1)" if same_bf_names else (bf1 or "Battlefield 1")
+        if loc == "battlefield_2":
+            return f"{bf2} (BF2)" if same_bf_names else (bf2 or "Battlefield 2")
+        return "Base"
+
+    out: list[PlayIntent] = []
+    for ui, u in enumerate(units):
+        if u.exhausted:
+            continue
+        dests = ["battlefield_1", "battlefield_2"] if u.location == "base" else ["base"]
+        combos = tuple(
+            _build_move_shortcut(actor, ui, u.card, dest, dest_label(dest)) for dest in dests
+        )
+        out.append(
+            PlayIntent(
+                actor=actor,
+                card_index=ui,
+                card_name=f"Move {u.card}",
+                play_action="move",
+                energy_cost=0,
+                power_cost=0,
+                cost_domains=(),
+                combos=combos,
+                synthetic=f"intent:move:{ui}",
+            )
+        )
     return out
 
 
@@ -481,24 +792,15 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
         return []
     if gs.pending_payment is not None:
         return []
-    if gs.pending_showdown is not None:
-        return []
     if gs.pending_combat is not None:
         return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
         return []
-    # Mirror compute_play_intents: during an open chain only the priority
-    # holder gets options, restricted to [Reaction] spells; otherwise only
-    # the active player gets the full picker.
-    chain = gs.pending_chain
-    if chain is not None:
-        if actor != chain.priority:
-            return []
-        reaction_only = True
-    else:
-        if gs.current_player != actor:
-            return []
-        reaction_only = False
+    # Mirror compute_play_intents: chain → priority holder, [Reaction] only;
+    # showdown → focus holder, showdown-legal spells; else → active player.
+    reaction_only, showdown_only = _picker_phase(gs, actor)
+    if reaction_only is None:
+        return []
 
     hand = gs.player_1_hand if actor == RequiredTo.PLAYER_1 else gs.player_2_hand
     if not hand:
@@ -516,11 +818,15 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
         card_type = card_type_of(card)
         if card_type not in ("Unit", "Spell", "Gear"):
             continue
+        if showdown_only and not (
+            card_type == "Spell" and card_playable_in_showdown(card)
+        ):
+            continue
         if reaction_only and not card_is_reaction(card):
             continue
         # Same requirement gate as compute_play_intents: a Spell only
         # appears if it has a valid target set on the current board.
-        if card_type == "Spell" and not spell_playable(gs, card):
+        if card_type == "Spell" and not spell_playable(gs, card, caster=actor):
             continue
         energy_cost = card_energy_of(card) or 0
         power_cost = card_power_of(card) or 0
@@ -584,9 +890,8 @@ def execution_steps(shortcut: Shortcut) -> list[tuple[RequiredTo, str]]:
         shift = sum(1 for idx in pop_indices_asc if idx < e.rune_index)
         out.append((shortcut.actor, f"play:exhaust_rune:{e.rune_index - shift}"))
 
-    out.append(
-        (shortcut.actor, f"play:{shortcut.play_action}:{shortcut.card_index}")
-    )
+    final = shortcut.final_action or f"play:{shortcut.play_action}:{shortcut.card_index}"
+    out.append((shortcut.actor, final))
     return out
 
 
@@ -624,7 +929,7 @@ def _synthetic_action(s: Shortcut) -> str:
     doesn't collide with any real engine action verb because of the
     `shortcut:` prefix — apply_action would reject it directly. The
     real chain lives in the `chain` field."""
-    return f"shortcut:{s.play_action}:{s.card_index}:{s.key}"
+    return s.synthetic or f"shortcut:{s.play_action}:{s.card_index}:{s.key}"
 
 
 def _intent_synthetic_action(i: PlayIntent) -> str:
@@ -659,8 +964,8 @@ def serialize_play_intent(i: PlayIntent) -> dict[str, Any]:
     verb = "Cast" if i.play_action == "play_spell" else "Play"
     return {
         "actor": i.actor.value,
-        "action": _intent_synthetic_action(i),
-        "label": f"{verb} {i.card_name}",
+        "action": i.synthetic or _intent_synthetic_action(i),
+        "label": i.card_name if i.play_action in ("equip", "move") else f"{verb} {i.card_name}",
         "card_index": i.card_index,
         "card_name": i.card_name,
         "play_action": i.play_action,

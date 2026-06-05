@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "games": [
+    {
+      "id": "early",
+      "name": "Early",
+      "description": "Fresh shuffle; auto-pilots setup and hands control back at the action turn.",
+      "created_at": 1780178467.345218,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42
+      },
+      "moves": []
+    },
+    {
+      "id": "advanced",
+      "name": "Advanced",
+      "description": "Seeded shuffle + hardcoded moves until a battlefield is contested by both players.",
+      "created_at": 1780178467.3452241,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "advanced",
+        "advanced_seed": 42
+      },
+      "moves": []
+    },
+    {
+      "id": "existential-dread",
+      "name": "Existential Dread",
+      "description": "testing attacking",
+      "created_at": 1780179358.2746081,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "advanced",
+        "advanced_seed": 42
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:0",
+          "label": "Play Ravenbloom Student (1 Chaos, 1 Mind)"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Ravenbloom Student on Base"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn"
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:4:Chaos\u00d72",
+          "label": "Play Lonely Poro (2 Chaos)"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Lonely Poro on Base"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:move_unit:0:battlefield_1",
+          "label": "Move Ravenbloom Student from Base \u2192 Abandoned Hall"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:move_unit:0:battlefield_1",
+          "label": "Move Lonely Poro from Base \u2192 Abandoned Hall"
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_spell:1:Calm\u00d71",
+          "label": "Cast En Garde (1 Calm)"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_spell_targets:p2-0",
+          "label": "En Garde \u2192 Lonely Poro"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)"
+        }
+      ]
+    }
+  ]
+}

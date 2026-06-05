@@ -30,18 +30,25 @@ class DeckFilesTests(unittest.TestCase):
         self.assertEqual(domains.count("Mind"), 5)
 
     def test_parse_minimal_sections(self) -> None:
-        text = Path(DECKS_DIR / "ember_vanguard.txt").read_text(encoding="utf-8")
-        parsed = parse_deck_text(text, deck_id="ember_vanguard")
+        # Was the (now-removed) ember_vanguard fixture; repointed to
+        # irelia_nates, which is the current two-domain deck on disk.
+        text = Path(DECKS_DIR / "irelia_nates.txt").read_text(encoding="utf-8")
+        parsed = parse_deck_text(text, deck_id="irelia_nates")
         self.assertEqual(len(parsed.main_deck), 39)
-        data = deck_data_for_id("ember_vanguard")
+        data = deck_data_for_id("irelia_nates")
         self.assertEqual(len(data["runes"]), 12)
-        self.assertTrue(all(r["domain"] == "Fury" for r in data["runes"]))
+        domains = [r["domain"] for r in data["runes"]]
+        self.assertEqual(domains.count("Calm"), 6)
+        self.assertEqual(domains.count("Chaos"), 6)
 
-    def test_tide_wardens_runes(self) -> None:
-        deck = build_deck_from_id("tide_wardens")
+    def test_irelia_nates_runes(self) -> None:
+        # Was the (now-removed) tide_wardens fixture; irelia_nates has the
+        # same even two-domain rune split (6 / 6), exercised here via
+        # build_deck_from_id rather than the parse path above.
+        deck = build_deck_from_id("irelia_nates")
         domains = [r.domain for r in deck.runes]
-        self.assertEqual(domains.count("Fury"), 6)
-        self.assertEqual(domains.count("Body"), 6)
+        self.assertEqual(domains.count("Calm"), 6)
+        self.assertEqual(domains.count("Chaos"), 6)
 
     def test_sideboard_parsed_but_not_in_engine_deck(self) -> None:
         parsed = load_deck_file("ezreal_prodigal_explorer")

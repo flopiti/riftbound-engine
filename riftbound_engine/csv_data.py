@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import random
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -28,12 +29,124 @@ class CsvCard:
     rarity: str
 
 
+# An "ID-suffix" alternate art: a base id like 'ogn-079' printed again as
+# 'ogn-079a' (different art, Showcase rarity). The base group is captured so
+# we can confirm the base row actually exists before dropping the alt.
+_ALT_ID_RE = re.compile(r"^([a-z]+-\d+)[a-z]$")
+
+
+def _backfill_row(target: list[str], source: list[str]) -> None:
+    """Copy a value from ``source`` into any *empty* cell of ``target``.
+
+    Never overwrites a value the target already has, so a complete base row is
+    never corrupted by a less-reliable alt's data — it only gains values the
+    base happened to leave blank. This mirrors the engine's historic
+    first-non-blank-per-field lookup behaviour."""
+    for j, val in enumerate(source):
+        if j < len(target) and not target[j].strip() and val.strip():
+            target[j] = val
+
+
+def _canonicalize_rows(rows: list[list[str]]) -> list[list[str]]:
+    """Collapse alternate-art rows so only base cards remain.
+
+    ``riftbound_cards.csv`` ships three flavours of alternate art, removed in
+    two passes:
+
+    1. **By id** —
+       * *suffix alts*: an id like ``ogn-079a`` whose base ``ogn-079`` also
+         appears (always Showcase, e.g. "Diana, Lunari").
+       * *duplicate-id alts*: the *same* id printed twice with different art
+         (e.g. the ``ogn-299``+ Legends), differing only by Image URL.
+    2. **By name** — a card reprinted under a *different* id with the same
+       name, almost always a higher-numbered Showcase variant (e.g.
+       "Seal of Rage" ogn-040 + sfd-222). The Showcase reprints are frequently
+       incomplete scrapes (truncated ability text, missing stats), so the base
+       (non-Showcase, else first-seen) printing is authoritative.
+
+    In both passes we keep the base row and drop the alts, backfilling any empty
+    cell of the kept row from a dropped one so no scalar data is lost. This is
+    the single chokepoint every engine lookup flows through, so the whole engine
+    operates on base cards only.
+    """
+    if len(rows) < 2:
+        return rows
+    header = rows[0]
+    try:
+        i_id = header.index("ID")
+    except ValueError:
+        return rows  # no ID column → nothing to dedupe on
+    i_name = header.index("Name") if "Name" in header else None
+    i_rarity = header.index("Rarity") if "Rarity" in header else None
+    all_ids = {
+        parts[i_id].strip() for parts in rows[1:] if len(parts) > i_id and parts[i_id].strip()
+    }
+
+    # --- Pass 1: collapse by id (suffix alts + duplicate ids) ---
+    kept: dict[str, list[str]] = {}
+    order: list[str] = []
+    passthrough: list[list[str]] = []  # rows without an id (kept as-is)
+    for parts in rows[1:]:
+        sid = parts[i_id].strip() if len(parts) > i_id else ""
+        if not sid:
+            passthrough.append(list(parts))
+            continue
+        m = _ALT_ID_RE.match(sid)
+        if m and m.group(1) in all_ids:
+            base = kept.get(m.group(1))
+            if base is not None:
+                _backfill_row(base, parts)
+            continue  # suffix alt of an existing base → drop
+        if sid in kept:
+            _backfill_row(kept[sid], parts)
+            continue  # duplicate-id alt → drop
+        kept[sid] = list(parts)
+        order.append(sid)
+    id_rows = [kept[s] for s in order]
+
+    # --- Pass 2: collapse by name (cross-id reprints / Showcase variants) ---
+    if i_name is not None:
+        def _is_showcase(r: list[str]) -> bool:
+            return i_rarity is not None and len(r) > i_rarity and r[i_rarity].strip() == "Showcase"
+
+        base_for: dict[str, list[str]] = {}
+        for r in id_rows:
+            name = r[i_name].strip() if len(r) > i_name else ""
+            if not name:
+                continue  # unnamed rows aren't deduped; emitted verbatim below
+            cur = base_for.get(name)
+            if cur is None:
+                base_for[name] = r
+            elif _is_showcase(cur) and not _is_showcase(r):
+                # A non-Showcase printing trumps a Showcase one already seen.
+                _backfill_row(r, cur)
+                base_for[name] = r  # replace the chosen base in place
+            else:
+                _backfill_row(cur, r)  # keep existing base → drop this reprint
+        # Emit one row per name in first-seen order; unnamed rows are kept
+        # verbatim in their original order.
+        emitted: set[str] = set()
+        id_rows = []
+        for r in (kept[s] for s in order):
+            name = r[i_name].strip() if len(r) > i_name else ""
+            if not name:
+                id_rows.append(r)
+                continue
+            chosen = base_for[name]
+            if name not in emitted:
+                emitted.add(name)
+                id_rows.append(chosen)
+
+    return [header] + id_rows + passthrough
+
+
 @lru_cache(maxsize=1)
 def _csv_rows_raw() -> list[list[str]]:
     if not _CSV_PATH.is_file():
         return []
     with _CSV_PATH.open(encoding="utf-8", newline="") as f:
-        return list(csv.reader(f))
+        rows = list(csv.reader(f))
+    return _canonicalize_rows(rows)
 
 
 def _header_index(header: list[str], name: str) -> int | None:
@@ -366,6 +479,104 @@ def card_is_reaction(name: str) -> bool:
     response to a spell on the chain). Read straight from the ability text so
     it doesn't depend on the derived Keywords column."""
     return "[reaction]" in card_ability_of(name).lower()
+
+
+def card_is_action(name: str) -> bool:
+    """Whether the card carries the ``[Action]`` keyword — playable on your
+    own turn OR during a showdown. Read straight from the ability text so it
+    doesn't depend on the derived Keywords column."""
+    return "[action]" in card_ability_of(name).lower()
+
+
+def card_playable_in_showdown(name: str) -> bool:
+    """A spell can be played during a showdown iff it's an [Action] or a
+    [Reaction] — those are the only timing keywords that permit it."""
+    return card_is_action(name) or card_is_reaction(name)
+
+
+@lru_cache(maxsize=1)
+def _csv_card_tags_index() -> dict[str, str]:
+    """Lowercased card name → raw CSV ``Tags`` field (may be 'Ornn, Equipment')."""
+    rows = _csv_rows_raw()
+    if len(rows) < 2:
+        return {}
+    header = rows[0]
+    i_name = _header_index(header, "Name")
+    i_tags = _header_index(header, "Tags")
+    if i_name is None or i_tags is None:
+        return {}
+    out: dict[str, str] = {}
+    for parts in rows[1:]:
+        if len(parts) <= max(i_name, i_tags):
+            continue
+        name = parts[i_name].strip().lower()
+        if name and name not in out:
+            out[name] = parts[i_tags]
+    return out
+
+
+def card_tags_of(name: str) -> tuple[str, ...]:
+    """Parsed list of Tags for a card (case-insensitive lookup); ``()`` if none."""
+    if not name:
+        return ()
+    index = _csv_card_tags_index()
+    raw = index.get(name.strip().lower())
+    if raw is None:
+        sep = name.find(", ")
+        if sep >= 0:
+            raw = index.get(name[sep + 2 :].strip().lower())
+    if not raw:
+        return ()
+    return tuple(t.strip() for t in raw.split(",") if t.strip())
+
+
+def card_is_equipment(name: str) -> bool:
+    """A Gear-type card tagged ``Equipment`` (it carries the [Equip] keyword)."""
+    return card_type_of(name) == "Gear" and any(
+        t.lower() == "equipment" for t in card_tags_of(name)
+    )
+
+
+_RUNE_DOMAINS = ("fury", "calm", "mind", "body", "chaos", "order")
+_EQUIP_ENERGY_RE = re.compile(r"(\d+)\s*energy", re.IGNORECASE)
+_EQUIP_DOMAIN_RE = re.compile(
+    r"(\d+)\s*(fury|calm|mind|body|chaos|order)\s*rune", re.IGNORECASE
+)
+_EQUIP_ANY_RE = re.compile(r"(\d+)\s*runes?\s*of\s*any\s*type", re.IGNORECASE)
+
+
+def card_equip_cost(name: str) -> dict[str, object] | None:
+    """Parse the ``[Equip]`` cost for an Equipment gear, or ``None`` if the card
+    isn't an equipment / has no parseable [Equip] cost.
+
+    Returns ``{"energy": int, "power": {domain: int}, "any_power": int}`` where
+    ``power`` is per-domain rune cost and ``any_power`` is a "rune of any type"
+    count payable from any domain. Only the standard energy + rune portion is
+    parsed; exotic clauses (Spend XP, Recycle, Kill a unit, …) are ignored.
+    """
+    if not card_is_equipment(name):
+        return None
+    ability = card_ability_of(name)
+    low = ability.lower()
+    marker = low.find("[equip]")
+    if marker < 0:
+        return None
+    # Cost phrase = text after [Equip] up to the reminder "(" or sentence "."
+    rest = ability[marker + len("[equip]") :]
+    cut = len(rest)
+    for ch in ("(", "."):
+        idx = rest.find(ch)
+        if idx >= 0:
+            cut = min(cut, idx)
+    phrase = rest[:cut]
+
+    energy = sum(int(m.group(1)) for m in _EQUIP_ENERGY_RE.finditer(phrase))
+    power: dict[str, int] = {}
+    for m in _EQUIP_DOMAIN_RE.finditer(phrase):
+        dom = m.group(2).capitalize()
+        power[dom] = power.get(dom, 0) + int(m.group(1))
+    any_power = sum(int(m.group(1)) for m in _EQUIP_ANY_RE.finditer(phrase))
+    return {"energy": energy, "power": power, "any_power": any_power}
 
 
 @lru_cache(maxsize=1)

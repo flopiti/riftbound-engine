@@ -18,7 +18,7 @@ from riftbound_engine.csv_data import (
 )
 from riftbound_engine.deck_files import list_deck_ids
 from riftbound_engine.engine import PlayedSpell, Rune
-from riftbound_engine.requirements import selectable_unit_requirement, spell_playable
+from riftbound_engine.requirements import spell_playable, spell_target_plan
 
 
 def _flood_runes(engine: GameEngine, actor: RequiredTo, count: int = 20) -> None:
@@ -358,7 +358,10 @@ class GameEngineTests(unittest.TestCase):
                 continue
             seen.add(card)
             spell_opts.append(f"play:play_spell:{i}")
-        expected = unit_opts + spell_opts + ["play:end_turn"]
+        # The chosen champion plays like a hand unit and is surfaced as a flat
+        # option here too (resources are flooded, so it's affordable and not
+        # yet played). It comes after the hand plays, before end_turn.
+        expected = unit_opts + spell_opts + ["play:play_champion", "play:end_turn"]
         self.assertEqual(ready.player_1_options, expected)
         # Sanity: none of the rune-resource verbs are surfaced anywhere
         # in the option list any more.
@@ -491,7 +494,8 @@ class GameEngineTests(unittest.TestCase):
                 continue
             seen.add(card)
             spell_opts.append(f"play:play_spell:{i}")
-        expected = unit_opts + spell_opts + ["play:end_turn"]
+        # Champion still available + affordable (resources flooded) → offered.
+        expected = unit_opts + spell_opts + ["play:play_champion", "play:end_turn"]
         self.assertEqual(settled.player_1_options, expected)
 
     def test_play_unit_rejects_bad_indices_and_inactive_player(self) -> None:
@@ -582,12 +586,17 @@ class GameEngineTests(unittest.TestCase):
         forces no target pick (blank / min-0 / unknown selector) AND is
         satisfiable on the current board. Such a spell lands straight on the
         spell stack, which is what the cost/clear tests below assert. Spells
-        that park in pending_spell_choice (ANY UNIT min>=1) are skipped."""
+        that park in pending_spell_choice are skipped.
+
+        "Forces no target pick" must match the engine's actual parking rule in
+        action_turn/builtins.py::_play_spell, which is ``spell_target_plan(req)``
+        being empty — NOT ``selectable_unit_requirement``, which reports None
+        for multi-phrase trees that DO park (e.g. ANY UNIT (1)|ANY UNIT (1))."""
         for i, card in enumerate(hand):
             if card_type_of(card) != "Spell":
                 continue
             req = card_spell_requirement_of(card)
-            if selectable_unit_requirement(req) is None and spell_playable(engine._game_state, card):
+            if not spell_target_plan(req) and spell_playable(engine._game_state, card):
                 return i
         raise unittest.SkipTest("dealt hand has no directly-castable (no-target-pick) spell")
 
@@ -1725,36 +1734,59 @@ class ShowdownTests(unittest.TestCase):
         )
         return unit_idx
 
-    def test_showdown_options_collapse_to_pass_only_for_initiator_first(self) -> None:
+    def test_showdown_initiator_can_muster_or_play_before_passing(self) -> None:
         engine, _ = self._drive_to_action_turn()
         self._start_showdown_on_bf1(engine)
         out = engine.start()
-        # Initiator (P1) gets only pass; opponent (P2) has empty options.
-        self.assertEqual(out.player_1_options, ["play:pass_showdown"])
+        # Opponent (P2) waits; the initiator (P1) is on the clock.
         self.assertEqual(out.player_2_options, [])
-        # required_action.actor reflects who is next to pass.
         self.assertEqual(out.required_action.actor, RequiredTo.PLAYER_1)
+        # Pass is always available, and it's the LAST option (muster/play
+        # options come first).
+        self.assertIn("play:pass_showdown", out.player_1_options)
+        self.assertEqual(out.player_1_options[-1], "play:pass_showdown")
+        # Every non-pass option is one of: mustering a unit onto the
+        # contested battlefield, tapping a rune (to bank Energy/Power for a
+        # spell), or playing an Action/Reaction spell — never an end_turn or
+        # other off-limits action.
+        for opt in out.player_1_options[:-1]:
+            is_muster = opt.startswith("play:move_unit:") and opt.endswith(
+                ":battlefield_1"
+            )
+            is_play = opt.startswith("play:play_spell:")
+            is_rune = (
+                opt.startswith("play:exhaust_rune:")
+                or opt.startswith("play:recycle_rune:")
+                or opt.startswith("play:exhaust_and_recycle_rune:")
+            )
+            self.assertTrue(
+                is_muster or is_play or is_rune, f"unexpected showdown option: {opt}"
+            )
 
     def test_opponent_cannot_pass_first(self) -> None:
         engine, _ = self._drive_to_action_turn()
         self._start_showdown_on_bf1(engine)
+        # Focus starts with the initiator (P1); P2 can't pass focus yet.
         with self.assertRaises(ValueError) as ctx:
             engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_2)
-        self.assertIn("initiator", str(ctx.exception))
+        self.assertIn("focus", str(ctx.exception))
 
-    def test_after_initiator_passes_opponent_gets_pass_option(self) -> None:
+    def test_after_initiator_passes_focus_goes_to_opponent(self) -> None:
         engine, _ = self._drive_to_action_turn()
         self._start_showdown_on_bf1(engine)
         engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
         out = engine.start()
-        # Now only P2 has the pass option.
+        # Focus is now with P2: only P2 has options, and they can at least
+        # pass focus (plus any Action/Reaction spells in hand).
         self.assertEqual(out.player_1_options, [])
-        self.assertEqual(out.player_2_options, ["play:pass_showdown"])
+        self.assertIn("play:pass_showdown", out.player_2_options)
+        self.assertEqual(out.player_2_options[-1], "play:pass_showdown")
         self.assertEqual(out.required_action.actor, RequiredTo.PLAYER_2)
-        # Showdown is still pending — initiator marked as passed.
-        self.assertIsNotNone(out.game_state.pending_showdown)
-        self.assertTrue(out.game_state.pending_showdown.initiator_passed)
-        self.assertFalse(out.game_state.pending_showdown.opponent_passed)
+        # Showdown still pending; focus passed once to P2.
+        sd = out.game_state.pending_showdown
+        self.assertIsNotNone(sd)
+        self.assertEqual(sd.focus_holder, RequiredTo.PLAYER_2)
+        self.assertEqual(sd.focus_passes, 1)
 
     def test_both_passes_assign_control_to_initiator_and_clear_showdown(self) -> None:
         engine, _ = self._drive_to_action_turn()
@@ -1771,23 +1803,23 @@ class ShowdownTests(unittest.TestCase):
     def test_initiator_cannot_pass_twice(self) -> None:
         engine, _ = self._drive_to_action_turn()
         self._start_showdown_on_bf1(engine)
+        # P1 passes focus → focus is now with P2; P1 can't pass again.
         engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
         with self.assertRaises(ValueError) as ctx:
             engine.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
-        self.assertIn("opponent", str(ctx.exception))
+        self.assertIn("focus", str(ctx.exception))
 
-    def test_other_actions_blocked_during_showdown(self) -> None:
+    def test_off_limits_actions_blocked_during_showdown(self) -> None:
         engine, _ = self._drive_to_action_turn()
         _flood_runes(engine, RequiredTo.PLAYER_1)
         self._start_showdown_on_bf1(engine)
-        # exhaust_rune, recycle, play_unit, end_turn must all be blocked.
-        for action in (
-            "play:exhaust_rune:0",
-            "play:exhaust_and_recycle_rune:0",
-            "play:end_turn",
-        ):
-            with self.assertRaises(ValueError, msg=f"{action} should be blocked"):
-                engine.apply_action(action=action, actor=RequiredTo.PLAYER_1)
+        # end_turn is blocked while a showdown is unresolved.
+        with self.assertRaises(ValueError, msg="end_turn should be blocked"):
+            engine.apply_action(action="play:end_turn", actor=RequiredTo.PLAYER_1)
+        # But the FOCUS holder (the initiator here) MAY tap runes mid-showdown
+        # to bank Energy/Power for a spell — that's no longer blocked.
+        engine.apply_action(action="play:exhaust_rune:0", actor=RequiredTo.PLAYER_1)
+        self.assertEqual(engine.player_energy(RequiredTo.PLAYER_1), 1)
 
     def test_pass_showdown_rejected_when_no_showdown(self) -> None:
         engine, _ = self._drive_to_action_turn()

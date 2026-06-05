@@ -21,21 +21,31 @@ from riftbound_engine.engine import (
     GameEngine,
     GameState,
     PendingShowdown,
+    PlayedGear,
     PlayedUnit,
     RequiredTo,
     Rune,
     build_deck_from_id,
 )
 from riftbound_engine.requirements import (
+    battlefield_picks,
+    gear_picks,
+    location_picks,
+    spell_picks,
+    trash_picks,
     enumerate_unit_target_sets,
+    moved_unit_refs,
     parse_phrase,
     parse_tree,
+    plan_feasible,
     requirement_satisfiable,
     selectable_unit_requirement,
     spell_playable,
+    spell_target_plan,
     target_set_satisfies,
 )
 
+M0 = "Scuttle Crab"  # 0 Might — lethal threshold is max(0, 1) = 1
 M1 = "Watchful Sentry"
 M2 = "Chemtech Enforcer"
 M3 = "Flame Chompers"
@@ -200,16 +210,24 @@ class TreeAndUnknownTests(unittest.TestCase):
         self.assertTrue(requirement_satisfiable(None, state()))
 
     def test_unknown_selector_defaults_to_satisfiable(self):
-        # Not yet handled (no FRIENDLY/ENEMY logic) ⇒ don't block the card.
-        self.assertTrue(requirement_satisfiable("FRIENDLY UNIT (1)", state()))
+        # Selectors we don't model yet (ABILITY, …) ⇒ don't block the card.
+        # (ANY SPELL / GEAR / BATTLEFIELD / TRASH are now handled.)
+        self.assertTrue(requirement_satisfiable("ENEMY ABILITY", state()))
 
     def test_and_within_group(self):
+        # AND within a group forces a DISTINCT pick per phrase: a BF unit for
+        # the first phrase AND a separate unit for the second.
         raw = "ANY UNIT (1[BF])|ANY UNIT (1)"  # AND
-        self.assertFalse(  # only a base unit → BF phrase fails
+        self.assertFalse(  # only a base unit → BF phrase fails outright
             requirement_satisfiable(raw, state(p1=[FakeUnit(M1, "base")]))
         )
-        self.assertTrue(
+        self.assertFalse(  # a single BF unit can't satisfy BOTH picks
             requirement_satisfiable(raw, state(p1=[FakeUnit(M1, "battlefield_1")]))
+        )
+        self.assertTrue(  # a BF unit plus a second distinct unit ⇒ ok
+            requirement_satisfiable(
+                raw, state(p1=[FakeUnit(M1, "battlefield_1"), FakeUnit(M2, "base")])
+            )
         )
 
     def test_or_between_groups(self):
@@ -274,7 +292,7 @@ class SelectableRequirementTests(unittest.TestCase):
         self.assertIsNone(selectable_unit_requirement(None))
         self.assertIsNone(selectable_unit_requirement("ANY UNIT (n)[SUM <= 4M]"))
         self.assertIsNone(selectable_unit_requirement("ANY UNIT (0-3)[SAME_LOC]"))
-        self.assertIsNone(selectable_unit_requirement("FRIENDLY UNIT (1)"))
+        self.assertIsNone(selectable_unit_requirement("ANY SPELL"))  # unknown selector
         self.assertIsNone(selectable_unit_requirement("ANY UNIT (1) EQUIPMENT (1) [SAME_CONT]"))
 
     def test_multi_phrase_tree_is_not_selectable_yet(self):
@@ -458,32 +476,73 @@ class ChainPriorityTests(unittest.TestCase):
     def test_opponent_may_respond_with_reaction_only(self):
         # P1 casts, passes; P2 (priority) may play a [Reaction] but not a
         # non-Reaction spell.
-        eng = _started_engine(["Fox-Fire"], p2hand=["Shakedown", "Falling Comet"])
+        # Meditation is a [Reaction] with no target requirement (keeps this
+        # test about priority, not target selection); Falling Comet is not a
+        # Reaction.
+        eng = _started_engine(["Fox-Fire"], p2hand=["Meditation", "Falling Comet"])
         eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
         eng.apply_action(action="play:pass_priority", actor=RequiredTo.PLAYER_1)
         opts = eng.start().player_2_options
-        # Shakedown is [Reaction]; Falling Comet is not.
-        self.assertIn("play:play_spell:0", opts)  # Shakedown at index 0
+        # Meditation is [Reaction]; Falling Comet is not.
+        self.assertIn("play:play_spell:0", opts)  # Meditation at index 0
         self.assertNotIn("play:play_spell:1", opts)  # Falling Comet gated out
         with self.assertRaises(ValueError):
             eng.apply_action(action="play:play_spell:1", actor=RequiredTo.PLAYER_2)
 
     def test_reaction_resets_pass_count_and_stacks(self):
-        eng = _started_engine(["Fox-Fire"], p2hand=["Shakedown"])
+        # Meditation: [Reaction] with no target requirement, so it stacks on
+        # the chain immediately without a target-selection step.
+        eng = _started_engine(["Fox-Fire"], p2hand=["Meditation"])
         eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
         eng.apply_action(action="play:pass_priority", actor=RequiredTo.PLAYER_1)
         eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_2)  # react
         gs = eng._game_state
-        self.assertEqual([i.card for i in gs.pending_chain.items], ["Shakedown", "Fox-Fire"])
+        self.assertEqual([i.card for i in gs.pending_chain.items], ["Meditation", "Fox-Fire"])
         self.assertEqual(gs.pending_chain.priority, RequiredTo.PLAYER_2)
         self.assertEqual(gs.pending_chain.consecutive_passes, 0)  # reset on add
-        # Resolve: both pass → both spells land in their casters' piles.
+        # Resolve LIFO: both pass → ONLY the top (Meditation) resolves; the
+        # chain shrinks to [Fox-Fire] and priority returns to its owner (P1).
         eng.apply_action(action="play:pass_priority", actor=RequiredTo.PLAYER_2)
         eng.apply_action(action="play:pass_priority", actor=RequiredTo.PLAYER_1)
         gs = eng._game_state
+        self.assertEqual([i.card for i in gs.pending_chain.items], ["Fox-Fire"])
+        self.assertEqual(gs.pending_chain.priority, RequiredTo.PLAYER_1)
+        self.assertEqual(gs.pending_chain.consecutive_passes, 0)
+        # Both pass again → Fox-Fire (now the top) resolves, chain closes.
+        eng.apply_action(action="play:pass_priority", actor=RequiredTo.PLAYER_1)
+        eng.apply_action(action="play:pass_priority", actor=RequiredTo.PLAYER_2)
+        gs = eng._game_state
         self.assertIsNone(gs.pending_chain)
         self.assertEqual([s.card for s in gs.player_1_spells], ["Fox-Fire"])
-        self.assertEqual([s.card for s in gs.player_2_spells], ["Shakedown"])
+        self.assertEqual([s.card for s in gs.player_2_spells], ["Meditation"])
+
+    def test_chain_resolves_one_item_at_a_time_lifo(self):
+        # Build a 3-deep chain and verify it resolves top-first, with priority
+        # handed to the OWNER of each newly-revealed top item.
+        from riftbound_engine.engine import PendingChain, ChainItem
+        eng = _started_engine([])
+        gs = eng._game_state
+        # Top → bottom: C(p1), B(p2), A(p1).
+        gs.pending_chain = PendingChain(
+            items=[
+                ChainItem(actor=RequiredTo.PLAYER_1, card="C"),
+                ChainItem(actor=RequiredTo.PLAYER_2, card="B"),
+                ChainItem(actor=RequiredTo.PLAYER_1, card="A"),
+            ],
+            priority=RequiredTo.PLAYER_1,
+            consecutive_passes=2,
+        )
+        eng._resolve_chain()  # both passed → resolve top C
+        self.assertEqual([i.card for i in gs.pending_chain.items], ["B", "A"])
+        self.assertEqual(gs.pending_chain.priority, RequiredTo.PLAYER_2)  # B's owner
+        self.assertEqual(gs.pending_chain.consecutive_passes, 0)
+        gs.pending_chain.consecutive_passes = 2
+        eng._resolve_chain()  # resolve top B
+        self.assertEqual([i.card for i in gs.pending_chain.items], ["A"])
+        self.assertEqual(gs.pending_chain.priority, RequiredTo.PLAYER_1)  # A's owner
+        gs.pending_chain.consecutive_passes = 2
+        eng._resolve_chain()  # resolve last item A → chain closes
+        self.assertIsNone(gs.pending_chain)
 
     def test_cannot_end_turn_or_move_while_chain_open(self):
         eng = _started_engine(
@@ -599,6 +658,810 @@ class ContestedCombatRegressionTests(unittest.TestCase):
         )
         opts = set(eng._assign_damage_options(RequiredTo.PLAYER_1))
         self.assertEqual(opts, {"play:assign_damage:0,1"})
+
+
+class ShowdownMusterTests(unittest.TestCase):
+    """Moving a unit onto a battlefield you don't control opens an UNLOCKED
+    showdown: the initiator may keep mustering more units onto that BF before
+    passing, until a card is played (which locks the fight)."""
+
+    def test_initiator_can_muster_multiple_units_before_passing(self):
+        eng = _started_engine(
+            [],
+            p1=[
+                PlayedUnit(card=M1, location="base", exhausted=False),
+                PlayedUnit(card=M2, location="base", exhausted=False),
+            ],
+        )
+        # First move opens the showdown (BF1 uncontrolled).
+        eng.apply_action(action="play:move_unit:0:battlefield_1", actor=RequiredTo.PLAYER_1)
+        sd = eng._game_state.pending_showdown
+        self.assertIsNotNone(sd)
+        self.assertEqual(sd.initiator, RequiredTo.PLAYER_1)
+        self.assertFalse(sd.locked)
+        # The engine offers the initiator a move to bring the SECOND unit in.
+        out = eng.start()
+        self.assertIn("play:move_unit:1:battlefield_1", out.player_1_options)
+        self.assertEqual(out.player_2_options, [])
+        # Muster the second unit — previously this was rejected outright.
+        eng.apply_action(action="play:move_unit:1:battlefield_1", actor=RequiredTo.PLAYER_1)
+        bf1 = sorted(
+            u.card for u in eng._game_state.player_1_units if u.location == "battlefield_1"
+        )
+        self.assertEqual(bf1, sorted([M1, M2]))
+        # Same showdown, still unlocked (no card played yet).
+        self.assertIs(eng._game_state.pending_showdown, sd)
+        self.assertFalse(eng._game_state.pending_showdown.locked)
+
+    def test_locked_showdown_blocks_further_mustering(self):
+        eng = _started_engine(
+            [],
+            p1=[
+                PlayedUnit(card=M1, location="base", exhausted=False),
+                PlayedUnit(card=M2, location="base", exhausted=False),
+            ],
+        )
+        eng.apply_action(action="play:move_unit:0:battlefield_1", actor=RequiredTo.PLAYER_1)
+        # Simulate "a card was played" → the fight has started.
+        eng._game_state.pending_showdown.locked = True
+        with self.assertRaises(ValueError):
+            eng.apply_action(
+                action="play:move_unit:1:battlefield_1", actor=RequiredTo.PLAYER_1
+            )
+
+    def test_opponent_cannot_muster_into_initiators_showdown(self):
+        eng = _started_engine(
+            [],
+            p1=[PlayedUnit(card=M1, location="base", exhausted=False)],
+            p2=[PlayedUnit(card=M2, location="base", exhausted=False)],
+        )
+        eng.apply_action(action="play:move_unit:0:battlefield_1", actor=RequiredTo.PLAYER_1)
+        # P2 is not the initiator → cannot move units into the showdown.
+        with self.assertRaises(ValueError):
+            eng.apply_action(
+                action="play:move_unit:0:battlefield_1", actor=RequiredTo.PLAYER_2
+            )
+
+
+class MultiPhrasePlanTests(unittest.TestCase):
+    """spell_target_plan: how many picks a requirement forces, and which."""
+
+    def test_single_phrase_is_a_one_pick_plan(self):
+        self.assertEqual(len(spell_target_plan("ANY UNIT (1)")), 1)
+        self.assertEqual(len(spell_target_plan("ANY UNIT (1[BF])")), 1)
+
+    def test_and_within_group_is_multi_pick(self):
+        plan = spell_target_plan("ANY UNIT (1[BF])|ANY UNIT (1)")  # Piercing Light
+        self.assertEqual(len(plan), 2)
+        self.assertTrue(plan[0].require_battlefield)  # first pick is BF-only
+        self.assertFalse(plan[1].require_battlefield)  # second is any unit
+
+    def test_and_between_groups_is_multi_pick(self):
+        # Icathian Rain: six AND'd groups → six picks.
+        raw = "|||".join(["ANY UNIT (1)"] * 6)
+        self.assertEqual(len(spell_target_plan(raw)), 6)
+
+    def test_or_anywhere_yields_no_plan(self):
+        self.assertEqual(spell_target_plan("ANY UNIT (2)||||ANY UNIT (1)"), [])
+        self.assertEqual(spell_target_plan("ANY UNIT (1)||ANY UNIT (1)"), [])
+
+    def test_unknown_and_min0_phrases_are_skipped(self):
+        # Fading Memories: the GEAR phrase forces no pick, only the unit does.
+        self.assertEqual(len(spell_target_plan("ANY UNIT (1[BF])|GEAR")), 1)
+        # All-min0 / unknown → no picks at all.
+        self.assertEqual(spell_target_plan("ANY UNIT (n)[SUM <= 4M]"), [])
+        self.assertEqual(spell_target_plan("ANY SPELL"), [])  # unknown selector
+
+
+class DistinctTargetGateTests(unittest.TestCase):
+    """The gate must require a DISTINCT unit per pick for multi-phrase spells."""
+
+    def test_two_picks_need_two_distinct_units(self):
+        raw = "ANY UNIT (1)|ANY UNIT (1)"  # Defiant Dance
+        self.assertFalse(requirement_satisfiable(raw, state(p1=[FakeUnit(M1)])))
+        self.assertTrue(
+            requirement_satisfiable(raw, state(p1=[FakeUnit(M1), FakeUnit(M2)]))
+        )
+
+    def test_bf_then_any_needs_a_second_unit_off_the_chosen_one(self):
+        raw = "ANY UNIT (1[BF])|ANY UNIT (1)"  # Piercing Light
+        # Only one unit, at a battlefield: the BF phrase eats it, the any
+        # phrase has nothing distinct left ⇒ not playable.
+        self.assertFalse(
+            requirement_satisfiable(raw, state(p1=[FakeUnit(M1, "battlefield_1")]))
+        )
+        # A BF unit plus a base unit ⇒ a valid disjoint assignment exists.
+        self.assertTrue(
+            requirement_satisfiable(
+                raw, state(p1=[FakeUnit(M1, "battlefield_1"), FakeUnit(M2, "base")])
+            )
+        )
+
+    def test_plan_feasible_direct(self):
+        plan = spell_target_plan("ANY UNIT (1)|ANY UNIT (1)")
+        self.assertFalse(plan_feasible(plan, state(p1=[FakeUnit(M1)])))
+        self.assertTrue(plan_feasible(plan, state(p1=[FakeUnit(M1), FakeUnit(M2)])))
+
+
+class ExcludeParamTests(unittest.TestCase):
+    def test_enumerate_skips_excluded_refs(self):
+        req = selectable_unit_requirement("ANY UNIT (1)")
+        s = state(p1=[FakeUnit(M1), FakeUnit(M2)])
+        sets = enumerate_unit_target_sets(req, s, exclude={("player_1", 0)})
+        self.assertEqual(sets, [(("player_1", 1),)])
+
+    def test_validate_rejects_excluded_ref(self):
+        req = selectable_unit_requirement("ANY UNIT (1)")
+        s = state(p1=[FakeUnit(M1), FakeUnit(M2)])
+        self.assertFalse(
+            target_set_satisfies(req, s, [("player_1", 0)], exclude={("player_1", 0)})
+        )
+        self.assertTrue(
+            target_set_satisfies(req, s, [("player_1", 1)], exclude={("player_1", 0)})
+        )
+
+
+class MultiPhraseChoiceFlowTests(unittest.TestCase):
+    """End-to-end: a multi-phrase spell asks for one pick per phrase in turn."""
+
+    def test_two_any_unit_picks_resolve_sequentially(self):
+        # Defiant Dance = "ANY UNIT (1)|ANY UNIT (1)" → two distinct picks.
+        eng = _started_engine(
+            ["Defiant Dance"],
+            p1=[PlayedUnit(card=M1, location="base"), PlayedUnit(card=M2, location="base")],
+        )
+        self.assertIn("play:play_spell:0", eng.start().player_1_options)
+
+        eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIsNotNone(gs.pending_spell_choice)
+        self.assertEqual(gs.pending_spell_choice.chosen, [])
+
+        # First phrase: either unit may be picked.
+        out = eng.start()
+        self.assertEqual(
+            sorted(out.player_1_options),
+            ["play:choose_spell_targets:p1-0", "play:choose_spell_targets:p1-1"],
+        )
+
+        # Pick the first unit — still parked, now choosing the second phrase.
+        eng.apply_action(action="play:choose_spell_targets:p1-0", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIsNotNone(gs.pending_spell_choice)
+        self.assertEqual(gs.pending_spell_choice.chosen, [["p1-0"]])
+        self.assertEqual(gs.player_1_spells, [])  # not cast yet
+
+        # Second phrase only offers the remaining (distinct) unit.
+        out = eng.start()
+        self.assertEqual(out.player_1_options, ["play:choose_spell_targets:p1-1"])
+
+        # Pick it → spell is now cast with BOTH targets, chain opens.
+        eng.apply_action(action="play:choose_spell_targets:p1-1", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIsNone(gs.pending_spell_choice)
+        self.assertEqual(len(gs.player_1_spells), 1)
+        self.assertEqual(gs.player_1_spells[0].card, "Defiant Dance")
+        self.assertEqual(gs.player_1_spells[0].targets, ["player_1:0", "player_1:1"])
+        self.assertEqual([i.card for i in gs.pending_chain.items], ["Defiant Dance"])
+
+    def test_bf_phrase_constrains_first_pick(self):
+        # Piercing Light = "ANY UNIT (1[BF])|ANY UNIT (1)".
+        eng = _started_engine(
+            ["Piercing Light"],
+            p1=[
+                PlayedUnit(card=M1, location="battlefield_1"),  # only BF unit
+                PlayedUnit(card=M2, location="base"),
+            ],
+        )
+        eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
+        # First phrase is BF-only → just the battlefield unit.
+        self.assertEqual(
+            eng.start().player_1_options, ["play:choose_spell_targets:p1-0"]
+        )
+        eng.apply_action(action="play:choose_spell_targets:p1-0", actor=RequiredTo.PLAYER_1)
+        # Second phrase: any remaining unit (the base one).
+        self.assertEqual(
+            eng.start().player_1_options, ["play:choose_spell_targets:p1-1"]
+        )
+        eng.apply_action(action="play:choose_spell_targets:p1-1", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertEqual(gs.player_1_spells[0].targets, ["player_1:0", "player_1:1"])
+
+    def test_multi_phrase_blocked_without_enough_distinct_units(self):
+        # Only one unit on board: Defiant Dance needs two distinct ⇒ not offered.
+        eng = _started_engine(["Defiant Dance"], p1=[PlayedUnit(card=M1, location="base")])
+        self.assertNotIn("play:play_spell:0", eng.start().player_1_options)
+        with self.assertRaises(ValueError):
+            eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
+
+    def test_gear_phrase_adds_a_gear_pick_after_the_unit(self):
+        # Fading Memories = "ANY UNIT (1[BF])|GEAR" (AND): now needs a BF unit
+        # AND a gear. With both on the board the flow is unit-pick then
+        # gear-pick, and both land in the recorded targets.
+        eng = _started_engine(
+            ["Fading Memories"], p1=[PlayedUnit(card=M1, location="battlefield_1")]
+        )
+        eng._game_state.player_1_gears.append(PlayedGear(card="Boots of Swiftness"))
+        eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIsNotNone(gs.pending_spell_choice)
+        # Unit pick first — still parked (gear pick pending).
+        eng.apply_action(action="play:choose_spell_targets:p1-0", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIsNotNone(gs.pending_spell_choice)
+        self.assertIn("play:choose_spell_gear:g1-0", eng.start().player_1_options)
+        # Gear pick resolves the spell.
+        eng.apply_action(action="play:choose_spell_gear:g1-0", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIsNone(gs.pending_spell_choice)
+        self.assertEqual(gs.player_1_spells[0].targets, ["player_1:0", "gear:g1-0"])
+
+    def test_gear_required_spell_is_unplayable_with_no_gear(self):
+        # No gear on the board ⇒ the AND requirement can't be met ⇒ not offered.
+        eng = _started_engine(
+            ["Fading Memories"], p1=[PlayedUnit(card=M1, location="battlefield_1")]
+        )
+        self.assertNotIn("play:play_spell:0", eng.start().player_1_options)
+
+
+class ShowdownFocusTests(unittest.TestCase):
+    """FOCUS is the showdown's priority: the holder may play Action/Reaction
+    spells or pass focus; two consecutive focus passes resolve the fight, and
+    playing a spell resets the focus-pass counter."""
+
+    def test_two_consecutive_focus_passes_resolve_showdown(self):
+        eng = _started_engine(
+            [],
+            p1=[PlayedUnit(card=M1, location="base", exhausted=False)],
+        )
+        eng.apply_action(action="play:move_unit:0:battlefield_1", actor=RequiredTo.PLAYER_1)
+        # Initiator (focus) passes → focus to P2 (1 pass). Opponent passes →
+        # 2 consecutive → resolve. Only P1 has a unit → P1 conquers.
+        eng.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        self.assertEqual(eng._game_state.pending_showdown.focus_holder, RequiredTo.PLAYER_2)
+        eng.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_2)
+        self.assertIsNone(eng._game_state.pending_showdown)
+        self.assertEqual(eng._game_state.battlefield_1_controller, RequiredTo.PLAYER_1)
+
+    def test_playing_a_spell_locks_and_resets_focus_passes(self):
+        eng = _started_engine(
+            ["Confront"],  # [Action], 2 energy, no target requirement
+            p1=[
+                PlayedUnit(card=M1, location="base", exhausted=False),
+                PlayedUnit(card=M2, location="base", exhausted=False),
+            ],
+        )
+        eng._game_state.player_1_energy = 2
+        eng.apply_action(action="play:move_unit:0:battlefield_1", actor=RequiredTo.PLAYER_1)
+        # Pass focus once (counter = 1), then it comes back via opponent... but
+        # instead the initiator (still focus before passing) plays a spell:
+        out = eng.start()
+        self.assertIn("play:play_spell:0", out.player_1_options)
+        eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
+        sd = eng._game_state.pending_showdown
+        self.assertTrue(sd.locked)
+        self.assertEqual(sd.focus_passes, 0)
+        # Casting opened a chain; mustering is now locked out.
+        self.assertIsNotNone(eng._game_state.pending_chain)
+        with self.assertRaises(ValueError):
+            eng.apply_action(
+                action="play:move_unit:1:battlefield_1", actor=RequiredTo.PLAYER_1
+            )
+
+    def test_defender_holding_focus_may_pass(self):
+        eng = _started_engine(
+            [],
+            p1=[PlayedUnit(card=M1, location="base", exhausted=False)],
+        )
+        eng.apply_action(action="play:move_unit:0:battlefield_1", actor=RequiredTo.PLAYER_1)
+        eng.apply_action(action="play:pass_showdown", actor=RequiredTo.PLAYER_1)
+        # Focus now with P2 (the non-active defender) — they're offered pass.
+        out = eng.start()
+        self.assertEqual(out.player_1_options, [])
+        self.assertIn("play:pass_showdown", out.player_2_options)
+        self.assertEqual(out.required_action.actor, RequiredTo.PLAYER_2)
+
+
+class FriendlyEnemySideTests(unittest.TestCase):
+    """FRIENDLY / ENEMY scopes resolve relative to the casting player."""
+
+    def test_parse_sets_side(self):
+        self.assertEqual(parse_phrase("FRIENDLY UNIT (1)").unit.side, "friendly")
+        self.assertEqual(parse_phrase("ENEMY UNIT (1[BF])").unit.side, "enemy")
+        self.assertIsNone(parse_phrase("ANY UNIT (1)").unit.side)
+
+    def test_move_selectors_are_handled_as_movable_units(self):
+        # MOVE FRIENDLY/ENEMY UNIT now parses as a unit selector (with the
+        # move flag) so the card is gated on a matching unit existing; the
+        # destination pick is collected separately.
+        p = parse_phrase("MOVE FRIENDLY UNIT (1)")
+        self.assertFalse(p.unknown)
+        self.assertIsNotNone(p.unit)
+        self.assertTrue(p.unit.move)
+        self.assertEqual(p.unit.side, "friendly")
+        self.assertEqual(parse_phrase("MOVE ENEMY UNIT (1)").unit.side, "enemy")
+
+    def test_trash_selectors_are_handled(self):
+        # Trash-zone targeting now parses into a TrashRequirement with side,
+        # unit-only, and an optional energy cap. MOVE-from-trash still needs a
+        # destination namespace we don't model, so it stays deferred.
+        u = parse_phrase("FRIENDLY TRASH UNIT (1)")
+        self.assertFalse(u.unknown)
+        self.assertEqual(u.trash.side, "friendly")
+        self.assertTrue(u.trash.unit_only)
+        self.assertEqual(parse_phrase("FRIENDLY TRASH (1[<= 2E])").trash.energy_max, 2)
+        self.assertEqual(parse_phrase("FRIENDLY TRASH (0-2)").trash.min_count, 0)
+        self.assertTrue(parse_phrase("MOVE FRIENDLY TRASH UNIT (1)").unknown)
+
+    def test_move_requirement_is_gated_on_a_matching_unit(self):
+        # MOVE gates exactly like the underlying selector: a matching unit must
+        # exist (the free destination always exists, so it adds no constraint).
+        self.assertTrue(
+            requirement_satisfiable(
+                "MOVE FRIENDLY UNIT (1)", state(p1=[FakeUnit(M1)]), caster="player_1"
+            )
+        )
+        self.assertFalse(
+            requirement_satisfiable(
+                "MOVE FRIENDLY UNIT (1)", state(p2=[FakeUnit(M1)]), caster="player_1"
+            )
+        )
+        self.assertTrue(
+            requirement_satisfiable(
+                "MOVE ENEMY UNIT (1)", state(p2=[FakeUnit(M1)]), caster="player_1"
+            )
+        )
+
+    def test_moved_unit_refs_picks_out_move_phrases(self):
+        # A MOVE phrase's picked units are reported (they each need a
+        # destination); a non-MOVE phrase's picks are not.
+        self.assertEqual(
+            moved_unit_refs("MOVE FRIENDLY UNIT (1)", [["p1-0"]]), [("player_1", 0)]
+        )
+        self.assertEqual(moved_unit_refs("FRIENDLY UNIT (1)", [["p1-0"]]), [])
+
+    def test_battlefield_phrase_is_handled(self):
+        self.assertFalse(parse_phrase("BATTLEFIELD").unknown)
+        self.assertIsNotNone(parse_phrase("BATTLEFIELD").battlefield)
+        self.assertFalse(parse_phrase("BATTLEFIELD").battlefield.where_friendly)
+        self.assertTrue(
+            parse_phrase("BATTLEFIELD[WHERE_FRIENDLY_UNITS]").battlefield.where_friendly
+        )
+
+    def test_plain_battlefield_is_always_satisfiable(self):
+        self.assertTrue(requirement_satisfiable("BATTLEFIELD", state(), caster="player_1"))
+
+    def test_where_friendly_units_needs_a_friendly_battlefield_unit(self):
+        on_bf = state(p1=[FakeUnit(M1, "battlefield_1")])
+        self.assertTrue(
+            requirement_satisfiable(
+                "BATTLEFIELD[WHERE_FRIENDLY_UNITS]", on_bf, caster="player_1"
+            )
+        )
+        # Caster's unit is at base, not a battlefield → not satisfiable.
+        at_base = state(p1=[FakeUnit(M1, "base")])
+        self.assertFalse(
+            requirement_satisfiable(
+                "BATTLEFIELD[WHERE_FRIENDLY_UNITS]", at_base, caster="player_1"
+            )
+        )
+        # The opponent has a battlefield unit, but that's not the caster's.
+        enemy_bf = state(p2=[FakeUnit(M1, "battlefield_1")])
+        self.assertFalse(
+            requirement_satisfiable(
+                "BATTLEFIELD[WHERE_FRIENDLY_UNITS]", enemy_bf, caster="player_1"
+            )
+        )
+
+    def test_battlefield_picks_counts_phrases(self):
+        self.assertEqual(len(battlefield_picks("BATTLEFIELD")), 1)
+        self.assertEqual(len(battlefield_picks("FRIENDLY UNIT (1[BASE])|BATTLEFIELD")), 1)
+        self.assertEqual(len(battlefield_picks("FRIENDLY UNIT (1)")), 0)
+
+    def test_gear_phrase_is_handled(self):
+        self.assertFalse(parse_phrase("GEAR").unknown)
+        self.assertEqual(parse_phrase("GEAR").gear.min_count, 1)
+        self.assertEqual(parse_phrase("GEAR (0-1)").gear.min_count, 0)
+
+    def test_gear_requirement_gated_on_a_gear_existing(self):
+        # GEAR (min 1) needs a gear on the board; either player's counts.
+        on_board = state(); on_board.player_2_gears = [FakeUnit("Boots of Swiftness")]
+        self.assertTrue(requirement_satisfiable("GEAR", on_board, caster="player_1"))
+        self.assertFalse(requirement_satisfiable("GEAR", state(), caster="player_1"))
+        # GEAR (0-1) is optional → always satisfiable.
+        self.assertTrue(requirement_satisfiable("GEAR (0-1)", state(), caster="player_1"))
+
+    def test_gear_picks_only_counts_forced_gear_phrases(self):
+        self.assertEqual(len(gear_picks("GEAR")), 1)
+        self.assertEqual(len(gear_picks("ANY UNIT (1[BF])|GEAR")), 1)
+        self.assertEqual(len(gear_picks("GEAR (0-1)")), 0)  # optional, no forced pick
+
+    def test_trash_unit_requirement_gated_on_a_unit_in_trash(self):
+        with_unit = state()
+        with_unit.player_1_trash = ["Lonely Poro"]  # a Unit
+        self.assertTrue(
+            requirement_satisfiable("FRIENDLY TRASH UNIT (1)", with_unit, caster="player_1")
+        )
+        gear_only = state()
+        gear_only.player_1_trash = ["Boots of Swiftness"]  # a Gear, not a Unit
+        self.assertFalse(
+            requirement_satisfiable("FRIENDLY TRASH UNIT (1)", gear_only, caster="player_1")
+        )
+        # Enemy scope reads the OPPONENT's trash, not the caster's.
+        self.assertFalse(
+            requirement_satisfiable("ENEMY TRASH UNIT (1)", with_unit, caster="player_1")
+        )
+
+    def test_trash_picks_only_counts_forced_trash_phrases(self):
+        self.assertEqual(len(trash_picks("FRIENDLY TRASH UNIT (1)")), 1)
+        self.assertEqual(len(trash_picks("FRIENDLY TRASH (0-2)")), 0)  # optional
+
+    def test_spell_phrase_gated_on_a_matching_chain_spell(self):
+        from types import SimpleNamespace as NS
+
+        def chain_state(items):
+            ci = [NS(actor=NS(value=a), card=c) for a, c in items]
+            base = state()
+            base.pending_chain = NS(items=ci)
+            return base
+
+        # ENEMY SPELL needs an OPPONENT's spell on the chain.
+        opp = chain_state([("player_2", "En Garde")])
+        self.assertTrue(requirement_satisfiable("ENEMY SPELL", opp, caster="player_1"))
+        self.assertFalse(requirement_satisfiable("ENEMY SPELL", opp, caster="player_2"))
+        # Empty chain ⇒ nothing to target.
+        self.assertFalse(requirement_satisfiable("ANY SPELL", state(), caster="player_1"))
+
+    def test_spell_cost_filter_caps_target_energy_and_power(self):
+        self.assertEqual(parse_phrase("ANY SPELL (<=4E AND <=1P)").spell.energy_max, 4)
+        self.assertEqual(parse_phrase("ANY SPELL (<=4E AND <=1P)").spell.power_max, 1)
+
+    def test_spell_picks_skips_or_and_ability(self):
+        self.assertEqual(len(spell_picks("ANY SPELL")), 1)
+        self.assertEqual(len(spell_picks("FRIENDLY UNIT (1)|ANY SPELL")), 1)
+        # OR'd requirement (and the ABILITY half we don't model) forces no pick.
+        self.assertEqual(
+            len(spell_picks("ENEMY SPELL[CHOOSE_FRIENDLY]||ENEMY ABILITY[CHOOSE_FRIENDLY]")), 0
+        )
+
+    def test_location_phrase_is_handled_and_always_satisfiable(self):
+        self.assertIsNotNone(parse_phrase("LOCATION").location)
+        self.assertTrue(requirement_satisfiable("LOCATION", state(), caster="player_1"))
+        # The optional ENEMY UNITS half forces no pick; only LOCATION does.
+        self.assertEqual(len(location_picks("ENEMY UNITS (n) [SUM <= 8M]|LOCATION")), 1)
+
+
+class EquipmentTests(unittest.TestCase):
+    def test_card_is_equipment_and_cost_parse(self):
+        from riftbound_engine.csv_data import card_equip_cost, card_is_equipment
+
+        self.assertTrue(card_is_equipment("Serrated Dirk"))
+        self.assertFalse(card_is_equipment("Lonely Poro"))
+        self.assertEqual(card_equip_cost("Serrated Dirk"), {"energy": 0, "power": {"Fury": 1}, "any_power": 0})
+        self.assertEqual(
+            card_equip_cost("Skyfall of Areion"), {"energy": 1, "power": {"Fury": 1}, "any_power": 0}
+        )
+        # "1 rune of any type" → any_power; exotic clauses ignored.
+        self.assertEqual(card_equip_cost("Spinning Axe")["any_power"], 1)
+
+    def test_equip_is_offered_as_an_intent_and_action_pays(self):
+        from riftbound_engine.engine import PlayedGear, PlayedUnit
+        from riftbound_engine.shortcuts import compute_equip_intents
+
+        eng = _started_engine([], p1=[PlayedUnit(card=M1, location="base")])
+        gs = eng._game_state
+        gs.player_1_gears.append(PlayedGear(card="Serrated Dirk"))  # [Equip] 1 Fury
+        gs.player_1_power = {"Fury": 1}
+        # Equip is surfaced as a pre-costed intent chip, NOT a flat option.
+        self.assertEqual(
+            [o for o in eng.start().player_1_options if o.startswith("play:equip")], []
+        )
+        intents = compute_equip_intents(eng, RequiredTo.PLAYER_1)
+        self.assertTrue(any(i.card_name.startswith("Equip Serrated Dirk") for i in intents))
+        # The raw action still validates, pays, and attaches.
+        eng.apply_action(action="play:equip:0:player_1:0", actor=RequiredTo.PLAYER_1)
+        self.assertEqual(gs.player_1_gears[0].attached_to, "player_1:0")
+        self.assertEqual(eng.player_power(RequiredTo.PLAYER_1).get("Fury", 0), 0)
+
+    def test_equip_intent_chain_recycles_a_rune_to_pay(self):
+        from riftbound_engine.engine import PlayedGear, PlayedUnit, Rune
+        from riftbound_engine.shortcuts import compute_equip_intents
+
+        eng = _started_engine([], p1=[PlayedUnit(card=M1, location="base")])
+        gs = eng._game_state
+        gs.player_1_gears.append(PlayedGear(card="Serrated Dirk"))
+        gs.player_1_power = {}
+        gs.player_1_runes = [Rune(domain="Fury")]  # ready Fury rune, no banked power
+        gs.player_1_rune_library = []  # recycle appends the spent rune here
+        intents = compute_equip_intents(eng, RequiredTo.PLAYER_1)
+        self.assertEqual(len(intents), 1)
+        combo = intents[0].combos[0]
+        from riftbound_engine.shortcuts import execution_steps
+
+        for _, act in execution_steps(combo):
+            eng.apply_action(action=act, actor=RequiredTo.PLAYER_1)
+        self.assertEqual(gs.player_1_gears[0].attached_to, "player_1:0")
+        self.assertEqual(len(gs.player_1_runes), 0)  # the rune was recycled to pay
+
+    def test_friendly_matches_only_the_casters_units(self):
+        s = state(p1=[FakeUnit(M1)], p2=[FakeUnit(M2)])
+        self.assertTrue(requirement_satisfiable("FRIENDLY UNIT (1)", s, caster="player_1"))
+        self.assertTrue(requirement_satisfiable("FRIENDLY UNIT (1)", s, caster="player_2"))
+        # Caster owns no units (only the opponent does) ⇒ not satisfiable.
+        self.assertFalse(
+            requirement_satisfiable(
+                "FRIENDLY UNIT (1)", state(p2=[FakeUnit(M2)]), caster="player_1"
+            )
+        )
+
+    def test_enemy_matches_only_the_opponents_units(self):
+        self.assertFalse(
+            requirement_satisfiable(
+                "ENEMY UNIT (1)", state(p1=[FakeUnit(M1)]), caster="player_1"
+            )
+        )
+        self.assertTrue(
+            requirement_satisfiable(
+                "ENEMY UNIT (1)", state(p2=[FakeUnit(M2)]), caster="player_1"
+            )
+        )
+        # From player_2's seat, player_1's unit is the enemy.
+        self.assertTrue(
+            requirement_satisfiable(
+                "ENEMY UNIT (1)", state(p1=[FakeUnit(M1)]), caster="player_2"
+            )
+        )
+
+    def test_enemy_bf_combines_side_and_per_unit_filter(self):
+        self.assertFalse(
+            requirement_satisfiable(
+                "ENEMY UNIT (1[BF])", state(p2=[FakeUnit(M2, "base")]), caster="player_1"
+            )
+        )
+        self.assertTrue(
+            requirement_satisfiable(
+                "ENEMY UNIT (1[BF])",
+                state(p2=[FakeUnit(M2, "battlefield_1")]),
+                caster="player_1",
+            )
+        )
+
+    def test_caster_accepts_required_to_enum(self):
+        s = state(p2=[FakeUnit(M2)])
+        self.assertTrue(
+            requirement_satisfiable("ENEMY UNIT (1)", s, caster=RequiredTo.PLAYER_1)
+        )
+
+    def test_no_caster_falls_back_to_any(self):
+        # Without a caster the side filter can't resolve, so it's skipped
+        # (behaves like ANY UNIT) rather than wrongly blocking the card.
+        self.assertTrue(
+            requirement_satisfiable("FRIENDLY UNIT (1)", state(p2=[FakeUnit(M2)]))
+        )
+
+
+class FriendlyEnemyEnumerateTests(unittest.TestCase):
+    def test_enumerate_respects_side(self):
+        req = selectable_unit_requirement("ENEMY UNIT (1)")
+        s = state(p1=[FakeUnit(M1)], p2=[FakeUnit(M2)])
+        self.assertEqual(
+            enumerate_unit_target_sets(req, s, caster="player_1"), [(("player_2", 0),)]
+        )
+        self.assertEqual(
+            enumerate_unit_target_sets(req, s, caster="player_2"), [(("player_1", 0),)]
+        )
+
+    def test_validate_rejects_wrong_side(self):
+        req = selectable_unit_requirement("FRIENDLY UNIT (1)")
+        s = state(p1=[FakeUnit(M1)], p2=[FakeUnit(M2)])
+        self.assertTrue(
+            target_set_satisfies(req, s, [("player_1", 0)], caster="player_1")
+        )
+        self.assertFalse(  # player_2's unit isn't friendly to player_1
+            target_set_satisfies(req, s, [("player_2", 0)], caster="player_1")
+        )
+
+
+class FriendlyEnemyChoiceFlowTests(unittest.TestCase):
+    """End-to-end: the offered targets are scoped to the caster's side."""
+
+    def test_friendly_spell_only_offers_own_units(self):
+        # En Garde = "FRIENDLY UNIT (1)"; caster is player_1.
+        eng = _started_engine(
+            ["En Garde"],
+            p1=[PlayedUnit(card=M1, location="base")],
+            p2=[PlayedUnit(card=M2, location="base")],
+        )
+        eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
+        # Only the caster's own unit is a legal target.
+        self.assertEqual(
+            eng.start().player_1_options, ["play:choose_spell_targets:p1-0"]
+        )
+        eng.apply_action(action="play:choose_spell_targets:p1-0", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertEqual(gs.player_1_spells[0].targets, ["player_1:0"])
+
+    def test_enemy_spell_only_offers_opponents_units(self):
+        # Deadly Flourish = "ENEMY UNIT (1)"; caster is player_1.
+        eng = _started_engine(
+            ["Deadly Flourish"],
+            p1=[PlayedUnit(card=M1, location="base")],
+            p2=[PlayedUnit(card=M2, location="base")],
+        )
+        eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
+        self.assertEqual(
+            eng.start().player_1_options, ["play:choose_spell_targets:p2-0"]
+        )
+        eng.apply_action(action="play:choose_spell_targets:p2-0", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertEqual(gs.player_1_spells[0].targets, ["player_2:0"])
+
+    def test_enemy_spell_not_offered_without_enemy_units(self):
+        # Only the caster has units → an ENEMY UNIT spell has no legal target.
+        eng = _started_engine(
+            ["Deadly Flourish"], p1=[PlayedUnit(card=M1, location="base")]
+        )
+        self.assertNotIn("play:play_spell:0", eng.start().player_1_options)
+        with self.assertRaises(ValueError):
+            eng.apply_action(action="play:play_spell:0", actor=RequiredTo.PLAYER_1)
+
+
+class ShowdownCastingViaShortcutTests(unittest.TestCase):
+    """In a showdown the focus holder casts via the same pre-costed picker as
+    a normal turn — no standalone rune-tapping options in the menu."""
+
+    def _showdown_engine(self):
+        # Meditation: [Reaction], 2 Energy, no Power, no target requirement.
+        eng = _started_engine(["Meditation"])
+        gs = eng._game_state
+        # Nothing banked, so the cast must be produced from runes.
+        gs.player_1_energy = 0
+        gs.player_1_power = {d: 0 for d in ("Fury", "Mind", "Calm", "Body", "Chaos", "Order")}
+        gs.player_1_runes = [Rune(domain="Calm") for _ in range(3)]
+        gs.pending_showdown = PendingShowdown(
+            battlefield="battlefield_1", initiator=RequiredTo.PLAYER_1
+        )
+        return eng
+
+    def test_menu_has_no_standalone_rune_options(self):
+        eng = self._showdown_engine()
+        opts = eng.start().player_1_options
+        # No exhaust/recycle spam, and the unaffordable-now cast isn't a bare
+        # option either — just pass (P1 has no base units to muster).
+        self.assertEqual(opts, ["play:pass_showdown"])
+        self.assertFalse(any("rune" in o for o in opts))
+
+    def test_cast_offered_as_precosted_intent_and_resolves(self):
+        from riftbound_engine.shortcuts import compute_play_intents, execution_steps
+
+        eng = self._showdown_engine()
+        intents = compute_play_intents(eng, RequiredTo.PLAYER_1)
+        self.assertEqual([i.card_name for i in intents], ["Meditation"])
+        # The combo produces Energy from runes, then casts.
+        chain = execution_steps(intents[0].combos[0])
+        self.assertEqual(
+            [a for _, a in chain],
+            ["play:exhaust_rune:0", "play:exhaust_rune:1", "play:play_spell:0"],
+        )
+        for actor, action in chain:
+            eng.apply_action(action=action, actor=actor)
+        gs = eng._game_state
+        self.assertEqual([s.card for s in gs.player_1_spells], ["Meditation"])
+        self.assertTrue(gs.pending_showdown.locked)  # casting started the fight
+        self.assertEqual([i.card for i in gs.pending_chain.items], ["Meditation"])
+
+    def test_non_focus_holder_gets_no_intents(self):
+        from riftbound_engine.shortcuts import compute_play_intents
+
+        eng = self._showdown_engine()
+        # Focus is with P1 (initiator); P2 isn't on the clock.
+        self.assertEqual(compute_play_intents(eng, RequiredTo.PLAYER_2), [])
+
+
+class ZeroMightCombatTests(unittest.TestCase):
+    """A 0-Might unit still needs 1 damage to die (lethal threshold max(M,1))."""
+
+    def test_zero_might_unit_costs_one_to_kill(self):
+        from riftbound_engine.engine import PendingCombat
+
+        # P2 fields a 2-Might and a 0-Might unit; P1 has 2 damage to assign.
+        eng = _started_engine(
+            [],
+            p2=[
+                PlayedUnit(card=M2, location="battlefield_1", exhausted=True),  # Might 2
+                PlayedUnit(card=M0, location="battlefield_1", exhausted=True),  # Might 0
+            ],
+        )
+        eng._game_state.pending_combat = PendingCombat(
+            battlefield="battlefield_1",
+            player_1_might=2,
+            player_2_might=0,
+            player_2_targets=[],
+        )
+        opts = set(eng._assign_damage_options(RequiredTo.PLAYER_1))
+        # 2 damage kills EITHER the 2-Might (cost 2) OR the 0-Might (cost 1),
+        # never both (2+1 = 3 > 2). "Kill nothing" is illegal — 2 leftover
+        # could still finish the 0-Might unit.
+        self.assertEqual(opts, {"play:assign_damage:0", "play:assign_damage:1"})
+
+    def test_one_damage_is_lethal_to_a_zero_might_unit(self):
+        from riftbound_engine.engine import PendingCombat
+
+        eng = _started_engine(
+            [], p2=[PlayedUnit(card=M0, location="battlefield_1", exhausted=True)]
+        )
+        gs = eng._game_state
+        gs.pending_combat = PendingCombat(
+            battlefield="battlefield_1",
+            player_1_might=1,
+            player_2_might=0,
+            player_2_targets=[],  # P2 has no damage → auto-commits nothing
+        )
+        eng.apply_action(action="play:assign_damage:0", actor=RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIsNone(gs.pending_combat)  # both committed → resolved
+        self.assertEqual([u.card for u in gs.player_2_units], [])  # 0-Might died
+        self.assertEqual(gs.player_2_trash, [M0])
+
+    def test_zero_budget_cannot_kill_a_zero_might_unit(self):
+        from riftbound_engine.engine import PendingCombat
+
+        eng = _started_engine(
+            [], p2=[PlayedUnit(card=M0, location="battlefield_1", exhausted=True)]
+        )
+        eng._game_state.pending_combat = PendingCombat(
+            battlefield="battlefield_1",
+            player_1_might=0,
+            player_2_might=0,
+            player_2_targets=[],
+        )
+        # 0 damage can't reach the 1-damage lethal threshold → only "kill nothing".
+        self.assertEqual(
+            eng._assign_damage_options(RequiredTo.PLAYER_1), ["play:assign_damage:"]
+        )
+
+
+class ChampionPlayTests(unittest.TestCase):
+    """The chosen champion plays like a hand unit: surfaced when affordable,
+    commits to a location, can only be played once."""
+
+    def test_champion_offered_and_plays_then_locks(self):
+        eng = _started_engine([])  # empty hand; champion still playable
+        gs = eng._game_state
+        champ = gs.player_1_deck.chosen_champion
+        self.assertFalse(gs.player_1_champion_played)
+        # Resources are flooded → offered as a flat option.
+        self.assertIn("play:play_champion", eng.start().player_1_options)
+        eng.apply_action(action="play:play_champion", actor=RequiredTo.PLAYER_1)
+        self.assertTrue(gs.player_1_champion_played)
+        self.assertEqual(gs.pending_play.card, champ)
+        eng.apply_action(action="play:choose_location:base", actor=RequiredTo.PLAYER_1)
+        self.assertIn(champ, [u.card for u in gs.player_1_units])
+        # No longer offered, and a second play is rejected.
+        self.assertNotIn("play:play_champion", eng.start().player_1_options)
+        with self.assertRaises(ValueError):
+            eng.apply_action(action="play:play_champion", actor=RequiredTo.PLAYER_1)
+
+    def test_champion_surfaced_as_intent_when_rune_payment_needed(self):
+        from riftbound_engine.shortcuts import compute_play_intents, CHAMPION_CARD_INDEX
+        eng = _started_engine([])
+        gs = eng._game_state
+        # Strip pre-banked resources; give runes of the champion's domain so
+        # it must be paid via rune taps → surfaced through the intent picker.
+        from riftbound_engine.csv_data import card_domains_of, card_energy_of
+        champ = gs.player_1_deck.chosen_champion
+        dom = (card_domains_of(champ) or ("Chaos",))[0]
+        gs.player_1_energy = 0
+        gs.player_1_power = {}
+        gs.player_1_runes = [Rune(domain=dom) for _ in range(max(2, (card_energy_of(champ) or 0) + 1))]
+        champ_intents = [
+            i for i in compute_play_intents(eng, RequiredTo.PLAYER_1)
+            if i.play_action == "play_champion"
+        ]
+        self.assertEqual(len(champ_intents), 1)
+        self.assertEqual(champ_intents[0].card_name, champ)
+        self.assertEqual(champ_intents[0].card_index, CHAMPION_CARD_INDEX)
+        self.assertTrue(len(champ_intents[0].combos) >= 1)
 
 
 if __name__ == "__main__":

@@ -78,10 +78,21 @@ def dispatch_turn_play(engine, actor, action: str) -> None:
     # opponent verbs like pass_showdown) may play.
     chain = getattr(gs, "pending_chain", None)
     holder_has_priority = chain is not None and actor == chain.priority
+    # During a showdown the FOCUS holder (which may be the non-active
+    # defender) may act — play an [Action]/[Reaction] spell or pass focus.
+    # Only when no chain is open; once a chain is up, the chain's own
+    # priority governs (handled by holder_has_priority above).
+    showdown = getattr(gs, "pending_showdown", None)
+    holder_has_focus = (
+        showdown is not None
+        and chain is None
+        and actor == showdown.focus_holder
+    )
     if (
         verb not in _OPPONENT_OK_VERBS
         and actor != gs.current_player
         and not holder_has_priority
+        and not holder_has_focus
     ):
         raise ValueError("only the active player may take action-turn plays")
     if actor not in (RT.PLAYER_1, RT.PLAYER_2):
