@@ -31,8 +31,10 @@ Cards' triggered abilities (authored in the front-end taxonomy wizard,
 ### Flow
 
 `GameEngine._emit(event)` is called at each state transition (unit enters
-play, spell cast, unit dies in combat, battlefield conquered/held, turn
-start, channel, draw). It scans cards in play *at that moment* for matching
+play, spell **resolution** — by design a spell gets its reaction window
+alone, and "when you play a spell" triggers only hit the chain after it
+resolves — unit dies in combat, battlefield conquered/held, turn start,
+channel, draw). It scans cards in play *at that moment* for matching
 triggered abilities and queues them. `_drain_triggers()` then pushes each onto
 the **chain** as a `ChainItem` carrying a `TriggeredEffect` (APNAP order —
 the active player's go on first, so they resolve last under LIFO). The single

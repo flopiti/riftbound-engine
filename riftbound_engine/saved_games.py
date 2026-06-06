@@ -151,6 +151,27 @@ def add_saved_game(
         return game
 
 
+def update_saved_game(
+    game_id: str,
+    setup: dict[str, Any],
+    moves: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Overwrite an existing game's POSITION (setup + moves) in place — the
+    id, name, description and created_at are preserved, so quick-load slots
+    keep their identity. Returns the updated game, or ``None`` if the id
+    doesn't exist."""
+    with _lock:
+        store = _read_store()
+        for g in store["games"]:
+            if g.get("id") == game_id:
+                g["setup"] = setup
+                g["moves"] = moves
+                g["updated_at"] = time.time()
+                _write_store(store)
+                return g
+    return None
+
+
 def delete_saved_game(game_id: str) -> bool:
     with _lock:
         store = _read_store()

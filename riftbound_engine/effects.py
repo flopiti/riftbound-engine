@@ -244,6 +244,100 @@ def _give_me_1(ctx: EffectContext) -> None:
     _buff_source(ctx, 1)
 
 
+# --------------------------------------------------------------------------- #
+# CHOICE effects — effects that need a player decision when they resolve.
+#
+# The engine pauses the resolving ability on these (see
+# ``GameEngine._run_effect_codes``): the registered ``options`` builder
+# enumerates the valid pick tokens ("p1-0" wire format, same as spell
+# targets), the chooser answers via ``play:choose_effect_target:<token|pass>``,
+# and the registered ``apply`` runs the actual mutation for the picked token.
+# No valid options ⇒ the effect fizzles as a logged no-op without pausing.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class ChoiceEffect:
+    """Option enumerator + applier for one choice-effect code."""
+
+    options: Callable[[EffectContext], list[str]]
+    #: Applies the picked token; returns a human line for the event feed.
+    apply: Callable[[EffectContext, str], str]
+
+
+_CHOICE_REGISTRY: dict[str, ChoiceEffect] = {}
+
+
+def register_choice_effect(
+    code: str,
+    *,
+    options: Callable[[EffectContext], list[str]],
+    apply: Callable[[EffectContext, str], str],
+) -> None:
+    if code in _CHOICE_REGISTRY:
+        raise ValueError(f"choice effect {code!r} is already registered")
+    _CHOICE_REGISTRY[code] = ChoiceEffect(options=options, apply=apply)
+
+
+def is_choice_effect(code: str) -> bool:
+    return code in _CHOICE_REGISTRY
+
+
+def choice_effect_options(ctx: EffectContext) -> list[str]:
+    return _CHOICE_REGISTRY[ctx.code].options(ctx)
+
+
+def apply_choice_effect(ctx: EffectContext, token: str) -> str:
+    return _CHOICE_REGISTRY[ctx.code].apply(ctx, token)
+
+
+def _resolve_wire_token(engine, token: str):
+    """Resolve a ``p1-0`` / ``p2-1`` wire token to its PlayedUnit (or None)."""
+    from .engine import RequiredTo
+
+    m = token.strip().lower()
+    if "-" not in m:
+        return None
+    side, _, idx_s = m.partition("-")
+    try:
+        idx = int(idx_s)
+    except ValueError:
+        return None
+    gs = engine._game_state
+    units = gs.player_1_units if side == "p1" else (gs.player_2_units if side == "p2" else None)
+    if units is None or not (0 <= idx < len(units)):
+        return None
+    return units[idx]
+
+
+def _units_here_options(ctx: EffectContext) -> list[str]:
+    """Wire tokens for every unit the controller has at ``ctx.source``."""
+    from .engine import RequiredTo
+
+    gs = ctx.engine._game_state
+    p1 = ctx.controller == RequiredTo.PLAYER_1
+    units = gs.player_1_units if p1 else gs.player_2_units
+    prefix = "p1" if p1 else "p2"
+    return [f"{prefix}-{i}" for i, u in enumerate(units) if u.location == ctx.source]
+
+
+def _give_picked_unit_1m(ctx: EffectContext, token: str) -> str:
+    unit = _resolve_wire_token(ctx.engine, token)
+    if unit is None:
+        raise ValueError(f"{token!r} does not point at a unit in play")
+    unit.bonus_might += 1
+    return f"+1 Might → {unit.card}"
+
+
+# Abandoned Hall: "When a player plays a spell, they may give a unit they
+# control here +1 might this turn." ``ctx.source`` is the battlefield slot,
+# ``ctx.controller`` the player who played the spell; they pick which of
+# their units here gets the +1, or pass (the "may").
+register_choice_effect(
+    "MAY_GIVE_UNIT_HERE_+1M",
+    options=_units_here_options,
+    apply=_give_picked_unit_1m,
+)
+
+
 @register_effect("GIVE_ME_+2M")
 def _give_me_2(ctx: EffectContext) -> None:
     _buff_source(ctx, 2)

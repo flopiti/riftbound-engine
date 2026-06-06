@@ -88,11 +88,20 @@ def dispatch_turn_play(engine, actor, action: str) -> None:
         and chain is None
         and actor == showdown.focus_holder
     )
+    # A pending EFFECT CHOICE belongs to the resolved ability's controller,
+    # who may be the non-active player (e.g. P2 cast a Reaction on P1's turn
+    # and must now pick a unit for Abandoned Hall's trigger). Let the chooser
+    # through; the handler does its own actor validation.
+    effect_choice = getattr(gs, "pending_effect_choice", None)
+    holder_has_effect_choice = (
+        effect_choice is not None and actor == effect_choice.actor
+    )
     if (
         verb not in _OPPONENT_OK_VERBS
         and actor != gs.current_player
         and not holder_has_priority
         and not holder_has_focus
+        and not holder_has_effect_choice
     ):
         raise ValueError("only the active player may take action-turn plays")
     if actor not in (RT.PLAYER_1, RT.PLAYER_2):

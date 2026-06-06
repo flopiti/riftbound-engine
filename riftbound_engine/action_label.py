@@ -189,4 +189,23 @@ def label_for_action(game_state: Any, actor: Any, action: str) -> str:
         unit_name = unit.card if unit else f"unit #{idx}"
         return f"Move {unit_name} from {from_label} → {to_label}"
 
+    m = re.fullmatch(r"play:choose_effect_target:(.+)", action)
+    if m:
+        token = m.group(1)
+        choice = getattr(gs, "pending_effect_choice", None)
+        src = (choice.source_card if choice else None) or "Effect"
+        if token == "pass":
+            return f"{src}: decline"
+        tm = re.fullmatch(r"p([12])-(\d+)", token)
+        if tm:
+            tunits = gs.player_1_units if tm.group(1) == "1" else gs.player_2_units
+            ui = int(tm.group(2))
+            uname = tunits[ui].card if 0 <= ui < len(tunits) else f"unit #{ui}"
+            # Per-code phrasing; fall back to a neutral "choose" for codes
+            # this labeler doesn't know yet.
+            if choice is not None and choice.code == "MAY_GIVE_UNIT_HERE_+1M":
+                return f"{src}: +1 Might → {uname}"
+            return f"{src}: choose {uname}"
+        return f"{src}: {token}"
+
     return action

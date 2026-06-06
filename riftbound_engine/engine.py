@@ -241,6 +241,43 @@ class PendingSpellChoice:
 
 
 @dataclass
+class PendingEffectChoice:
+    """A resolving triggered ability waiting for a player decision.
+
+    Set by ``GameEngine._run_effect_codes`` when a CHOICE effect comes up —
+    e.g. Abandoned Hall's "they may give a unit they control here +1 might
+    this turn". While set, the chooser's options collapse to
+    ``play:choose_effect_target:<token>`` (one per valid unit, ``p1-0`` wire
+    tokens — the same format spell targets use) plus
+    ``play:choose_effect_target:pass`` (the "may" opt-out); everything else
+    is suppressed, exactly like spell targeting. Cleared by the
+    ``choose_effect_target`` handler, which applies the pick and then runs
+    ``remaining_effects`` (which may pause on a new choice).
+    """
+
+    #: Who decides — the controller of the resolved ability (for battlefield
+    #: abilities phrased "they may …", that's the player the event was about,
+    #: e.g. the spell caster).
+    actor: RequiredTo
+    #: The choice-effect code being resolved (e.g. ``MAY_GIVE_UNIT_HERE_+1M``).
+    code: str
+    #: The owning card's ref — a battlefield slot ("battlefield_1") or a unit
+    #: ref ("player_1:0").
+    source: str | None
+    #: The owning card's NAME (resolved from ``source``), for labels.
+    source_card: str | None
+    #: Valid pick tokens ("p1-0" / "p2-1"), enumerated when the choice opened.
+    options: list[str] = field(default_factory=list)
+    #: Effect codes of the same ability still to run after this choice.
+    remaining_effects: list[str] = field(default_factory=list)
+    #: Chain label of the resolving ability, for the event feed.
+    label: str = ""
+    #: Trigger / event metadata carried through for the continuation context.
+    trigger: str = ""
+    event_kind: str = ""
+
+
+@dataclass
 class ChainItem:
     """One spell sitting on the chain (the priority stack).
 
@@ -466,6 +503,9 @@ class GameState:
     #: Set while a `play:play_spell:*` whose requirement forces a target pick
     #: is waiting for `play:choose_spell_targets:*`. See PendingSpellChoice.
     pending_spell_choice: "PendingSpellChoice | None" = None
+    #: Set while a resolving triggered ability waits for its controller to
+    #: pick an effect target (or pass). See PendingEffectChoice.
+    pending_effect_choice: "PendingEffectChoice | None" = None
     #: The priority stack. Set the moment a spell is played and cleared when
     #: both players pass in a row (the chain resolves). While set, the player
     #: holding priority may cast a Reaction spell or `play:pass_priority`.
@@ -674,6 +714,21 @@ class GameEngine:
                     trash=list(self._game_state.pending_spell_choice.trash),
                     spells=list(self._game_state.pending_spell_choice.spells),
                     locations=list(self._game_state.pending_spell_choice.locations),
+                )
+            ),
+            pending_effect_choice=(
+                None
+                if self._game_state.pending_effect_choice is None
+                else PendingEffectChoice(
+                    actor=self._game_state.pending_effect_choice.actor,
+                    code=self._game_state.pending_effect_choice.code,
+                    source=self._game_state.pending_effect_choice.source,
+                    source_card=self._game_state.pending_effect_choice.source_card,
+                    options=list(self._game_state.pending_effect_choice.options),
+                    remaining_effects=list(self._game_state.pending_effect_choice.remaining_effects),
+                    label=self._game_state.pending_effect_choice.label,
+                    trigger=self._game_state.pending_effect_choice.trigger,
+                    event_kind=self._game_state.pending_effect_choice.event_kind,
                 )
             ),
             pending_chain=(
@@ -891,6 +946,8 @@ class GameEngine:
             )
         if self._game_state.pending_spell_choice is not None:
             raise ValueError("cannot end the turn while a spell is waiting for target selection")
+        if self._game_state.pending_effect_choice is not None:
+            raise ValueError("cannot end the turn while an effect choice is pending")
         if self._game_state.pending_chain is not None:
             raise ValueError("cannot end the turn while the chain is open — resolve it first")
         # Energy and Power are per-turn: clear both players' pools so nothing
@@ -902,6 +959,10 @@ class GameEngine:
         # The per-BF scoring cap is also per-turn: clear the set so each
         # battlefield can score again on the new turn (if conditions hold).
         self._game_state.scored_bfs_this_turn = set()
+        # Might buffs are "this turn" (every implemented buff effect reads
+        # "+N might this turn"): they expire when the turn ends.
+        for unit in (*self._game_state.player_1_units, *self._game_state.player_2_units):
+            unit.bonus_might = 0
         # Spells "resolve" at end of turn — we don't yet model their effects
         # or a discard pile, so for now they simply vanish off the right-side
         # spell overlay. Both players' stacks are cleared (only the active
@@ -1346,11 +1407,10 @@ class GameEngine:
             else self._game_state.player_2_spells
         )
         spells.append(PlayedSpell(card=card, targets=list(targets), order=order))
-
-        # Announce the cast so spell-triggered abilities ("when you play a
-        # spell…") can respond. Collected now; pushed onto the chain at the
-        # next drain so they sit ABOVE this spell and resolve first.
-        self._emit(GameEvent(kind="ON_PLAY_SPELL", controller=actor.value, source=None))
+        # NOTE: spell-play triggers ("when you play a spell…") fire when the
+        # spell RESOLVES, not here at cast time — see _execute_chain_item.
+        # House rule: the spell gets its reaction window alone; only after it
+        # resolves does the trigger hit the chain with its own window.
 
     def _resolve_chain(self) -> None:
         """Resolve the TOP (most recent) item of the chain — LIFO, one at a
@@ -1384,31 +1444,125 @@ class GameEngine:
         self._drain_triggers()
 
     def _execute_chain_item(self, item: "ChainItem") -> None:
-        """Run a resolving chain item. Spells are still no-ops; a triggered
-        ability runs each of its effect codes through the effect registry,
-        logging what resolved (or that a code is not yet implemented)."""
+        """Run a resolving chain item. A SPELL item has no engine effect yet,
+        but its RESOLUTION is when "when you play a spell" triggers fire —
+        the spell gets its reaction window alone, and only once it resolves
+        does the trigger land on the chain (with its own window, via the
+        drain at the end of ``_resolve_chain``). A triggered-ability item
+        runs each of its effect codes through the effect registry, logging
+        what resolved (or that a code is not yet implemented)."""
         eff = item.effect
         if eff is None:
+            if item.card is not None:
+                # A resolved spell goes to its caster's TRASH (the discard
+                # pile shown next to the main deck), like any spent card.
+                gs = self._game_state
+                if item.actor is RequiredTo.PLAYER_1:
+                    gs.player_1_trash.append(item.card)
+                else:
+                    gs.player_2_trash.append(item.card)
+                self._log_event("event", f"{item.card} resolved → trash")
+                self._emit(
+                    GameEvent(
+                        kind="ON_PLAY_SPELL",
+                        controller=item.actor.value,
+                        source=None,
+                        # Card name rides along so a "when a spell is played"
+                        # trigger can reference WHICH spell set it off.
+                        data={"card": item.card},
+                    )
+                )
             return
         try:
             controller = RequiredTo(eff.controller)
         except ValueError:
             return
-        for code in eff.effects:
+        self._run_effect_codes(
+            controller=controller,
+            source=eff.source,
+            trigger=eff.trigger,
+            event_kind=eff.event_kind,
+            label=item.label or eff.source or "",
+            codes=list(eff.effects),
+        )
+
+    def _run_effect_codes(
+        self,
+        controller: RequiredTo,
+        source: str | None,
+        trigger: str,
+        event_kind: str,
+        label: str,
+        codes: list[str],
+    ) -> None:
+        """Run an ability's effect codes in order.
+
+        Instant codes dispatch through the effect registry as before. A
+        CHOICE code (see ``effects`` choice registry) with at least one valid
+        option PAUSES execution: ``pending_effect_choice`` is set (carrying
+        the not-yet-run remainder of ``codes``) and the method returns — the
+        ``play:choose_effect_target`` handler applies the pick and calls back
+        in here with the remainder. A choice code with NO valid options
+        fizzles as a logged no-op and execution continues.
+        """
+        for i, code in enumerate(codes):
             ctx = _effects.EffectContext(
                 engine=self,
                 controller=controller,
-                source=eff.source,
+                source=source,
                 code=code,
-                trigger=eff.trigger,
-                event_kind=eff.event_kind,
+                trigger=trigger,
+                event_kind=event_kind,
             )
+            line_label = label or source or code
+            if _effects.is_choice_effect(code):
+                options = _effects.choice_effect_options(ctx)
+                if options:
+                    self._game_state.pending_effect_choice = PendingEffectChoice(
+                        actor=controller,
+                        code=code,
+                        source=source,
+                        source_card=self._card_name_for_ref(source),
+                        options=options,
+                        remaining_effects=list(codes[i + 1 :]),
+                        label=line_label,
+                        trigger=trigger,
+                        event_kind=event_kind,
+                    )
+                    self._log_event(
+                        "effect", f"{line_label}: {controller.value} to choose"
+                    )
+                    return
+                self._log_event("effect", f"{line_label}: {code} (no valid target)")
+                continue
             ran = _effects.execute_effect(ctx)
-            label = item.label or eff.source or code
             if ran:
-                self._log_event("effect", f"{label}: {code}")
+                self._log_event("effect", f"{line_label}: {code}")
             else:
-                self._log_event("effect", f"{label}: {code} (not implemented)")
+                self._log_event("effect", f"{line_label}: {code} (not implemented)")
+
+    def _card_name_for_ref(self, ref: str | None) -> str | None:
+        """The card NAME behind an ability-source ref — a battlefield slot
+        ("battlefield_1") or a unit ref ("player_1:0")."""
+        gs = self._game_state
+        if ref == "battlefield_1":
+            return gs.battlefield_1
+        if ref == "battlefield_2":
+            return gs.battlefield_2
+        if ref and ":" in ref:
+            side, _, idx_s = ref.partition(":")
+            units = (
+                gs.player_1_units
+                if side == RequiredTo.PLAYER_1.value
+                else gs.player_2_units if side == RequiredTo.PLAYER_2.value else None
+            )
+            try:
+                idx = int(idx_s)
+            except ValueError:
+                return None
+            if units is not None and 0 <= idx < len(units):
+                return units[idx].card
+        return None
 
     # ----------------------------------------------------------------- #
     # Trigger / event plumbing
@@ -1421,7 +1575,9 @@ class GameEngine:
 
     def _abilities_in_play(self):
         """Yield ``(ref, controller, location, card, ability)`` for every
-        triggered ability on a unit currently in play (both players)."""
+        triggered ability on a unit currently in play (both players), AND on
+        the two battlefield cards themselves (e.g. Abandoned Hall's "when a
+        player plays a spell…")."""
         gs = self._game_state
         for side, units in (
             (RequiredTo.PLAYER_1, gs.player_1_units),
@@ -1432,6 +1588,23 @@ class GameEngine:
                     if not ability.triggers or not ability.active_effects:
                         continue
                     yield (f"{side.value}:{idx}", side.value, unit.location, unit.card, ability)
+        # Battlefield cards. They aren't owned by either player, so their
+        # "controller" is the battlefield's current holder when there is one
+        # (None otherwise) — ANY-scoped triggers don't care, FRIENDLY-scoped
+        # ones ("while you control this battlefield…") match the holder. The
+        # ref AND location are the slot itself ("battlefield_1") so HERE-scoped
+        # triggers and effect handlers can address "here".
+        for slot, name, holder in (
+            ("battlefield_1", gs.battlefield_1, gs.battlefield_1_controller),
+            ("battlefield_2", gs.battlefield_2, gs.battlefield_2_controller),
+        ):
+            if not name:
+                continue
+            for ability in _abilities.triggered_abilities_for(name):
+                if not ability.triggers or not ability.active_effects:
+                    continue
+                controller = holder.value if holder is not None else None
+                yield (slot, controller, slot, name, ability)
 
     def _emit(self, event: GameEvent) -> None:
         """Announce a state transition. Scans cards in play RIGHT NOW for
@@ -1455,15 +1628,31 @@ class GameEngine:
             ]
             if not matched:
                 continue
+            # Battlefield-sourced abilities phrase their effect around the
+            # player the EVENT was about ("when a player plays a spell, THEY
+            # may give a unit THEY control here…"), so the resolved effect
+            # belongs to the event's controller — fall back to the holder.
+            # A controller-less match (unheld battlefield + controller-less
+            # event) can't resolve; skip it.
+            effect_controller = (
+                (event.controller or controller)
+                if ref in ("battlefield_1", "battlefield_2")
+                else controller
+            )
+            if effect_controller is None:
+                continue
             self._trigger_queue.append(
                 TriggeredEffect(
-                    controller=controller,
+                    controller=effect_controller,
                     source=ref,
                     trigger=matched[0],
                     event_kind=event.kind,
                     effects=tuple(ability.active_effects),
                     conditions=tuple(ability.conditions),
                     label=f"{card} — {matched[0]}",
+                    # The card the event was about (e.g. the resolved spell
+                    # for ON_PLAY_SPELL) — surfaced in the chain UI.
+                    context_card=event.data.get("card"),
                 )
             )
 
@@ -2114,6 +2303,25 @@ class GameEngine:
                     player_1_options=p1_options,
                     player_2_options=p2_options,
                     required_action=_required_action(next_actor, RequiredStep.ACTION_TURN),
+                )
+
+            effect_choice = self._game_state.pending_effect_choice
+            if effect_choice is not None:
+                # A resolving triggered ability is waiting for its controller
+                # to pick a target (or decline). The chooser's menu collapses
+                # to one option per valid unit + pass; the other player is
+                # suppressed — exactly the spell-targeting pattern. Checked
+                # BEFORE the chain branch: the choice must resolve before
+                # priority play continues.
+                opts = [
+                    f"play:choose_effect_target:{t}" for t in effect_choice.options
+                ] + ["play:choose_effect_target:pass"]
+                chooser = effect_choice.actor
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=opts if chooser == RequiredTo.PLAYER_1 else [],
+                    player_2_options=opts if chooser == RequiredTo.PLAYER_2 else [],
+                    required_action=_required_action(chooser, RequiredStep.ACTION_TURN),
                 )
 
             spell_choice = self._game_state.pending_spell_choice

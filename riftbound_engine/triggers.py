@@ -135,6 +135,10 @@ class TriggeredEffect:
     effects: tuple[str, ...]
     conditions: tuple[str, ...] = ()
     label: str = ""
+    #: Card NAME the triggering event was about, when there is one — e.g. the
+    #: spell that just resolved for an ON_PLAY_SPELL trigger. Lets the UI
+    #: underline "spell" in the trigger label and hover-preview that card.
+    context_card: str | None = None
 
 
 @dataclass

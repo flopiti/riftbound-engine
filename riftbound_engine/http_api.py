@@ -33,6 +33,7 @@ from .saved_games import (
     delete_saved_game,
     get_saved_game,
     list_saved_games,
+    update_saved_game,
 )
 from .shortcuts import (
     Shortcut,
@@ -51,6 +52,10 @@ from .shortcuts import (
 _engine_lock = threading.RLock()
 _engine: GameEngine = GameEngine()
 _last_output: EngineOutput | None = None
+# The RNG seed that produced the CURRENT engine's shuffle. Recorded on every
+# reset (even in `early` mode, where the seed itself is random) so "save game"
+# can capture it and a later load re-deals the exact same cards.
+_last_shuffle_seed: int | None = None
 
 # Saved game states for the branch tree, parallel to `_branch_path`.
 # `_branch_states[i]` is a deep copy of the GameState produced AFTER the
@@ -610,6 +615,32 @@ def _patch_fake_fill_after_deck_removal(deleted_id: str) -> None:
         update_fake_fill_config(updates)
 
 
+def _capture_current_save() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Snapshot the CURRENT position as a saved-game payload: the fake-fill
+    setup (plus the seed that produced the current shuffle, so loading
+    re-deals the exact same cards even in `early` mode) and one move per real
+    (non-intent-only) branch node. Each move keeps the display action/label
+    AND the `chain` of raw engine actions — the latter is what replay applies,
+    since `action` may be a synthetic UI string. Caller must hold
+    ``_engine_lock``."""
+    setup = {
+        k: v for k, v in _serialize_fake_fill(get_fake_fill_config())["config"].items()
+    }
+    if _last_shuffle_seed is not None:
+        setup["shuffle_seed"] = _last_shuffle_seed
+    moves = [
+        {
+            "actor": s["actor"],
+            "action": s["action"],
+            "label": s.get("label", ""),
+            "chain": s.get("chain") or [{"actor": s["actor"], "action": s["action"]}],
+        }
+        for s in _branch_path
+        if not s.get("intent_only")
+    ]
+    return setup, moves
+
+
 def _serialize_fake_fill(cfg: FakeFillConfig) -> dict[str, Any]:
     return {
         "enabled": cfg.enabled,
@@ -627,27 +658,40 @@ def _serialize_fake_fill(cfg: FakeFillConfig) -> dict[str, Any]:
     }
 
 
-def reset_engine(replay_moves: list[dict[str, Any]] | None = None) -> EngineOutput:
+def reset_engine(
+    replay_moves: list[dict[str, Any]] | None = None,
+    seed_override: int | None = None,
+) -> EngineOutput:
     """Recreate the engine, run start(), then apply fake-fill auto-pilot.
 
     In ADVANCED mode the engine is constructed with a SEEDED RNG so the
     library and rune-library shuffles produce the same order every time —
     this is what lets the advanced auto-play script's hardcoded moves stay
     valid across resets. EARLY mode (and the case when fake-fill is
-    disabled entirely) uses a fresh ``random.Random()``, matching the
-    original non-deterministic behaviour.
+    disabled entirely) still deals a fresh shuffle on every reset, but the
+    shuffle is now drawn through a freshly-generated RECORDED seed
+    (``_last_shuffle_seed``) so "save game" can capture the deal and a later
+    load reproduces it exactly instead of replaying onto a different hand.
 
     ``replay_moves`` (used when LOADING a saved game) is an explicit list of
     ``{actor, action}`` dicts to apply on top of the setup baseline. When
     given it fully defines the position, so the advanced auto fast-forward is
     skipped — otherwise an advanced saved game would double-apply its opening.
+
+    ``seed_override`` (also used when loading a saved game) forces the shuffle
+    seed regardless of mode — this is what makes loading an `early`-mode save
+    deterministic.
     """
-    global _engine, _last_output, _initial_state, _branch_states
+    global _engine, _last_output, _initial_state, _branch_states, _last_shuffle_seed
     cfg = get_fake_fill_config()
-    if cfg.enabled and cfg.mode == FakeFillMode.ADVANCED:
-        _engine = GameEngine(rng=random.Random(cfg.advanced_seed))
+    if seed_override is not None:
+        seed = seed_override
+    elif cfg.enabled and cfg.mode == FakeFillMode.ADVANCED:
+        seed = cfg.advanced_seed
     else:
-        _engine = GameEngine()
+        seed = random.randrange(2**32)
+    _last_shuffle_seed = seed
+    _engine = GameEngine(rng=random.Random(seed))
     _last_output = _engine.start()
     _last_output = _auto_fake_fill(_engine, _last_output)
     # Branch-tree ROOT = the state at the start of the action turn (setup
@@ -893,6 +937,18 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 "requirement": gs.pending_spell_choice.requirement,
             }
         ),
+        "pending_effect_choice": (
+            None
+            if gs.pending_effect_choice is None
+            else {
+                "actor": gs.pending_effect_choice.actor.value,
+                "code": gs.pending_effect_choice.code,
+                "source": gs.pending_effect_choice.source,
+                "source_card": gs.pending_effect_choice.source_card,
+                "options": list(gs.pending_effect_choice.options),
+                "label": gs.pending_effect_choice.label,
+            }
+        ),
         "pending_chain": (
             None
             if gs.pending_chain is None
@@ -916,6 +972,10 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                                 "trigger": it.effect.trigger,
                                 "event_kind": it.effect.event_kind,
                                 "effects": list(it.effect.effects),
+                                # Card the triggering event was about (e.g. the
+                                # resolved spell for ON_PLAY_SPELL) — the UI
+                                # underlines "spell" and hover-previews it.
+                                "context_card": it.effect.context_card,
                             }
                         ),
                     }
@@ -1306,25 +1366,7 @@ def create_app() -> FastAPI:
         (non-intent-only) engine actions recorded in the branch tree, so
         loading the game later replays straight back to this position."""
         with _engine_lock:
-            setup = {
-                k: v
-                for k, v in _serialize_fake_fill(get_fake_fill_config())["config"].items()
-            }
-            # One saved move per real (non-intent-only) branch node. We keep the
-            # display action/label AND the `chain` of raw engine actions — the
-            # latter is what replay applies, since `action` may be a synthetic
-            # UI string. Older nodes without a stored chain fall back to their
-            # own {actor, action} (true for plain engine moves).
-            moves = [
-                {
-                    "actor": s["actor"],
-                    "action": s["action"],
-                    "label": s.get("label", ""),
-                    "chain": s.get("chain") or [{"actor": s["actor"], "action": s["action"]}],
-                }
-                for s in _branch_path
-                if not s.get("intent_only")
-            ]
+            setup, moves = _capture_current_save()
         game = add_saved_game(
             name=body.name,
             description=body.description or "",
@@ -1332,6 +1374,18 @@ def create_app() -> FastAPI:
             moves=moves,
         )
         return {"games": list_saved_games(), "created": game}
+
+    @app.post("/saved-games/{game_id}/update")
+    def saved_games_update(game_id: str) -> dict[str, Any]:
+        """Overwrite an existing saved game with the CURRENT setup + branch
+        path (the same capture create uses). Id/name/description are kept, so
+        a quick-load slot can be re-saved in place after exploring further."""
+        with _engine_lock:
+            setup, moves = _capture_current_save()
+        game = update_saved_game(game_id, setup=setup, moves=moves)
+        if game is None:
+            raise HTTPException(status_code=404, detail=f"no saved game '{game_id}'")
+        return {"games": list_saved_games(), "updated": game}
 
     @app.post("/saved-games/{game_id}/load")
     def saved_games_load(game_id: str) -> dict[str, Any]:
@@ -1348,9 +1402,18 @@ def create_app() -> FastAPI:
             # auto-resolves rather than stalling at choose_deck.
             update_fake_fill_config({**game.get("setup", {}), "enabled": True})
             moves = game.get("moves") or None
+            # Replay onto the EXACT shuffle the game was saved on. Older saves
+            # without a recorded seed fall back to the mode's default RNG.
+            raw_seed = game.get("setup", {}).get("shuffle_seed")
+            seed_override = raw_seed if isinstance(raw_seed, int) else None
             try:
-                _last_output = reset_engine(replay_moves=moves)
+                _last_output = reset_engine(replay_moves=moves, seed_override=seed_override)
             except (ValueError, KeyError) as e:
+                # A failed replay leaves the engine mid-way through the move
+                # list — a misleading half-loaded position. Rebuild a clean
+                # baseline (same seed, no moves) before reporting the failure,
+                # so the board at least shows a coherent fresh game.
+                _last_output = reset_engine(seed_override=seed_override)
                 raise HTTPException(
                     status_code=400,
                     detail=f"could not replay saved game '{game_id}': {e}",

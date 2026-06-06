@@ -936,6 +936,69 @@ def _choose_spell_location(ctx: ActionTurnContext) -> None:
         _finalize_spell_choice(ctx, choice)
 
 
+@register_turn_action("choose_effect_target")
+def _choose_effect_target(ctx: ActionTurnContext) -> None:
+    """Answer a pending effect choice (a resolving triggered ability that
+    needs a player decision — e.g. Abandoned Hall's "may give a unit here
+    +1 might").
+
+    Wire format: ``play:choose_effect_target:<token>`` where ``<token>`` is
+    one of the choice's enumerated unit tokens (``p1-0`` / ``p2-1``), or
+    ``play:choose_effect_target:pass`` to decline (the "may").
+
+    Applies the pick, clears the pending state, then continues the ability's
+    remaining effect codes (which may open a new choice).
+    """
+    from ..effects import EffectContext, apply_choice_effect
+
+    gs = ctx.engine._game_state
+    choice = gs.pending_effect_choice
+    if choice is None:
+        raise ValueError("no effect choice is pending")
+    if ctx.actor != choice.actor:
+        raise ValueError(
+            f"the effect choice belongs to {choice.actor.value}, not {ctx.actor.value}"
+        )
+    token = ctx.payload.strip().lower()
+    if not token:
+        raise ValueError(
+            "play:choose_effect_target requires a unit token or 'pass' "
+            "(e.g. play:choose_effect_target:p1-0)"
+        )
+    if token != "pass" and token not in choice.options:
+        raise ValueError(
+            f"{token!r} is not a valid choice "
+            f"(options: {', '.join(choice.options)} or pass)"
+        )
+
+    gs.pending_effect_choice = None
+    if token == "pass":
+        ctx.engine._log_event("effect", f"{choice.label}: declined")
+    else:
+        ectx = EffectContext(
+            engine=ctx.engine,
+            controller=choice.actor,
+            source=choice.source,
+            code=choice.code,
+            trigger=choice.trigger,
+            event_kind=choice.event_kind,
+        )
+        text = apply_choice_effect(ectx, token)
+        ctx.engine._log_event("effect", f"{choice.label}: {text}")
+
+    # Continue the ability where it paused (may pause again on a new choice),
+    # then push any triggers the resolution produced.
+    ctx.engine._run_effect_codes(
+        controller=choice.actor,
+        source=choice.source,
+        trigger=choice.trigger,
+        event_kind=choice.event_kind,
+        label=choice.label,
+        codes=list(choice.remaining_effects),
+    )
+    ctx.engine._drain_triggers()
+
+
 @register_turn_action("pass_priority")
 def _pass_priority(ctx: ActionTurnContext) -> None:
     """Pass priority on the open chain.
@@ -955,6 +1018,10 @@ def _pass_priority(ctx: ActionTurnContext) -> None:
     if gs.pending_spell_choice is not None:
         raise ValueError(
             "finish choosing the pending spell's targets before passing priority"
+        )
+    if gs.pending_effect_choice is not None:
+        raise ValueError(
+            "resolve the pending effect choice before passing priority"
         )
     if ctx.actor != chain.priority:
         raise ValueError(

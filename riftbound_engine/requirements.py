@@ -116,7 +116,12 @@ def board_units(state: "GameState") -> list[UnitView]:
         ("player_2", state.player_2_units),
     ):
         for i, u in enumerate(units):
-            might = card_might_of(u.card)
+            # CURRENT might = printed + any temporary bonus ("+N might this
+            # turn"). Spell-choice might bounds (e.g. Gust's "3 might or less")
+            # test the unit's might IN PLAY, so a buffed unit must count at its
+            # boosted value, not its printed stat.
+            printed = card_might_of(u.card)
+            might = (0 if printed is None else printed) + getattr(u, "bonus_might", 0)
             views.append(
                 UnitView(
                     controller=controller,
@@ -124,7 +129,7 @@ def board_units(state: "GameState") -> list[UnitView]:
                     card=u.card,
                     location=u.location,
                     exhausted=bool(u.exhausted),
-                    might=0 if might is None else might,
+                    might=might,
                     attacking=(controller, i) in attacking,
                 )
             )
