@@ -480,6 +480,22 @@ def _return_to_hand(ctx: EffectContext) -> None:
                 hand.append(unit.card)
 
 
+@register_effect("GIVE_UNIT_SHIELD", targeted=True)
+def _give_unit_shield(ctx: EffectContext) -> None:
+    """Grant the chosen target unit(s) [Shield] THIS TURN (e.g. Fortified
+    Position: "choose a unit; it gains [Shield 2] this turn"). The amount comes
+    from the granting card's own reminder text ([Shield N]); bonus_shield
+    expires at end of turn and only matters while the unit defends."""
+    from .csv_data import card_ability_of, shield_amount_in_text
+
+    src_card = ctx.engine._card_name_for_ref(ctx.source)
+    amount = shield_amount_in_text(card_ability_of(src_card) if src_card else "")
+    for ref in ctx.targets:
+        _, _, unit = _resolve_unit(ctx.engine, ref)
+        if unit is not None:
+            unit.bonus_shield += amount
+
+
 @register_effect("GIVE_ENEMY_UNITS_-3M_MIN_1")
 def _enemy_units_minus_3_min_1(ctx: EffectContext) -> None:
     """Thousand-Tailed Watcher: every ENEMY unit gets -3 Might, but a unit

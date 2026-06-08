@@ -490,6 +490,33 @@ _ACCELERATE_RE = re.compile(
 )
 
 
+#: "[Shield]" / "[Shield 2]" keyword (bare = 1). Matches the printed keyword.
+_SHIELD_KW_RE = re.compile(r"\[Shield(?:\s+(\d+))?\]", re.IGNORECASE)
+
+
+def card_printed_shield(name: str) -> int:
+    """The unit's OWN printed [Shield] amount (+Might while it defends), or 0.
+
+    Bare ``[Shield]`` is 1, ``[Shield N]`` is N. Skips a ``[Shield]`` that the
+    card GRANTS to OTHER units ("…have [Shield]" / "give … [Shield]") — that's a
+    separate granted-keyword effect, not this card's own keyword."""
+    ab = card_ability_of(name)
+    for m in _SHIELD_KW_RE.finditer(ab):
+        pre = ab[max(0, m.start() - 14) : m.start()].lower()
+        if any(w in pre for w in ("have", "give", "gain")):
+            continue
+        return int(m.group(1) or 1)
+    return 0
+
+
+def shield_amount_in_text(text: str) -> int:
+    """First ``[Shield N]`` amount anywhere in ``text`` (bare = 1), else 1.
+    Used to size a GRANTED [Shield] from the granting card's reminder text
+    (e.g. Fortified Position's "It gains [Shield 2] this turn")."""
+    m = _SHIELD_KW_RE.search(text or "")
+    return int(m.group(1)) if (m and m.group(1)) else 1
+
+
 def card_has_accelerate(name: str) -> bool:
     """Whether the card carries the ``[Accelerate]`` keyword — pay an extra
     cost as you play it to have it enter READY instead of exhausted."""

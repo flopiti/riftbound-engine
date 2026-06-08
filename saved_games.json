@@ -1846,6 +1846,133 @@
           ]
         }
       ]
+    },
+    {
+      "id": "getting-gold",
+      "name": "getting_gold",
+      "description": "",
+      "created_at": 1780954477.998949,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 508958543
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:1",
+          "label": "Play Plundering Poro (1 Chaos, 1 Mind)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Plundering Poro on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1780954487.892138
     }
   ]
 }

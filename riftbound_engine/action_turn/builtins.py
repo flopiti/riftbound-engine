@@ -1586,6 +1586,9 @@ def _resolve_showdown(ctx: ActionTurnContext) -> None:
             player_2_might=p2_might,
             player_1_targets=[] if p1_might == 0 else None,
             player_2_targets=[] if p2_might == 0 else None,
+            # The showdown's initiator is the attacker; the other side defends
+            # (its [Shield] units keep their bonus through the damage step).
+            initiator=showdown.initiator,
         )
         gs.pending_showdown = None
         return

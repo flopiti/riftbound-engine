@@ -60,7 +60,10 @@ class ShortcutStep:
     which shift when recycle/exhaust_and_recycle POP runes from the pool.
     """
 
-    action: str  # 'exhaust_rune' | 'recycle_rune' | 'exhaust_and_recycle_rune'
+    action: str  # 'exhaust_rune' | 'recycle_rune' | 'exhaust_and_recycle_rune' | 'use_gold'
+    #: Rune actions: the rune's index in the player's pool. A 'use_gold' step
+    #: instead stores the GEAR index of the ready Gold token being killed, and
+    #: ``rune_domain`` is the domain of Power it produces.
     rune_index: int
     rune_domain: str
 
@@ -139,7 +142,8 @@ def _domain_multiset_key(plan: list[ShortcutStep]) -> str:
     specific domain provides power vs energy is internal detail)."""
     counts: dict[str, int] = {}
     for s in plan:
-        counts[s.rune_domain] = counts.get(s.rune_domain, 0) + 1
+        d = "Gold" if s.action == "use_gold" else s.rune_domain
+        counts[d] = counts.get(d, 0) + 1
     return "#".join(sorted(f"{d}×{n}" for d, n in counts.items()))
 
 
@@ -158,7 +162,11 @@ def _rune_outputs(plan: list[ShortcutStep]) -> list[tuple[str, str, int]]:
     recycle another) are the SAME thing: both yield 1 Energy + 1 Mind power."""
     energy: dict[str, int] = {}
     power: dict[str, int] = {}
+    gold: dict[str, int] = {}
     for s in plan:
+        if s.action == "use_gold":  # killed Gold token → +1 Power of its domain
+            gold[s.rune_domain] = gold.get(s.rune_domain, 0) + 1
+            continue
         if s.action != "recycle_rune":  # exhaust / exhaust_and_recycle → Energy
             energy[s.rune_domain] = energy.get(s.rune_domain, 0) + 1
         if s.action != "exhaust_rune":  # recycle / exhaust_and_recycle → Power
@@ -168,6 +176,8 @@ def _rune_outputs(plan: list[ShortcutStep]) -> list[tuple[str, str, int]]:
         out.append(("energy", d, n))
     for d, n in sorted(power.items()):
         out.append(("power", d, n))
+    for d, n in sorted(gold.items()):
+        out.append(("gold", d, n))
     return out
 
 
@@ -184,7 +194,8 @@ def _domain_counts(plan: list[ShortcutStep]) -> list[tuple[str, int]]:
     """Domain → count, sorted alphabetically for stable display order."""
     counts: dict[str, int] = {}
     for s in plan:
-        counts[s.rune_domain] = counts.get(s.rune_domain, 0) + 1
+        d = "Gold" if s.action == "use_gold" else s.rune_domain
+        counts[d] = counts.get(d, 0) + 1
     return sorted(counts.items(), key=lambda x: x[0])
 
 
@@ -296,43 +307,23 @@ def _solve_subset(
     yield from go(0, 0, 0)
 
 
-def _plan_payments(
-    energy_cost: int,
-    power_cost: int,
-    cost_domains: tuple[str, ...],
+def _enumerate_rune_plans(
+    e_gap: int,
+    p_gap: int,
     runes: list[Rune],
-    current_energy: int,
-    current_power: dict[str, int],
+    allowed: set[str],
 ) -> list[list[ShortcutStep]]:
-    """Enumerate every DISTINCT (by domain multiset) plan that exactly
-    covers the cost gaps from the available rune pool. Returns [] if the
-    card is already free-to-play (the engine surfaces play_unit directly
-    in that case) or impossible to pay.
-
-    Only rune subsets up to ``energy_gap + power_gap`` in size are considered:
-    each rune contributes at most +1 Energy and +1 Power, so a MINIMAL plan
-    can never use more runes than that. Bounding the subset size (instead of
-    walking all 2**n subsets) keeps planning fast even with a full rune pool —
-    the old all-subsets walk blew up to millions of states for a 12-rune pool
-    and made both the UI poll and the advanced auto-pilot hang.
-    """
-    allowed = set(cost_domains)
-    e_gap0 = max(0, energy_cost - current_energy)
-    available_power = sum(current_power.get(d, 0) for d in cost_domains)
-    p_gap0 = max(0, power_cost - available_power)
-    if e_gap0 == 0 and p_gap0 == 0:
-        return []
+    """Every DISTINCT (by produced output) rune-only plan covering the given
+    Energy/Power gaps. Returns ``[[]]`` (one empty plan) when both gaps are
+    already <= 0 (nothing to pay from runes), and ``[]`` when the gaps can't be
+    covered from this pool."""
+    if e_gap <= 0 and p_gap <= 0:
+        return [[]]
     n = len(runes)
     if n == 0:
         return []
-
-    # Upper bound on a minimal plan's size (see docstring). Plans from a mask
-    # always use every rune in the mask, so mask popcount == plan length.
-    max_size = min(n, e_gap0 + p_gap0)
-    #: Safety cap on distinct domain-multiset plans collected. The UI only
-    #: ever shows a handful; this guards pathological high-cost enumerations.
+    max_size = min(n, e_gap + p_gap)
     PLAN_CAP = 64
-
     seen_action_keys: set[str] = set()
     domain_keys_seen: set[str] = set()
     all_plans: list[list[ShortcutStep]] = []
@@ -341,36 +332,22 @@ def _plan_payments(
             mask = 0
             for i in combo:
                 mask |= 1 << i
-            for plan in _solve_subset(mask, runes, allowed, e_gap0, p_gap0):
+            for plan in _solve_subset(mask, runes, allowed, e_gap, p_gap):
                 k = _canonical_key(plan)
                 if k in seen_action_keys:
                     continue
                 seen_action_keys.add(k)
                 all_plans.append(plan)
                 domain_keys_seen.add(_domain_multiset_key(plan))
-        # Smallest plans are found first (size ascending), so once we have
-        # plenty of distinct domain-multiset options we can stop.
         if len(domain_keys_seen) >= PLAN_CAP:
             break
 
-    # Sort so the "preferred" plan per domain-multiset wins:
-    #   1. Fewer exhaust_and_recycle actions (leaves more ready runes for
-    #      future plays this turn).
-    #   2. More recycle-on-exhausted actions (uses already-spent runes).
-    #   3. Tie-break on canonical key for stable ordering.
     def sort_key(p: list[ShortcutStep]) -> tuple[int, int, str]:
         xr = sum(1 for s in p if s.action == "exhaust_and_recycle_rune")
         rec = sum(1 for s in p if s.action == "recycle_rune")
         return (xr, -rec, _canonical_key(p))
 
     all_plans.sort(key=sort_key)
-
-    # Collapse plans with the same PRODUCED OUTPUTS (Energy-by-domain +
-    # power-by-domain). Whether the cost is met by one dual-purpose rune or two
-    # single-purpose runes is an implementation detail — the player sees the
-    # same Energy/power result, so it's one chip. (Previously this collapsed by
-    # rune-count-per-domain, which surfaced "1 Mind" AND "2 Mind" as separate
-    # chips for the same 1 Energy + 1 Mind cost.)
     seen_output_keys: set[str] = set()
     plans: list[list[ShortcutStep]] = []
     for p in all_plans:
@@ -379,11 +356,70 @@ def _plan_payments(
             continue
         seen_output_keys.add(ok)
         plans.append(p)
-
-    # Final ordering for display: total rune count ascending, then output key
-    # for stability.
     plans.sort(key=lambda p: (len(p), _output_key(p)))
     return plans
+
+
+def _ready_gold_indices(gs, actor: RequiredTo) -> tuple[int, ...]:
+    """Gear indices of ``actor``'s READY Gold tokens. Each can be killed to add
+    1 Power of any domain, so they're folded into a card's payment plans as an
+    extra power source (never surfaced as a standalone action). Empty if none."""
+    gears = gs.player_1_gears if actor == RequiredTo.PLAYER_1 else gs.player_2_gears
+    return tuple(i for i, g in enumerate(gears) if g.card == "Gold" and not g.exhausted)
+
+
+def _plan_payments(
+    energy_cost: int,
+    power_cost: int,
+    cost_domains: tuple[str, ...],
+    runes: list[Rune],
+    current_energy: int,
+    current_power: dict[str, int],
+    gold_indices: tuple[int, ...] = (),
+) -> list[list[ShortcutStep]]:
+    """Enumerate every DISTINCT plan that covers the cost gaps. Runes supply
+    Energy (exhaust) and/or domain Power (recycle); each READY Gold token in
+    ``gold_indices`` can instead supply 1 Power of an allowed domain (killing
+    the token). Returns ``[]`` if the card is already free-to-play or can't be
+    paid.
+
+    Gold-using plans are offered ALONGSIDE the pure-rune plans (the player picks
+    whether to spend a token), de-duplicated by produced output so a gold-power
+    plan stays distinct from a rune-power one."""
+    e_gap0 = max(0, energy_cost - current_energy)
+    available_power = sum(current_power.get(d, 0) for d in cost_domains)
+    p_gap0 = max(0, power_cost - available_power)
+    if e_gap0 == 0 and p_gap0 == 0:
+        return []
+    allowed = set(cost_domains)
+    # A Gold token produces 1 Power of any domain; power is fungible across the
+    # cost's domains, so produce the card's first listed domain.
+    gold_domain = cost_domains[0] if cost_domains else None
+    max_gold = min(len(gold_indices), p_gap0) if gold_domain is not None else 0
+
+    seen_output_keys: set[str] = set()
+    combined: list[list[ShortcutStep]] = []
+    for k in range(0, max_gold + 1):
+        gold_steps = [
+            ShortcutStep("use_gold", gold_indices[j], gold_domain) for j in range(k)
+        ]
+        for rune_plan in _enumerate_rune_plans(e_gap0, p_gap0 - k, list(runes), allowed):
+            plan = gold_steps + rune_plan
+            ok = _output_key(plan)
+            if ok in seen_output_keys:
+                continue
+            seen_output_keys.add(ok)
+            combined.append(plan)
+    # Prefer plans that spend FEWER gold tokens (keep the ramp), then fewer
+    # total steps, then a stable output key.
+    combined.sort(
+        key=lambda p: (
+            sum(1 for s in p if s.action == "use_gold"),
+            len(p),
+            _output_key(p),
+        )
+    )
+    return combined
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +540,14 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
     current_power = dict(
         gs.player_1_power if actor == RequiredTo.PLAYER_1 else gs.player_2_power
     )
+    # Ready Gold tokens are offered as a payment source only at normal action
+    # timing (not as reactions / in showdowns, where the use_gold handler would
+    # reject them).
+    gold_indices = (
+        _ready_gold_indices(gs, actor)
+        if not reaction_only and not showdown_only
+        else ()
+    )
 
     seen_card: set[str] = set()
     out: list[PlayIntent] = []
@@ -540,6 +584,7 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
             list(runes),
             current_energy,
             current_power,
+            gold_indices=gold_indices,
         )
         if not plans:
             continue
@@ -596,6 +641,7 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
                 list(runes),
                 current_energy,
                 current_power,
+                gold_indices=gold_indices,
             )
             if plans:
                 combos = tuple(
@@ -1184,6 +1230,11 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
     current_power = dict(
         gs.player_1_power if actor == RequiredTo.PLAYER_1 else gs.player_2_power
     )
+    gold_indices = (
+        _ready_gold_indices(gs, actor)
+        if not reaction_only and not showdown_only
+        else ()
+    )
 
     out: list[Shortcut] = []
     for i, card in enumerate(hand):
@@ -1210,6 +1261,7 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
             list(runes),
             current_energy,
             current_power,
+            gold_indices=gold_indices,
         )
         if not plans:
             continue
@@ -1249,11 +1301,17 @@ def execution_steps(shortcut: Shortcut) -> list[tuple[RequiredTo, str]]:
     original index by subtracting the count of already-popped lower-index
     runes; finally apply play_unit / play_spell.
     """
-    pops = [s for s in shortcut.plan if s.action != "exhaust_rune"]
+    gold = [s for s in shortcut.plan if s.action == "use_gold"]
+    rune_steps = [s for s in shortcut.plan if s.action != "use_gold"]
+    pops = [s for s in rune_steps if s.action != "exhaust_rune"]
     pops_sorted_desc = sorted(pops, key=lambda s: s.rune_index, reverse=True)
-    exhausts = [s for s in shortcut.plan if s.action == "exhaust_rune"]
+    exhausts = [s for s in rune_steps if s.action == "exhaust_rune"]
 
     out: list[tuple[RequiredTo, str]] = []
+    # Gold tokens: each kill POPS a gear, so apply high-index-first to keep the
+    # remaining gold targets' indices stable. Independent of the rune pool.
+    for g in sorted(gold, key=lambda s: s.rune_index, reverse=True):
+        out.append((shortcut.actor, f"play:use_gold:{g.rune_index}:{g.rune_domain}"))
     for p in pops_sorted_desc:
         out.append((shortcut.actor, f"play:{p.action}:{p.rune_index}"))
 

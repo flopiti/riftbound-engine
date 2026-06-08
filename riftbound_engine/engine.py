@@ -120,6 +120,12 @@ class PlayedUnit:
     #: combat strength is computed (see ``might_at_battlefield``). Defaults
     #: to 0 so untouched units behave exactly as before.
     bonus_might: int = 0
+    #: This-TURN [Shield] granted by effects (e.g. "give a unit [Shield 2] this
+    #: turn"). Like ``bonus_might`` it resets at end of turn. Counts toward the
+    #: unit's Shield total ONLY while it is defending (see effective_unit_might).
+    #: Printed [Shield] and equipment [Shield] are NOT stored here — they're read
+    #: live from the card / attached gear.
+    bonus_shield: int = 0
     #: Stable per-game identity, assigned when the unit enters play and never
     #: reused. Positional refs ("player_1:0") shift when other units leave
     #: play, so a target chosen at cast time is captured BY UID and re-located
@@ -500,6 +506,10 @@ class PendingCombat:
     player_2_might: int  # P2's total Might at the BF when combat opened
     player_1_targets: list[int] | None = None  # indices into player_2_units
     player_2_targets: list[int] | None = None  # indices into player_1_units
+    #: Who INITIATED the showdown that led to this combat (the attacker). The
+    #: other player is the DEFENDER, whose units get their [Shield] Might while
+    #: the fight is live. None only for legacy/test combats built without it.
+    initiator: "RequiredTo | None" = None
 
 
 @dataclass
@@ -766,11 +776,11 @@ class GameEngine:
             player_1_hand=list(self._game_state.player_1_hand) if self._game_state.player_1_hand is not None else None,
             player_2_hand=list(self._game_state.player_2_hand) if self._game_state.player_2_hand is not None else None,
             player_1_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, uid=u.uid)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, uid=u.uid)
                 for u in self._game_state.player_1_units
             ],
             player_2_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, uid=u.uid)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, uid=u.uid)
                 for u in self._game_state.player_2_units
             ],
             player_1_spells=[
@@ -943,6 +953,7 @@ class GameEngine:
                         if self._game_state.pending_combat.player_2_targets is None
                         else list(self._game_state.pending_combat.player_2_targets)
                     ),
+                    initiator=self._game_state.pending_combat.initiator,
                 )
             ),
             battlefield_1_controller=self._game_state.battlefield_1_controller,
@@ -1123,10 +1134,11 @@ class GameEngine:
         # The per-BF scoring cap is also per-turn: clear the set so each
         # battlefield can score again on the new turn (if conditions hold).
         self._game_state.scored_bfs_this_turn = set()
-        # Might buffs are "this turn" (every implemented buff effect reads
-        # "+N might this turn"): they expire when the turn ends.
+        # Might buffs and granted [Shield] are "this turn" (every implemented
+        # buff/grant reads "… this turn"): they expire when the turn ends.
         for unit in (*self._game_state.player_1_units, *self._game_state.player_2_units):
             unit.bonus_might = 0
+            unit.bonus_shield = 0
         # Spells "resolve" at end of turn — we don't yet model their effects
         # or a discard pile, so for now they simply vanish off the right-side
         # spell overlay. Both players' stacks are cleared (only the active
@@ -2053,6 +2065,7 @@ class GameEngine:
         The caller is responsible for removing ``unit`` from its units list;
         this only handles the destination (hand) and the feed line."""
         unit.bonus_might = 0
+        unit.bonus_shield = 0
         unit.exhausted = False
         hand = (
             self._game_state.player_1_hand
@@ -2313,8 +2326,8 @@ class GameEngine:
         plus any continuous Might granted by EFFECT-TEXT equipment attached to
         it (e.g. an Equipment with ``UNIT_ATTACHED_+2M``). Equipment Might is
         computed live, so it disappears the moment the gear is unattached."""
-        from .abilities import attached_might_bonus
-        from .csv_data import card_might_of
+        from .abilities import attached_might_bonus, attached_shield_bonus
+        from .csv_data import card_might_of, card_printed_shield
 
         units = (
             self._game_state.player_1_units
@@ -2331,12 +2344,35 @@ class GameEngine:
             if controller == "player_1"
             else self._game_state.player_2_gears
         )
-        printed = card_might_of(unit.card) or 0
-        return (
-            printed
+        turn = self._game_state.total_turn_number
+        might = (
+            (card_might_of(unit.card) or 0)
             + unit.bonus_might
-            + attached_might_bonus(gears, unit.uid, self._game_state.total_turn_number)
+            + attached_might_bonus(gears, unit.uid, turn)
         )
+        # [Shield] adds Might ONLY while this unit is DEFENDING (printed keyword
+        # + equipment SHIELD_N + this-turn granted bonus_shield, all stacking).
+        if self._unit_is_defending(controller, unit.location):
+            might += (
+                card_printed_shield(unit.card)
+                + unit.bonus_shield
+                + attached_shield_bonus(gears, unit.uid, turn)
+            )
+        return might
+
+    def _unit_is_defending(self, controller: str, location: str) -> bool:
+        """True if ``controller``'s unit at ``location`` is currently DEFENDING:
+        there's an active showdown (or its combat step) AT that battlefield and
+        ``controller`` is NOT the initiator (the attacker who moved in). The
+        defender is the side that held the battlefield."""
+        gs = self._game_state
+        sd = gs.pending_showdown
+        if sd is not None and sd.battlefield == location:
+            return controller != sd.initiator.value
+        pc = gs.pending_combat
+        if pc is not None and pc.battlefield == location and pc.initiator is not None:
+            return controller != pc.initiator.value
+        return False
 
     def might_at_battlefield(self, actor: RequiredTo, battlefield: str) -> int:
         """Sum of CURRENT Might of all of ``actor``'s units sitting at
@@ -3114,18 +3150,13 @@ class GameEngine:
                 # play:equip. The raw play:equip action handler still validates
                 # + pays when that chain runs. See shortcuts.py.
 
-                # Gold gear tokens: each READY one can be killed+exhausted to add
-                # 1 Power of any domain (action_turn/builtins.py::_use_gold). One
-                # option per (token, domain) so the chooser picks the colour.
-                active_gears = (
-                    self._game_state.player_1_gears
-                    if active == RequiredTo.PLAYER_1
-                    else self._game_state.player_2_gears
-                )
-                for gi, gear in enumerate(active_gears):
-                    if gear.card == "Gold" and not gear.exhausted:
-                        for dom in ("Fury", "Calm", "Mind", "Body", "Chaos", "Order"):
-                            options.append(f"play:use_gold:{gi}:{dom}")
+                # NOTE: Gold gear tokens are NOT surfaced as standalone options.
+                # Like raw rune actions, killing a Gold token only matters as a
+                # PAYMENT step toward playing a card, so it's folded into the
+                # shortcut payment plans (shortcuts.py :: _plan_payments) rather
+                # than offered as a "use the gold for whatever" action. The
+                # play:use_gold handler stays registered so a payment chain can
+                # apply it.
 
                 options.append("play:end_turn")
             return EngineOutput(

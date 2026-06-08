@@ -201,6 +201,34 @@ def attached_might_bonus(gears, host_uid: int | None, current_turn: int | None =
     return total
 
 
+#: An EFFECT-TEXT equipment passive granting the host [Shield N] (e.g. Cloth
+#: Armor's ``SHIELD_2``). Like _ATTACH_MIGHT_RE but for the Shield keyword.
+_ATTACH_SHIELD_RE = re.compile(r"^SHIELD_(\d+)$")
+
+
+def attached_shield_bonus(gears, host_uid: int | None, current_turn: int | None = None) -> int:
+    """Sum the [Shield] that EFFECT-TEXT equipment attached to ``host_uid``
+    grants it (passive codes like ``SHIELD_2``). Mirrors
+    :func:`attached_might_bonus`; the caller adds this to the host's Might ONLY
+    while it is defending. ``gears`` is the host controller's PlayedGear list."""
+    if not host_uid:
+        return 0
+    total = 0
+    for g in gears or []:
+        if getattr(g, "attached_uid", None) != host_uid:
+            continue
+        for ability in triggered_abilities_for(g.card):
+            if not ability.effect_text:
+                continue
+            if not _gear_conditions_met(ability, g, current_turn):
+                continue
+            for code in ability.passive_effects:
+                m = _ATTACH_SHIELD_RE.match(code or "")
+                if m:
+                    total += int(m.group(1))
+    return total
+
+
 def reset_caches() -> None:
     """Clear memoized lookups (used by tests that swap the taxonomy file)."""
     _id_to_name.cache_clear()

@@ -22,6 +22,13 @@ from riftbound_engine.engine import (
     PlayedGear,
     RequiredTo,
     RequiredStep,
+    Rune,
+)
+from riftbound_engine.shortcuts import (
+    Shortcut,
+    ShortcutStep,
+    _plan_payments,
+    execution_steps,
 )
 
 
@@ -149,32 +156,91 @@ def _drive_to_action_turn(engine: GameEngine):
     )
 
 
-class UseGoldOptionSurfacingTests(unittest.TestCase):
-    def test_ready_gold_token_surfaces_one_option_per_domain(self) -> None:
+class NoStandaloneGoldOptionTests(unittest.TestCase):
+    def test_gold_is_never_offered_as_a_standalone_board_option(self) -> None:
+        # Like raw rune actions, killing a Gold token only matters as a PAYMENT
+        # step toward playing a card — it must NOT appear as a standalone option.
         rolls = iter([6, 2])
         engine = GameEngine(dice_roller=lambda: next(rolls))
         ready = _drive_to_action_turn(engine)
         self.assertEqual(ready.required_action.name, RequiredStep.ACTION_TURN)
-        self.assertEqual(ready.required_action.actor, RequiredTo.PLAYER_1)
-
-        # Drop one ready and one exhausted Gold token onto P1's base.
         engine._game_state.player_1_gears.append(
             PlayedGear(card="Gold", location="base", exhausted=False)
         )
-        engine._game_state.player_1_gears.append(
-            PlayedGear(card="Gold", location="base", exhausted=True)
-        )
         out = engine.start()
-        gold_opts = [o for o in out.player_1_options if o.startswith("play:use_gold:")]
-        # Only the READY token (index 0) is offered, one option per domain.
-        self.assertEqual(
-            sorted(gold_opts),
-            sorted(
-                f"play:use_gold:0:{d}" for d in ("Fury", "Calm", "Mind", "Body", "Chaos", "Order")
-            ),
+        self.assertFalse(
+            any(o.startswith("play:use_gold:") for o in out.player_1_options),
+            "Gold must not be surfaced as a standalone action option",
         )
-        # The exhausted token (index 1) is never offered.
-        self.assertFalse(any(o.startswith("play:use_gold:1:") for o in gold_opts))
+
+
+class GoldPaymentPlanningTests(unittest.TestCase):
+    """Gold tokens are folded into a card's payment plans (shortcuts._plan_payments)."""
+
+    def test_gold_alone_pays_a_pure_power_cost_when_no_runes(self) -> None:
+        # Card needs 1 Mind power, no Energy. No runes, one ready Gold (gear #2).
+        plans = _plan_payments(0, 1, ("Mind",), [], 0, {}, gold_indices=(2,))
+        self.assertEqual(len(plans), 1)
+        (step,) = plans[0]
+        self.assertEqual(step.action, "use_gold")
+        self.assertEqual(step.rune_index, 2)  # the gear index
+        self.assertEqual(step.rune_domain, "Mind")
+
+    def test_gold_and_rune_plans_are_both_offered(self) -> None:
+        # With an exhausted Mind rune (recyclable) AND a ready Gold, the player
+        # should be offered BOTH ways to pay the 1 Mind power.
+        runes = [Rune(domain="Mind", exhausted=True)]
+        plans = _plan_payments(0, 1, ("Mind",), runes, 0, {}, gold_indices=(0,))
+        actions = {tuple(s.action for s in p) for p in plans}
+        self.assertIn(("recycle_rune",), actions)
+        self.assertIn(("use_gold",), actions)
+
+    def test_no_gold_steps_when_no_gold_available(self) -> None:
+        runes = [Rune(domain="Mind", exhausted=True)]
+        plans = _plan_payments(0, 1, ("Mind",), runes, 0, {})
+        self.assertTrue(all(s.action != "use_gold" for p in plans for s in p))
+
+    def test_gold_not_used_for_energy_only_costs(self) -> None:
+        # Gold produces Power, never Energy — an energy-only cost ignores it.
+        plans = _plan_payments(1, 0, ("Mind",), [], 0, {}, gold_indices=(0,))
+        self.assertEqual(plans, [])
+
+
+class GoldExecutionStepsTests(unittest.TestCase):
+    def _shortcut(self, plan):
+        return Shortcut(
+            actor=RequiredTo.PLAYER_1,
+            card_index=3,
+            card_name="X",
+            play_action="play_unit",
+            energy_cost=0,
+            power_cost=len([s for s in plan if s.action == "use_gold"]),
+            cost_domains=("Mind",),
+            plan=tuple(plan),
+            domain_counts=(("Gold", 1),),
+            key="Gold×1",
+            label="Play X (1 Gold)",
+        )
+
+    def test_chain_emits_use_gold_then_the_play(self) -> None:
+        sc = self._shortcut([ShortcutStep("use_gold", 1, "Mind")])
+        self.assertEqual(
+            execution_steps(sc),
+            [
+                (RequiredTo.PLAYER_1, "play:use_gold:1:Mind"),
+                (RequiredTo.PLAYER_1, "play:play_unit:3"),
+            ],
+        )
+
+    def test_multiple_gold_steps_apply_high_index_first(self) -> None:
+        sc = self._shortcut(
+            [ShortcutStep("use_gold", 0, "Mind"), ShortcutStep("use_gold", 2, "Mind")]
+        )
+        steps = [a for _, a in execution_steps(sc)]
+        # Higher gear index first so earlier kills don't shift later targets.
+        self.assertEqual(
+            steps[:2], ["play:use_gold:2:Mind", "play:use_gold:0:Mind"]
+        )
 
 
 if __name__ == "__main__":
