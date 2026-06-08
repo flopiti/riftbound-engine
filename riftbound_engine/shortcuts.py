@@ -28,6 +28,7 @@ from .csv_data import (
     card_domains_of,
     card_energy_of,
     card_equip_cost,
+    card_has_quick_draw,
     card_is_equipment,
     card_is_reaction,
     card_playable_in_showdown,
@@ -811,6 +812,123 @@ def compute_equip_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInt
     return out
 
 
+def _build_quick_draw_shortcut(
+    actor: RequiredTo,
+    hand_index: int,
+    card_name: str,
+    unit_name: str,
+    controller: str,
+    unit_index: int,
+    energy_cost: int,
+    power_cost: int,
+    cost_domains: tuple[str, ...],
+    plan: list[ShortcutStep],
+) -> Shortcut:
+    """A Quick-Draw combo: pay the CARD cost (rune steps) then play the gear
+    and attach it for free to ``unit_index`` (``play:quick_draw:…``). The tier-1
+    chip names the gear; this tier-2 chip is the target unit + payment."""
+    domain_counts = _domain_counts(plan)
+    base_key = _domain_multiset_key(plan)
+    if domain_counts:
+        plan_desc = ", ".join(f"{n} {d}" for d, n in domain_counts)
+        label = f"To {unit_name} ({plan_desc})"
+    else:
+        label = f"To {unit_name}"
+    return Shortcut(
+        actor=actor,
+        card_index=hand_index,
+        card_name=card_name,
+        play_action="quick_draw",
+        energy_cost=energy_cost,
+        power_cost=power_cost,
+        cost_domains=cost_domains,
+        plan=tuple(plan),
+        domain_counts=tuple(domain_counts),
+        key=f"{base_key}@{controller}:{unit_index}",
+        label=label,
+        final_action=f"play:quick_draw:{hand_index}:{controller}:{unit_index}",
+        synthetic=f"shortcut:quick_draw:{hand_index}:{controller}:{unit_index}:{base_key}",
+    )
+
+
+def compute_quick_draw_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayIntent]:
+    """Pre-costed picker chips for playing a ``[Quick-Draw]`` Equipment from
+    hand and attaching it for FREE to a unit you control. Because Quick-Draw
+    grants [Reaction], these are offered at REACTION speed (an open chain or a
+    showdown where ``actor`` may act) as well as on ``actor``'s normal turn.
+    Each combo pays only the CARD cost and ends in
+    ``play:quick_draw:<hand_idx>:<controller>:<unit_idx>`` — never the [Equip]
+    cost. Offered only when the actor controls at least one unit."""
+    gs = engine._game_state
+    if (
+        gs.pending_play is not None
+        or gs.pending_spell_choice is not None
+        or gs.pending_payment is not None
+        or gs.pending_combat is not None
+        or getattr(gs, "pending_spell_repeat", None) is not None
+        or getattr(gs, "pending_effect_choice", None) is not None
+    ):
+        return []
+    if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+        return []
+    reaction_only, showdown_only = _picker_phase(gs, actor)
+    if reaction_only is None and not showdown_only:
+        return []  # this actor gets no picker right now
+
+    hand = (gs.player_1_hand if actor == RequiredTo.PLAYER_1 else gs.player_2_hand) or []
+    units = gs.player_1_units if actor == RequiredTo.PLAYER_1 else gs.player_2_units
+    if not units:
+        return []  # nothing to attach to → Quick-Draw not offered
+    runes = gs.player_1_runes if actor == RequiredTo.PLAYER_1 else gs.player_2_runes
+    current_energy = gs.player_1_energy if actor == RequiredTo.PLAYER_1 else gs.player_2_energy
+    current_power = dict(gs.player_1_power if actor == RequiredTo.PLAYER_1 else gs.player_2_power)
+    own = actor.value
+
+    seen: set[str] = set()
+    out: list[PlayIntent] = []
+    for i, card in enumerate(hand):
+        if card in seen or not card_has_quick_draw(card):
+            continue
+        energy_cost = card_energy_of(card) or 0
+        power_cost = card_power_of(card) or 0
+        cost_domains = tuple(card_domains_of(card))
+        available = sum(current_power.get(d, 0) for d in cost_domains)
+        e_gap = max(0, energy_cost - current_energy)
+        p_gap = max(0, power_cost - available)
+        if e_gap == 0 and p_gap == 0:
+            plans: list[list[ShortcutStep]] = [[]]  # already affordable from the pool
+        else:
+            plans = _plan_payments(
+                energy_cost, power_cost, cost_domains, list(runes), current_energy, current_power
+            )
+            if not plans:
+                continue  # can't pay even by tapping/recycling runes
+        combos = tuple(
+            _build_quick_draw_shortcut(
+                actor, i, card, units[ui].card, own, ui, energy_cost, power_cost, cost_domains, plan
+            )
+            for ui in range(len(units))
+            for plan in plans
+        )
+        if not combos:
+            continue
+        seen.add(card)
+        out.append(
+            PlayIntent(
+                actor=actor,
+                card_index=i,
+                card_name=card,
+                play_action="quick_draw",
+                energy_cost=energy_cost,
+                power_cost=power_cost,
+                cost_domains=cost_domains,
+                combos=combos,
+                synthetic=f"intent:quick_draw:{i}",
+            )
+        )
+    return out
+
+
 def _build_move_shortcut(
     actor: RequiredTo, unit_index: int, unit_name: str, dest: str, dest_label: str
 ) -> Shortcut:
@@ -1080,6 +1198,8 @@ def serialize_play_intent(i: PlayIntent) -> dict[str, Any]:
     verb = "Cast" if i.play_action == "play_spell" else "Play"
     if i.play_action == "repeat":
         label = f"Repeat {i.card_name}"
+    elif i.play_action == "quick_draw":
+        label = f"Quick-Draw {i.card_name}"
     elif i.play_action in ("equip", "move"):
         label = i.card_name
     else:

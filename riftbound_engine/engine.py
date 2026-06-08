@@ -120,6 +120,13 @@ class PlayedUnit:
     #: combat strength is computed (see ``might_at_battlefield``). Defaults
     #: to 0 so untouched units behave exactly as before.
     bonus_might: int = 0
+    #: Stable per-game identity, assigned when the unit enters play and never
+    #: reused. Positional refs ("player_1:0") shift when other units leave
+    #: play, so a target chosen at cast time is captured BY UID and re-located
+    #: by uid when the spell resolves later — see _run_spell_effects. 0 means
+    #: "not yet assigned"; _backfill_unit_uids gives every in-play unit a real
+    #: id before anything references it.
+    uid: int = 0
 
 
 @dataclass
@@ -175,9 +182,20 @@ class PlayedGear:
     #: Always ``"base"`` — gears do not move.
     location: str = "base"
     exhausted: bool = False
-    #: For Equipment gears: the unit it's attached to, as a "controller:index"
-    #: ref ("player_1:0") into that player's units list, or None if unequipped.
+    #: For Equipment gears: the STABLE uid (PlayedUnit.uid) of the unit it's
+    #: attached to, or None if unequipped. This is the attachment's identity —
+    #: positional ``"controller:index"`` refs drift when other units leave
+    #: play, so everything resolves the host by uid (mirrors how delayed spell
+    #: targets are relocated). ``attached_to`` below is a derived display ref.
+    attached_uid: int | None = None
+    #: Last-known ``"controller:index"`` position of the host, for display/back-
+    #: compat only. Identity lives in ``attached_uid``; the serializer recomputes
+    #: this from the uid so it's always the host's CURRENT position.
     attached_to: str | None = None
+    #: ``total_turn_number`` on which this gear was (re-)attached, or None if
+    #: unequipped. Lets continuous "while attached THIS turn" conditions (e.g.
+    #: Brutalizer's extra +2 Might) compare it to the current turn.
+    attached_on_turn: int | None = None
 
 
 @dataclass
@@ -334,6 +352,18 @@ class ChainItem:
     effect: "TriggeredEffect | None" = None
     #: Human-readable label for the UI ("Garen — WHEN_YOU_PLAY_ME").
     label: str = ""
+    #: The card's raw Spell Choice Requirement, captured at cast time so the
+    #: chosen targets can be RE-VALIDATED against current state when the spell
+    #: resolves (reactions may have changed the board in between — e.g. a unit
+    #: buffed past Gust's "3 Might or less"). Empty ⇒ nothing to re-check.
+    requirement: str = ""
+    #: Stable uid (PlayedUnit.uid) for each entry in ``targets`` — None for a
+    #: non-unit token ("bf:…", "move_dest:…"). Captured at cast time; at
+    #: resolution the unit ref is RE-LOCATED by uid (its positional index may
+    #: have shifted), and a target whose uid is gone is treated as illegal.
+    target_uids: list[int | None] = field(default_factory=list)
+    #: Per-[Repeat]-round parallel of ``target_uids`` for ``repeat_targets``.
+    repeat_target_uids: list[list[int | None]] = field(default_factory=list)
 
 
 @dataclass
@@ -489,6 +519,10 @@ class ActionLogEntry:
 @dataclass
 class GameState:
     counter: int = 0
+    #: Next stable unit uid to hand out (see PlayedUnit.uid). Monotonic for the
+    #: life of a game; travels with branch snapshots so re-located targets stay
+    #: consistent across goto/restore.
+    next_unit_uid: int = 1
     #: Ordered list of every committed action that produced this state.
     #: Appended to inside ``GameEngine.apply_action`` AFTER the action
     #: succeeds, so failed/raised actions do not pollute it. Survives
@@ -678,6 +712,7 @@ class GameEngine:
     def game_state(self) -> GameState:
         return GameState(
             counter=self._game_state.counter,
+            next_unit_uid=self._game_state.next_unit_uid,
             action_log=[
                 ActionLogEntry(sequence=e.sequence, actor=e.actor, action=e.action)
                 for e in self._game_state.action_log
@@ -704,11 +739,11 @@ class GameEngine:
             player_1_hand=list(self._game_state.player_1_hand) if self._game_state.player_1_hand is not None else None,
             player_2_hand=list(self._game_state.player_2_hand) if self._game_state.player_2_hand is not None else None,
             player_1_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, uid=u.uid)
                 for u in self._game_state.player_1_units
             ],
             player_2_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, uid=u.uid)
                 for u in self._game_state.player_2_units
             ],
             player_1_spells=[
@@ -730,11 +765,25 @@ class GameEngine:
                 for s in self._game_state.player_2_spells
             ],
             player_1_gears=[
-                PlayedGear(card=g.card, location=g.location, exhausted=g.exhausted, attached_to=g.attached_to)
+                PlayedGear(
+                    card=g.card,
+                    location=g.location,
+                    exhausted=g.exhausted,
+                    attached_uid=g.attached_uid,
+                    attached_to=g.attached_to,
+                    attached_on_turn=g.attached_on_turn,
+                )
                 for g in self._game_state.player_1_gears
             ],
             player_2_gears=[
-                PlayedGear(card=g.card, location=g.location, exhausted=g.exhausted, attached_to=g.attached_to)
+                PlayedGear(
+                    card=g.card,
+                    location=g.location,
+                    exhausted=g.exhausted,
+                    attached_uid=g.attached_uid,
+                    attached_to=g.attached_to,
+                    attached_on_turn=g.attached_on_turn,
+                )
                 for g in self._game_state.player_2_gears
             ],
             player_1_trash=list(self._game_state.player_1_trash),
@@ -805,6 +854,9 @@ class GameEngine:
                             repeat_targets=[list(r) for r in it.repeat_targets],
                             effect=it.effect,
                             label=it.label,
+                            requirement=it.requirement,
+                            target_uids=list(it.target_uids),
+                            repeat_target_uids=[list(r) for r in it.repeat_target_uids],
                         )
                         for it in self._game_state.pending_chain.items
                     ],
@@ -1015,6 +1067,10 @@ class GameEngine:
             raise ValueError("cannot end the turn while a [Repeat] decision is pending")
         if self._game_state.pending_chain is not None:
             raise ValueError("cannot end the turn while the chain is open — resolve it first")
+        # The active player's turn is ending — fire end-of-turn triggers (e.g.
+        # an equipment's unattach + self-damage) BEFORE per-turn cleanup, while
+        # the board is still intact. Queued now; drained at the start() choke.
+        self._emit(GameEvent(kind="TURN_END", controller=cp.value))
         # Energy and Power are per-turn: clear both players' pools so nothing
         # carries into the next turn.
         self._game_state.player_1_energy = 0
@@ -1463,6 +1519,94 @@ class GameEngine:
             return
         self._push_spell_to_chain(actor, card, rounds)
 
+    @staticmethod
+    def _unit_ref_from_token(token: str) -> tuple[str, int] | None:
+        """A target token "player_1:<i>" / "player_2:<i>" → (controller, index).
+        Non-unit tokens (move_dest:, bf:, gear:, trash:, spell:, location:)
+        return None — they aren't relocatable units."""
+        parts = token.split(":")
+        if len(parts) == 2 and parts[0] in ("player_1", "player_2") and parts[1].isdigit():
+            return (parts[0], int(parts[1]))
+        return None
+
+    def _target_token_uid(self, token: str) -> int | None:
+        """The stable uid of the unit a target token points at right now, or
+        None for a non-unit token / out-of-range ref."""
+        ref = self._unit_ref_from_token(token)
+        if ref is None:
+            return None
+        controller, idx = ref
+        units = (
+            self._game_state.player_1_units
+            if controller == "player_1"
+            else self._game_state.player_2_units
+        )
+        if 0 <= idx < len(units):
+            return getattr(units[idx], "uid", 0) or None
+        return None
+
+    def _unit_by_uid(self, uid: int) -> tuple[str, int] | None:
+        """Locate a unit by its stable uid → (controller, current index), or
+        None if it has left play."""
+        for controller, units in (
+            ("player_1", self._game_state.player_1_units),
+            ("player_2", self._game_state.player_2_units),
+        ):
+            for i, u in enumerate(units):
+                if getattr(u, "uid", 0) == uid:
+                    return (controller, i)
+        return None
+
+    def _resolve_round_targets(
+        self,
+        requirement: str,
+        targets: list[str],
+        uids: list[int | None],
+        caster: str,
+    ) -> tuple[list[str] | None, str]:
+        """Re-resolve one resolution round's targets against CURRENT state.
+
+        1. RE-LOCATE every unit token by its captured uid (positional indices
+           may have shifted as units left play); a unit whose uid is gone is
+           dropped. Non-unit tokens pass through untouched.
+        2. RE-VALIDATE the surviving unit targets against the spell's original
+           requirement. If they no longer satisfy it (e.g. a reaction buffed
+           the unit past Gust's "3 Might or less"), the round should FIZZLE.
+
+        Returns ``(relocated_targets, "")`` on success, or ``(None, reason)``
+        on fizzle — ``reason`` being a short human explanation for the feed.
+        """
+        from .requirements import board_units, explain_fizzle, targets_still_satisfy
+
+        padded = list(uids) + [None] * max(0, len(targets) - len(uids))
+        relocated: list[str] = []
+        for token, uid in zip(targets, padded):
+            ref = self._unit_ref_from_token(token)
+            if ref is None:
+                relocated.append(token)  # non-unit token — keep as-is
+                continue
+            if uid is None:
+                relocated.append(token)  # no captured identity → can't relocate
+                continue
+            loc = self._unit_by_uid(uid)
+            if loc is None:
+                continue  # unit left play → target gone, drop it
+            relocated.append(f"{loc[0]}:{loc[1]}")
+
+        if requirement:
+            views = {(v.controller, v.index): v for v in board_units(self._game_state)}
+            surviving = []
+            for token in relocated:
+                ref = self._unit_ref_from_token(token)
+                if ref is None:
+                    continue
+                v = views.get((ref[0], ref[1]))
+                if v is not None:
+                    surviving.append(v)
+            if not targets_still_satisfy(requirement, surviving, caster):
+                return None, explain_fizzle(requirement, surviving, caster)
+        return relocated, ""
+
     def _push_spell_to_chain(
         self, actor: RequiredTo, card: str, rounds: list[list[str]]
     ) -> None:
@@ -1483,9 +1627,26 @@ class GameEngine:
         it shows in the spell overlay the moment it's cast (not only after
         the chain resolves). The chain just tracks the open priority window;
         ``_resolve_chain`` closes it without touching the pile."""
+        # Make sure every unit in play has a uid, then capture the uid behind
+        # each chosen unit target so the spell can re-locate them at resolution
+        # even if positional indices shifted (units left play in between).
+        self._backfill_unit_uids()
+        from .csv_data import card_spell_requirement_of
+
+        requirement = card_spell_requirement_of(card) or ""
         base = list(rounds[0]) if rounds else []
         repeats = [list(r) for r in rounds[1:]] if rounds else []
-        item = ChainItem(actor=actor, card=card, targets=base, repeat_targets=repeats)
+        base_uids = [self._target_token_uid(t) for t in base]
+        repeat_uids = [[self._target_token_uid(t) for t in r] for r in repeats]
+        item = ChainItem(
+            actor=actor,
+            card=card,
+            targets=base,
+            repeat_targets=repeats,
+            requirement=requirement,
+            target_uids=base_uids,
+            repeat_target_uids=repeat_uids,
+        )
         chain = self._game_state.pending_chain
         if chain is None:
             self._game_state.pending_chain = PendingChain(
@@ -1606,8 +1767,27 @@ class GameEngine:
             codes.extend(ability.active_effects)
         if not codes:
             return
-        rounds = [list(item.targets)] + [list(rt) for rt in item.repeat_targets]
-        for picks in rounds:
+        # One (targets, captured-uids) pair per resolution round (base + each
+        # [Repeat]). Each round is re-located by uid and re-validated against
+        # the requirement at the moment IT resolves.
+        rounds: list[tuple[list[str], list[int | None]]] = [
+            (list(item.targets), list(item.target_uids))
+        ]
+        for rt, ru in zip(
+            item.repeat_targets,
+            list(item.repeat_target_uids) + [[]] * len(item.repeat_targets),
+        ):
+            rounds.append((list(rt), list(ru)))
+        caster = item.actor.value
+        for picks, uids in rounds:
+            resolved, reason = self._resolve_round_targets(item.requirement, picks, uids, caster)
+            if resolved is None:
+                # Targets no longer satisfy the requirement (e.g. buffed past
+                # Gust's 3-Might cap, or left play) → the effect can't apply.
+                # Emit a dedicated "fizzle" feed line carrying the SPECIFIC
+                # reason so the UI can explain why nothing happened.
+                self._log_event("fizzle", f"{item.card} did nothing — {reason}")
+                continue
             self._run_effect_codes(
                 controller=item.actor,
                 source=None,
@@ -1615,7 +1795,7 @@ class GameEngine:
                 event_kind="",
                 label=item.card or "",
                 codes=codes,
-                targets=picks,
+                targets=resolved,
             )
 
     def _run_effect_codes(
@@ -1739,6 +1919,122 @@ class GameEngine:
                     continue
                 controller = holder.value if holder is not None else None
                 yield (slot, controller, slot, name, ability)
+        # Attached EQUIPMENT. An effect-text equipment ability appends to its
+        # host unit's rules, so its triggers fire as if on that unit. The ref is
+        # a composite ``equip:<gear-controller>:<gear-index>:<host-uid>`` so an
+        # effect can address both the gear ("this" — UNATTACH_THIS) and the
+        # equipped unit by stable uid ("self" — DEAL_N_SELF), order-independent.
+        for side, gears in (
+            (RequiredTo.PLAYER_1, gs.player_1_gears),
+            (RequiredTo.PLAYER_2, gs.player_2_gears),
+        ):
+            for gidx, gear in enumerate(gears):
+                if not gear.attached_uid:
+                    continue
+                host = self._unit_by_uid(gear.attached_uid)  # relocate by stable uid
+                if host is None:
+                    continue  # host left play → gear is effectively unattached
+                host_units = gs.player_1_units if host[0] == "player_1" else gs.player_2_units
+                host_unit = host_units[host[1]]
+                for ability in _abilities.triggered_abilities_for(gear.card):
+                    if not ability.effect_text:
+                        continue
+                    if not ability.triggers or not ability.active_effects:
+                        continue
+                    yield (
+                        f"equip:{side.value}:{gidx}:{gear.attached_uid}",
+                        side.value,
+                        host_unit.location,
+                        gear.card,
+                        ability,
+                    )
+
+    def _death_replacement_for(self, unit: "PlayedUnit") -> tuple[str, ...]:
+        """The would-die REPLACEMENT effects that apply to ``unit``, or ``()``.
+
+        A replacement effect (trigger ``IF_ID_DIE``) intercedes when the unit
+        WOULD die and substitutes its own outcome instead — the unit never
+        actually dies. We look in two places:
+
+          * the unit's OWN rule-text abilities (a unit that saves itself), and
+          * any EFFECT-TEXT equipment attached to it (e.g. the Guardian Angel
+            gear, whose "if I'd die" text applies to its equipped host).
+
+        ``IF_ID_DIE`` is deliberately NOT in ``TRIGGER_EVENT_MAP`` — it is a
+        replacement marker, not a chain trigger, so it never fires an item onto
+        the chain; it is consulted only here, at the moment of death."""
+        from .abilities import triggered_abilities_for
+
+        for ability in triggered_abilities_for(unit.card):
+            if not ability.effect_text and "IF_ID_DIE" in ability.triggers and ability.active_effects:
+                return ability.active_effects
+        gs = self._game_state
+        for gears in (gs.player_1_gears, gs.player_2_gears):
+            for gear in gears:
+                if gear.attached_uid is None or gear.attached_uid != unit.uid:
+                    continue
+                for ability in triggered_abilities_for(gear.card):
+                    if ability.effect_text and "IF_ID_DIE" in ability.triggers and ability.active_effects:
+                        return ability.active_effects
+        return ()
+
+    def _recall_instead_of_death(self, controller: str, unit: "PlayedUnit") -> None:
+        """Apply a HEAL_EXHAUST_RECALL would-die replacement: the unit does NOT
+        die (no ON_DEATH, nothing to trash). HEAL is a no-op (this game keeps no
+        persistent damage); the unit's temporary buffs and exhaust state drop as
+        it leaves play; RECALL returns the card to its owner's hand.
+
+        The caller is responsible for removing ``unit`` from its units list;
+        this only handles the destination (hand) and the feed line."""
+        unit.bonus_might = 0
+        unit.exhausted = False
+        hand = (
+            self._game_state.player_1_hand
+            if controller == "player_1"
+            else self._game_state.player_2_hand
+        )
+        if hand is not None:
+            hand.append(unit.card)
+        self._log_event(
+            "effect",
+            f"{unit.card} would die — healed, exhausted and recalled to its owner's hand",
+        )
+
+    def _kill_unit(self, controller: str, index: int, battlefield: str | None = None) -> None:
+        """Remove the unit at (controller, index) from play and send it to its
+        owner's trash, firing ON_DEATH first (so deathknell / "when a unit dies"
+        watchers still see it). Used by non-combat lethal effects (e.g. an
+        equipment's end-of-turn self-damage).
+
+        If the unit has a would-die REPLACEMENT (e.g. an attached Guardian
+        Angel), it is recalled to hand instead — no death, no ON_DEATH."""
+        units = (
+            self._game_state.player_1_units
+            if controller == "player_1"
+            else self._game_state.player_2_units
+            if controller == "player_2"
+            else None
+        )
+        if units is None or not (0 <= index < len(units)):
+            return
+        if self._death_replacement_for(units[index]):
+            self._recall_instead_of_death(controller, units.pop(index))
+            return
+        self._emit(
+            GameEvent(
+                kind="ON_DEATH",
+                controller=controller,
+                source=f"{controller}:{index}",
+                battlefield=battlefield,
+            )
+        )
+        dead = units.pop(index)
+        trash = (
+            self._game_state.player_1_trash
+            if controller == "player_1"
+            else self._game_state.player_2_trash
+        )
+        trash.append(dead.card)
 
     def _emit(self, event: GameEvent) -> None:
         """Announce a state transition. Scans cards in play RIGHT NOW for
@@ -1897,24 +2193,32 @@ class GameEngine:
             return []
         if actor == RequiredTo.PLAYER_1:
             opponent_units = self._game_state.player_2_units
+            opp_controller = "player_2"
             budget = combat.player_1_might
         elif actor == RequiredTo.PLAYER_2:
             opponent_units = self._game_state.player_1_units
+            opp_controller = "player_1"
             budget = combat.player_2_might
         else:
             return []
 
-        # (opponent-unit-index, lethal-cost). Lethal cost is max(Might, 1): a
-        # 0-Might unit still needs 1 damage to die, so it can't be killed for
-        # free (and leftover damage can't force-kill it unless ≥ 1).
+        # (opponent-unit-index, lethal-cost). Lethal cost is the unit's
+        # EFFECTIVE Might (printed Might + bonus_might from buffs), floored at
+        # 1: a 0-Might unit still needs 1 damage to die, so it can't be killed
+        # for free. Crucially this must include bonus_might — the damage BUDGET
+        # (might_at_battlefield / combat.player_X_might) already counts buffs,
+        # so the lethal threshold must too, else a buffed unit (e.g. 3 printed
+        # + 3 buff = 6 Might) would wrongly die to only its printed Might worth
+        # of damage.
         targets: list[tuple[int, int]] = []
         for i, u in enumerate(opponent_units):
             if u.location != combat.battlefield:
                 continue
-            m = card_might_of(u.card)
-            if m is None:
+            if card_might_of(u.card) is None:
                 continue
-            targets.append((i, max(m, 1)))
+            # Lethal cost = CURRENT Might (printed + buffs + attached equipment),
+            # floored at 1. Uses the same source of truth as the damage budget.
+            targets.append((i, max(self.effective_unit_might(opp_controller, i), 1)))
 
         options: list[str] = []
         for size in range(0, len(targets) + 1):
@@ -1936,25 +2240,55 @@ class GameEngine:
                 )
         return options
 
-    def might_at_battlefield(self, actor: RequiredTo, battlefield: str) -> int:
-        """Sum of Might (from CSV) of all of ``actor``'s units sitting at
-        ``battlefield``. Used to compute each player's damage budget when
-        a contested showdown enters its combat phase."""
+    def effective_unit_might(self, controller: str, index: int) -> int:
+        """A unit's CURRENT Might — the single source of truth used everywhere
+        Might matters (combat budget + lethal cost, spell targeting, debuff
+        floors). It's the printed Might plus persistent ``bonus_might`` buffs
+        plus any continuous Might granted by EFFECT-TEXT equipment attached to
+        it (e.g. an Equipment with ``UNIT_ATTACHED_+2M``). Equipment Might is
+        computed live, so it disappears the moment the gear is unattached."""
+        from .abilities import attached_might_bonus
         from .csv_data import card_might_of
-        if actor == RequiredTo.PLAYER_1:
-            units = self._game_state.player_1_units
-        elif actor == RequiredTo.PLAYER_2:
-            units = self._game_state.player_2_units
-        else:
+
+        units = (
+            self._game_state.player_1_units
+            if controller == "player_1"
+            else self._game_state.player_2_units
+            if controller == "player_2"
+            else []
+        )
+        if index < 0 or index >= len(units):
             return 0
+        unit = units[index]
+        gears = (
+            self._game_state.player_1_gears
+            if controller == "player_1"
+            else self._game_state.player_2_gears
+        )
+        printed = card_might_of(unit.card) or 0
+        return (
+            printed
+            + unit.bonus_might
+            + attached_might_bonus(gears, unit.uid, self._game_state.total_turn_number)
+        )
+
+    def might_at_battlefield(self, actor: RequiredTo, battlefield: str) -> int:
+        """Sum of CURRENT Might of all of ``actor``'s units sitting at
+        ``battlefield`` (printed + buffs + attached-equipment grants). Used to
+        compute each player's damage budget when a contested showdown enters
+        its combat phase."""
+        if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+            return 0
+        units = (
+            self._game_state.player_1_units
+            if actor == RequiredTo.PLAYER_1
+            else self._game_state.player_2_units
+        )
         total = 0
-        for unit in units:
+        for i, unit in enumerate(units):
             if unit.location != battlefield:
                 continue
-            m = card_might_of(unit.card)
-            # A unit with non-zero printed Might OR a buff contributes; a
-            # unit with no printed Might still counts its bonus.
-            total += (m or 0) + unit.bonus_might
+            total += self.effective_unit_might(actor.value, i)
         return total
 
     def resolve_combat(self, battlefield: str) -> None:
@@ -1980,40 +2314,58 @@ class GameEngine:
             return
         p1_targets = set(pc.player_1_targets or [])  # P2 units P1 killed
         p2_targets = set(pc.player_2_targets or [])  # P1 units P2 killed
-        # Fire death triggers BEFORE pruning, while the dying units are still
-        # in play — so a unit's own DEATHKNELL (and "when a unit dies" watchers)
-        # can still see it. Each death is its own event, tagged with the dead
-        # unit's owner + ref and the battlefield it fell on.
-        for i in p2_targets:
-            if 0 <= i < len(gs.player_1_units):
-                self._emit(
-                    GameEvent(
-                        kind="ON_DEATH",
-                        controller=RequiredTo.PLAYER_1.value,
-                        source=f"{RequiredTo.PLAYER_1.value}:{i}",
-                        battlefield=battlefield,
-                    )
+
+        # Split each casualty set into units that TRULY die vs units saved by a
+        # would-die REPLACEMENT (e.g. an attached Guardian Angel → recall). A
+        # replaced unit never dies: no ON_DEATH, no trash — it returns to hand.
+        def _split(units: list, targets: set[int]) -> tuple[set[int], set[int]]:
+            dead, replaced = set(), set()
+            for i in targets:
+                if 0 <= i < len(units):
+                    (replaced if self._death_replacement_for(units[i]) else dead).add(i)
+            return dead, replaced
+
+        p1_dead, p1_replaced = _split(gs.player_1_units, p2_targets)  # P1's units P2 hit
+        p2_dead, p2_replaced = _split(gs.player_2_units, p1_targets)  # P2's units P1 hit
+
+        # Fire death triggers BEFORE pruning, while the dying units are still in
+        # play — so a unit's own DEATHKNELL (and "when a unit dies" watchers)
+        # can still see it. ONLY the truly-dead emit ON_DEATH (a replaced unit
+        # didn't die). Each death is its own event, tagged with the dead unit's
+        # owner + ref and the battlefield it fell on.
+        for i in p1_dead:
+            self._emit(
+                GameEvent(
+                    kind="ON_DEATH",
+                    controller=RequiredTo.PLAYER_1.value,
+                    source=f"{RequiredTo.PLAYER_1.value}:{i}",
+                    battlefield=battlefield,
                 )
-        for i in p1_targets:
-            if 0 <= i < len(gs.player_2_units):
-                self._emit(
-                    GameEvent(
-                        kind="ON_DEATH",
-                        controller=RequiredTo.PLAYER_2.value,
-                        source=f"{RequiredTo.PLAYER_2.value}:{i}",
-                        battlefield=battlefield,
-                    )
+            )
+        for i in p2_dead:
+            self._emit(
+                GameEvent(
+                    kind="ON_DEATH",
+                    controller=RequiredTo.PLAYER_2.value,
+                    source=f"{RequiredTo.PLAYER_2.value}:{i}",
+                    battlefield=battlefield,
                 )
-        # Apply simultaneously: snapshot both lists first, then split each
-        # into survivors (kept) and casualties (→ owner's trash). Killed
-        # units leave play entirely and are appended to their owner's
-        # trash in index order.
+            )
+        # Apply simultaneously: snapshot both lists first. Truly-dead units →
+        # owner's trash (index order); replaced units → recalled to hand; then
+        # both leave play entirely.
         gs.player_2_trash.extend(
-            u.card for i, u in enumerate(gs.player_2_units) if i in p1_targets
+            u.card for i, u in enumerate(gs.player_2_units) if i in p2_dead
         )
         gs.player_1_trash.extend(
-            u.card for i, u in enumerate(gs.player_1_units) if i in p2_targets
+            u.card for i, u in enumerate(gs.player_1_units) if i in p1_dead
         )
+        for i, u in enumerate(gs.player_1_units):
+            if i in p1_replaced:
+                self._recall_instead_of_death(RequiredTo.PLAYER_1.value, u)
+        for i, u in enumerate(gs.player_2_units):
+            if i in p2_replaced:
+                self._recall_instead_of_death(RequiredTo.PLAYER_2.value, u)
         gs.player_2_units = [
             u for i, u in enumerate(gs.player_2_units) if i not in p1_targets
         ]
@@ -2710,9 +3062,27 @@ class GameEngine:
         )
         return output
 
+    def _backfill_unit_uids(self) -> None:
+        """Give every in-play unit a stable nonzero ``uid`` (idempotent).
+
+        Units enter play through many paths (play_unit, champion, fake-fill,
+        restored states). Rather than thread uid assignment through each, we
+        assign lazily here — called at the start of every action and before
+        spell targets are captured — so a unit always has a stable id by the
+        time anything can reference it, and an existing id is never changed."""
+        gs = self._game_state
+        for units in (gs.player_1_units, gs.player_2_units):
+            for u in units:
+                if not getattr(u, "uid", 0):
+                    u.uid = gs.next_unit_uid
+                    gs.next_unit_uid += 1
+
     def _apply_action_impl(self, action: str, actor: RequiredTo) -> EngineOutput:
         if not action:
             raise ValueError("action must not be empty")
+        # Ensure every unit already in play carries a stable uid before this
+        # action runs (so e.g. capturing a spell's targets records real ids).
+        self._backfill_unit_uids()
 
         if action.startswith(apply_prefix(ApplyVerb.CHOOSE_DECK)):
             deck_selection = self._deck_selection_output()

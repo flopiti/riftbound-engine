@@ -561,6 +561,588 @@
         }
       ],
       "updated_at": 1780793183.848053
+    },
+    {
+      "id": "gust-test-2",
+      "name": "gust_test_2",
+      "description": "",
+      "created_at": 1780846495.719785,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 3776359463
+      },
+      "moves": []
+    },
+    {
+      "id": "poros",
+      "name": "Poros",
+      "description": "",
+      "created_at": 1780846859.421679,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 86082311
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:4",
+          "label": "Play Plundering Poro (1 Chaos, 1 Mind)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:4"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Plundering Poro on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:9:Calm\u00d71#Chaos\u00d73",
+          "label": "Play Stellacorn Herder (1 Calm, 3 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:5"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:9"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Stellacorn Herder on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:play_spell:9:Chaos\u00d71",
+          "label": "Cast Gust (1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_spell:9"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_spell_targets:p2-0",
+          "label": "Gust \u2192 Stellacorn Herder",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_spell_targets:p2-0"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1780870132.070795
+    },
+    {
+      "id": "watcher-test",
+      "name": "watcher test",
+      "description": "",
+      "created_at": 1780871641.5618129,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 3392644305
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "AI: I Need a thousand tailed watcher in the hands of",
+          "label": "AI: I Need a thousand tailed watcher in the hands of (10 moves)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:3"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:4"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_champion:10000"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:0:battlefield_1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:play_unit:4:Chaos\u00d74#Mind\u00d73",
+          "label": "Play Thousand-Tailed Watcher (4 Chaos, 3 Mind)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_and_recycle_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:3"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:4"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:5"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:4"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Thousand-Tailed Watcher on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1780871643.004551
     }
   ]
 }

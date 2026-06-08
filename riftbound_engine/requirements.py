@@ -109,7 +109,16 @@ def _attacking_keys(state: "GameState") -> set[tuple[str, int]]:
 
 def board_units(state: "GameState") -> list[UnitView]:
     """Flatten both players' units into ``UnitView`` rows for evaluation."""
+    from .abilities import attached_might_bonus
+
     attacking = _attacking_keys(state)
+    # `getattr` defaults keep this working for lightweight test fakes that only
+    # populate units (no gear lists / turn counter).
+    gears_by_controller = {
+        "player_1": getattr(state, "player_1_gears", []),
+        "player_2": getattr(state, "player_2_gears", []),
+    }
+    current_turn = getattr(state, "total_turn_number", None)
     views: list[UnitView] = []
     for controller, units in (
         ("player_1", state.player_1_units),
@@ -117,11 +126,18 @@ def board_units(state: "GameState") -> list[UnitView]:
     ):
         for i, u in enumerate(units):
             # CURRENT might = printed + any temporary bonus ("+N might this
-            # turn"). Spell-choice might bounds (e.g. Gust's "3 might or less")
-            # test the unit's might IN PLAY, so a buffed unit must count at its
-            # boosted value, not its printed stat.
+            # turn") + Might granted by EFFECT-TEXT equipment attached to this
+            # unit. Spell-choice might bounds (e.g. Gust's "3 might or less")
+            # test the unit's might IN PLAY, so an equipped/buffed unit counts
+            # at its boosted value, not its printed stat.
             printed = card_might_of(u.card)
-            might = (0 if printed is None else printed) + getattr(u, "bonus_might", 0)
+            might = (
+                (0 if printed is None else printed)
+                + getattr(u, "bonus_might", 0)
+                + attached_might_bonus(
+                    gears_by_controller.get(controller, []), getattr(u, "uid", 0), current_turn
+                )
+            )
             views.append(
                 UnitView(
                     controller=controller,
@@ -890,6 +906,90 @@ def spell_target_plan(raw: str | None) -> list[UnitRequirement]:
             if req is not None:
                 plan.append(req)
     return plan
+
+
+def targets_still_satisfy(
+    raw: str | None,
+    units: list[UnitView],
+    caster: str | None = None,
+) -> bool:
+    """Re-check, at spell RESOLUTION, that the still-in-play chosen targets
+    (`units`, already re-located to current indices) still meet every forced
+    unit pick the requirement demanded at cast time.
+
+    Greedily assigns the surviving units to the requirement's unit phrases,
+    checking each unit's per-unit predicates and each phrase's group
+    predicates (``sum_might_max`` / ``same_location``). Returns False when any
+    phrase can no longer be satisfied — the spell should fizzle. Requirements
+    with no enforceable unit pick (an OR tree, or only non-unit phrases) return
+    True, since there's nothing this check can adjudicate."""
+    plan = spell_target_plan(raw)
+    if not plan:
+        return True
+    remaining = list(units)
+    for req in plan:
+        claimed: list[UnitView] = []
+        for u in list(remaining):
+            if len(claimed) >= req.min_count:
+                break
+            if req.unit_matches(u, caster):
+                claimed.append(u)
+        if len(claimed) < req.min_count:
+            return False
+        if req.sum_might_max is not None and sum(u.might for u in claimed) > req.sum_might_max:
+            return False
+        if req.same_location and len({u.location for u in claimed}) > 1:
+            return False
+        for u in claimed:
+            remaining.remove(u)
+    return True
+
+
+def _why_unit_fails(req: UnitRequirement, u: UnitView, caster: str | None) -> str | None:
+    """A short, human reason ``u`` no longer satisfies ``req`` — or None if it
+    still does. Used to explain a fizzle in the activity feed."""
+    name = u.card or "the target"
+    if req.side == "friendly" and caster and u.controller != caster:
+        return f"{name} is no longer a friendly unit"
+    if req.side == "enemy" and caster and u.controller == caster:
+        return f"{name} is no longer an enemy unit"
+    if req.require_battlefield and not u.at_battlefield:
+        return f"{name} is no longer at a battlefield"
+    if req.require_base and not u.at_base:
+        return f"{name} is no longer at the base"
+    if req.require_exhausted and not u.exhausted:
+        return f"{name} is no longer exhausted"
+    if req.require_attacking and not u.attacking:
+        return f"{name} is no longer attacking"
+    if req.might_max is not None and u.might > req.might_max:
+        return f"{name} is now {u.might} Might (needs ≤{req.might_max})"
+    if req.might_min is not None and u.might < req.might_min:
+        return f"{name} is now {u.might} Might (needs ≥{req.might_min})"
+    return None
+
+
+def explain_fizzle(raw: str | None, units: list[UnitView], caster: str | None = None) -> str:
+    """A short reason the still-in-play targets ``units`` no longer satisfy the
+    requirement, for the fizzle line in the UI feed. Distinguishes "left play"
+    (too few targets remain) from a specific predicate now failing (e.g. buffed
+    past a Might cap, moved off a battlefield)."""
+    plan = spell_target_plan(raw)
+    if not plan:
+        return "the chosen target is no longer valid"
+    total_needed = sum(r.min_count for r in plan)
+    if len(units) < total_needed:
+        return "the chosen target left play"
+    for req in plan:
+        for u in units:
+            why = _why_unit_fails(req, u, caster)
+            if why:
+                # Mention the group cap explicitly when that's what broke.
+                if req.sum_might_max is not None and sum(x.might for x in units) > req.sum_might_max:
+                    return f"the chosen units now total {sum(x.might for x in units)} Might (needs ≤{req.sum_might_max})"
+                return why
+    if any(r.sum_might_max is not None for r in plan):
+        return "the chosen units no longer fit the combined Might cap"
+    return "the chosen target no longer meets the requirement"
 
 
 def battlefield_picks(raw: str | None) -> list[BattlefieldRequirement]:

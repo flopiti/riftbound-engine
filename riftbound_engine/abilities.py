@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -45,6 +46,11 @@ class Ability:
     activation_speeds: tuple[str, ...] = ()
     active_effects: tuple[str, ...] = ()
     passive_effects: tuple[str, ...] = ()
+    #: True ⇒ EFFECT text: only active while the card is attached to another
+    #: unit (appends to the host's rules — e.g. equipment). False ⇒ RULE text:
+    #: always active while the card is in play. The engine will use this to
+    #: decide whether an equipment's ability applies to its equipped unit.
+    effect_text: bool = False
 
     @property
     def is_empty(self) -> bool:
@@ -70,6 +76,7 @@ def _ability_from_dict(d: dict) -> Ability:
         activation_speeds=_seq("activationSpeeds"),
         active_effects=_seq("activeEffects"),
         passive_effects=_seq("passiveEffects"),
+        effect_text=bool(d.get("effectText")),
     )
 
 
@@ -142,6 +149,59 @@ def triggered_abilities_for(name: str) -> tuple[Ability, ...]:
     if sep >= 0:
         return index.get(name[sep + 2 :].strip().lower(), ())
     return ()
+
+
+#: An EFFECT-TEXT passive that buffs/debuffs the host unit's Might while the
+#: equipment is attached, e.g. "UNIT_ATTACHED_+2M" → +2, "UNIT_ATTACHED_-1M" → -1.
+_ATTACH_MIGHT_RE = re.compile(r"UNIT_ATTACHED_([+-]?\d+)M\b")
+
+
+def _gear_conditions_met(ability: Ability, gear, current_turn: int | None) -> bool:
+    """Whether a continuous equipment ability's conditions currently hold for
+    ``gear``. An ability with no conditions always applies. A condition we
+    can't evaluate (not implemented) is treated as NOT met, so we never apply a
+    continuous effect whose gate we can't verify.
+
+    Implemented conditions:
+      * ``ATTACHED_THIS_TURN`` — the gear was (re-)attached on the current turn.
+    """
+    for cond in ability.conditions:
+        if cond == "ATTACHED_THIS_TURN":
+            if current_turn is None or getattr(gear, "attached_on_turn", None) != current_turn:
+                return False
+        else:
+            return False  # unknown condition → can't verify → don't apply
+    return True
+
+
+def attached_might_bonus(gears, host_uid: int | None, current_turn: int | None = None) -> int:
+    """Sum the Might that EFFECT-TEXT passive abilities on equipment attached to
+    the unit whose stable uid is ``host_uid`` grant that unit.
+
+    ``gears`` is that unit's controller's ``PlayedGear`` list (a gear can only
+    be equipped onto a unit its owner controls). Matching by uid — not by a
+    positional ref — means the buff follows the right unit even after others
+    leave play and shift indices. Only ``effect_text`` abilities count — a
+    rule-text ability would apply on its own, not via attachment — and only
+    when the ability's conditions currently hold (see ``_gear_conditions_met``),
+    so e.g. Brutalizer's conditional +2 Might applies only the turn it's
+    attached. ``current_turn`` is ``GameState.total_turn_number``."""
+    if not host_uid:
+        return 0
+    total = 0
+    for g in gears or []:
+        if getattr(g, "attached_uid", None) != host_uid:
+            continue
+        for ability in triggered_abilities_for(g.card):
+            if not ability.effect_text:
+                continue
+            if not _gear_conditions_met(ability, g, current_turn):
+                continue
+            for code in ability.passive_effects:
+                m = _ATTACH_MIGHT_RE.search(code or "")
+                if m:
+                    total += int(m.group(1))
+    return total
 
 
 def reset_caches() -> None:

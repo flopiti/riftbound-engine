@@ -1158,6 +1158,36 @@ def _equip(ctx: ActionTurnContext) -> None:
         )
 
     gs = ctx.engine._game_state
+    # Equip is a normal-turn play (action timing), exactly like playing a gear
+    # or a unit — NOT a reaction or a showdown play. Enforce it at the engine
+    # level so a raw play:equip can't slip in mid-resolution even though the
+    # UI only ever offers it on the action turn (compute_equip_intents gates
+    # the same conditions). Mirrors the guards in _play_gear.
+    if gs.pending_play is not None:
+        raise ValueError("a play is already waiting for a location; choose one first")
+    if gs.pending_spell_choice is not None:
+        raise ValueError(
+            "cannot equip while a spell is waiting for target selection — "
+            "choose its targets first"
+        )
+    if gs.pending_chain is not None:
+        raise ValueError(
+            "cannot equip while the chain is open — pass priority (or respond "
+            "with a Reaction) until the chain resolves"
+        )
+    if gs.pending_showdown is not None:
+        raise ValueError(
+            "cannot equip while a showdown is in progress — resolve the showdown first"
+        )
+    if gs.pending_combat is not None:
+        raise ValueError(
+            "cannot equip while a contested showdown is in combat — commit your kills first"
+        )
+    if getattr(gs, "pending_spell_repeat", None) is not None:
+        raise ValueError("cannot equip while a [Repeat] decision is pending")
+    if getattr(gs, "pending_effect_choice", None) is not None:
+        raise ValueError("cannot equip while an effect choice is pending")
+
     gears = gs.player_1_gears if ctx.actor == RT.PLAYER_1 else gs.player_2_gears
     if gear_index < 0 or gear_index >= len(gears):
         raise ValueError(f"gear index out of range: {gear_index}")
@@ -1183,7 +1213,101 @@ def _equip(ctx: ActionTurnContext) -> None:
         )
 
     ctx.engine._deduct_equip_cost(ctx.actor, cost)
+    # Identity is the host's stable uid (positional refs drift when units
+    # leave play). attached_to is kept as a display hint of the current pos.
+    ctx.engine._backfill_unit_uids()
+    gear.attached_uid = target_units[unit_index].uid
     gear.attached_to = f"{controller}:{unit_index}"
+    # Stamp the turn so "while attached THIS turn" passives (e.g. Brutalizer's
+    # extra +2 Might) can tell a fresh attach from one made a prior turn.
+    gear.attached_on_turn = gs.total_turn_number
+
+
+@register_turn_action("quick_draw")
+def _quick_draw(ctx: ActionTurnContext) -> None:
+    """Play a ``[Quick-Draw]`` Equipment from hand and attach it for FREE.
+
+    Wire format: ``play:quick_draw:<hand_index>:<unit_controller>:<unit_index>``.
+
+    Quick-Draw gives the equipment [Reaction] timing, so this is allowed in a
+    reaction window (an open chain or a showdown) as well as on your own action
+    turn — but not while a finer sub-step is mid-resolution. You pay only the
+    CARD cost (the gear's printed Energy/Power), NOT the [Equip] cost, and it
+    attaches immediately to a unit you control. (Re-attaching later, after the
+    host dies, uses the normal play:equip and DOES cost the [Equip].)
+    """
+    from ..csv_data import card_has_quick_draw
+    from ..engine import PlayedGear
+    from ..engine import RequiredTo as RT
+
+    parts = ctx.payload.split(":")
+    if len(parts) != 3:
+        raise ValueError(
+            "play:quick_draw requires <hand_index>:<controller>:<unit_index> "
+            "(e.g. play:quick_draw:0:player_1:2)"
+        )
+    try:
+        index = int(parts[0])
+        unit_index = int(parts[2])
+    except ValueError as e:
+        raise ValueError(f"play:quick_draw indices must be integers, got {ctx.payload!r}") from e
+    controller = parts[1]
+    if controller != ctx.actor.value:
+        raise ValueError(
+            f"{ctx.actor.value} can only Quick-Draw onto a unit they control, not {controller}'s"
+        )
+
+    gs = ctx.engine._game_state
+    # [Reaction] timing: an open chain / showdown is FINE (that's the window),
+    # but you can't slip it in while you're mid-choosing something.
+    if gs.pending_play is not None:
+        raise ValueError("a play is already waiting for a location; choose one first")
+    if gs.pending_spell_choice is not None:
+        raise ValueError("cannot Quick-Draw while a spell is waiting for target selection")
+    if gs.pending_payment is not None:
+        raise ValueError("cannot Quick-Draw while a payment is pending")
+    if gs.pending_combat is not None:
+        raise ValueError("cannot Quick-Draw while combat damage is being assigned")
+    if getattr(gs, "pending_spell_repeat", None) is not None:
+        raise ValueError("cannot Quick-Draw while a [Repeat] decision is pending")
+    if getattr(gs, "pending_effect_choice", None) is not None:
+        raise ValueError("cannot Quick-Draw while an effect choice is pending")
+
+    hand = gs.player_1_hand if ctx.actor == RT.PLAYER_1 else gs.player_2_hand
+    gears = gs.player_1_gears if ctx.actor == RT.PLAYER_1 else gs.player_2_gears
+    units = gs.player_1_units if ctx.actor == RT.PLAYER_1 else gs.player_2_units
+    if hand is None:
+        raise ValueError("hand is not initialized")
+    if index < 0 or index >= len(hand):
+        raise ValueError(f"quick_draw index out of range: {index} (hand size {len(hand)})")
+    card = hand[index]
+    if not card_has_quick_draw(card):
+        raise ValueError(f"'{card}' does not have [Quick-Draw]")
+    if unit_index < 0 or unit_index >= len(units):
+        raise ValueError(f"no unit to attach to at {controller}:{unit_index}")
+
+    # Pay only the CARD cost (Energy + domain Power), exactly like a normal play.
+    energy_cost = ctx.engine.card_energy_cost(card)
+    if energy_cost > ctx.engine.player_energy(ctx.actor):
+        raise ValueError(
+            f"cannot Quick-Draw '{card}': costs {energy_cost} Energy but not enough available"
+        )
+    if ctx.engine.card_power_cost(card) > 0 and not ctx.engine.can_afford_power_cost(ctx.actor, card):
+        raise ValueError(f"cannot Quick-Draw '{card}': can't afford its Power cost")
+    if energy_cost > 0:
+        ctx.engine.add_energy(ctx.actor, -energy_cost)
+    if ctx.engine.card_power_cost(card) > 0:
+        ctx.engine._deduct_power_cost(ctx.actor, card)
+
+    # Commit the gear and attach it for free — no [Equip] cost. Resolves
+    # immediately; it doesn't go on the chain.
+    hand.pop(index)
+    ctx.engine._backfill_unit_uids()
+    gear = PlayedGear(card=card, location="base", exhausted=False)
+    gear.attached_uid = units[unit_index].uid
+    gear.attached_to = f"{controller}:{unit_index}"
+    gear.attached_on_turn = gs.total_turn_number
+    gears.append(gear)
 
 
 @register_turn_action("move_unit")
@@ -1676,11 +1800,13 @@ def _assign_damage(ctx: ActionTurnContext) -> None:
         if pc.player_1_targets is not None:
             raise ValueError("player_1 has already committed their damage for this combat")
         opponent_units = gs.player_2_units
+        opp_controller = "player_2"
         budget = pc.player_1_might
     else:
         if pc.player_2_targets is not None:
             raise ValueError("player_2 has already committed their damage for this combat")
         opponent_units = gs.player_1_units
+        opp_controller = "player_1"
         budget = pc.player_2_might
 
     # Gather every assignable enemy unit (at the BF, with a Might value).
@@ -1690,10 +1816,12 @@ def _assign_damage(ctx: ActionTurnContext) -> None:
     for i, u in enumerate(opponent_units):
         if u.location != pc.battlefield:
             continue
-        m = card_might_of(u.card)
-        if m is None:
+        if card_might_of(u.card) is None:
             continue
-        bf_targets[i] = max(m, 1)
+        # Lethal cost = CURRENT Might (printed + buffs + attached equipment),
+        # floored at 1 — the SAME value the option enumeration used, so the
+        # commit can't disagree with what was offered.
+        bf_targets[i] = max(ctx.engine.effective_unit_might(opp_controller, i), 1)
 
     # Validate every target: assignable, and total Might within budget.
     total_cost = 0

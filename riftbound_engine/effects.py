@@ -440,13 +440,82 @@ def _enemy_units_minus_3_min_1(ctx: EffectContext) -> None:
     """Thousand-Tailed Watcher: every ENEMY unit gets -3 Might, but a unit
     can't be reduced below 1 (and a unit already at/below 1 is untouched —
     the floor only caps the reduction, it never buffs)."""
-    from .csv_data import card_might_of
     from .engine import RequiredTo
 
     opp = ctx.engine.opponent_of(ctx.controller)
     gs = ctx.engine._game_state
     units = gs.player_1_units if opp == RequiredTo.PLAYER_1 else gs.player_2_units
-    for unit in units:
-        effective = (card_might_of(unit.card) or 0) + unit.bonus_might
+    for i, unit in enumerate(units):
+        # CURRENT Might includes buffs AND attached-equipment grants, so the
+        # -3 (floored at 1) reduces against the unit's real in-play Might.
+        effective = ctx.engine.effective_unit_might(opp.value, i)
         reduction = max(0, min(3, effective - 1))  # cap so might floors at 1
         unit.bonus_might -= reduction
+
+
+# --------------------------------------------------------------------------- #
+# Equipment self-effects. These resolve from an ``equip:<ctrl>:<gidx>:<huid>``
+# source token (see GameEngine._abilities_in_play) so "this" = the gear and
+# "self" = the equipped unit, addressed by stable uid.
+# --------------------------------------------------------------------------- #
+def _parse_equip_source(source: str | None) -> tuple[str, int, int] | None:
+    """``"equip:<controller>:<gear-index>:<host-uid>"`` → (controller, gidx, huid)."""
+    if not source or not source.startswith("equip:"):
+        return None
+    parts = source.split(":")
+    if len(parts) != 4:
+        return None
+    _, ctrl, gidx_s, huid_s = parts
+    if ctrl not in ("player_1", "player_2") or not gidx_s.isdigit() or not huid_s.lstrip("-").isdigit():
+        return None
+    return ctrl, int(gidx_s), int(huid_s)
+
+
+def _self_unit(ctx: EffectContext) -> tuple[str, int] | None:
+    """Resolve the 'self' unit for an effect-text ability: the equipped unit
+    (via the equip token's host uid) or, if the source is a plain unit ref, that
+    unit. ``None`` if it can't be located (e.g. it left play)."""
+    parsed = _parse_equip_source(ctx.source)
+    if parsed is not None:
+        return ctx.engine._unit_by_uid(parsed[2])
+    ref = ctx.source
+    if ref and ":" in ref and not ref.startswith("equip:"):
+        _, idx, unit = _resolve_unit(ctx.engine, ref)
+        if unit is not None:
+            return (ref.split(":", 1)[0], idx)
+    return None
+
+
+@register_effect("UNATTACH_THIS")
+def _unattach_this(ctx: EffectContext) -> None:
+    """Detach the equipment that owns this ability from its unit (Blighted
+    Battleaxe's end-of-turn cleanup)."""
+    parsed = _parse_equip_source(ctx.source)
+    if parsed is None:
+        return
+    ctrl, gidx, _huid = parsed
+    gs = ctx.engine._game_state
+    gears = gs.player_1_gears if ctrl == "player_1" else gs.player_2_gears
+    if 0 <= gidx < len(gears):
+        gears[gidx].attached_uid = None
+        gears[gidx].attached_to = None
+        gears[gidx].attached_on_turn = None
+
+
+@register_effect_pattern(r"DEAL_\d+_SELF")
+def _deal_n_self(ctx: EffectContext) -> None:
+    """Deal N damage to the ability's SELF unit (the equipped unit for an
+    equipment). With no persistent-damage model, N kills the unit iff it meets
+    its CURRENT Might (the same lethal rule combat uses); less than that does
+    nothing. Resolves the host by stable uid, so it's order-independent with
+    UNATTACH_THIS."""
+    m = re.fullmatch(r"DEAL_(\d+)_SELF", ctx.code)
+    if m is None:
+        return
+    amount = int(m.group(1))
+    loc = _self_unit(ctx)
+    if loc is None:
+        return
+    ctrl, idx = loc
+    if amount >= ctx.engine.effective_unit_might(ctrl, idx):
+        ctx.engine._kill_unit(ctrl, idx)

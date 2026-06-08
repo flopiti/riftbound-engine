@@ -537,6 +537,15 @@ def card_is_equipment(name: str) -> bool:
     )
 
 
+def card_has_quick_draw(name: str) -> bool:
+    """Whether an Equipment carries ``[Quick-Draw]`` — it gains [Reaction]
+    timing AND, when played this way, attaches to a unit you control for FREE
+    (you pay only the card cost, not the [Equip] cost). Read from the ability
+    text. (Jax, Unmatched granting Quick-Draw to all your equipment is a
+    separate keyword-grant passive, not modelled here.)"""
+    return card_is_equipment(name) and "[quick-draw]" in card_ability_of(name).lower()
+
+
 _RUNE_DOMAINS = ("fury", "calm", "mind", "body", "chaos", "order")
 _EQUIP_ENERGY_RE = re.compile(r"(\d+)\s*energy", re.IGNORECASE)
 _EQUIP_DOMAIN_RE = re.compile(

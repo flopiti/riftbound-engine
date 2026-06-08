@@ -99,6 +99,10 @@ TRIGGER_EVENT_MAP: dict[str, TriggerSpec] = {
     # --- start of a turn ----------------------------------------------------
     "AT_START_BEGGINNING_PHASE": TriggerSpec(TURN_START, FRIENDLY),
     "AT_START_EACH_FIRST_BEGGINNING_PHASE": TriggerSpec(TURN_START, FRIENDLY),
+    # --- end of a turn ------------------------------------------------------
+    # The owner's own turn ending (e.g. Blighted Battleaxe's end-of-turn
+    # unattach + self-damage).
+    "AT_END_OF_TURN": TriggerSpec(TURN_END, FRIENDLY),
 }
 
 

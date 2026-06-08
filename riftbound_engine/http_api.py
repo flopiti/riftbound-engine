@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import multiprocessing as mp
 import os
+import queue as _queue
 import random
 import re
 import threading
@@ -15,7 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .action_label import label_for_action
-from .csv_data import card_domains_of, card_energy_of, card_power_of
+from .abilities import attached_might_bonus
+from .csv_data import card_domains_of, card_energy_of, card_might_of, card_power_of
 from .deck_files import DECKS_DIR, deck_file_path, list_deck_ids, load_deck_file
 from .engine import Deck, EngineOutput, GameEngine, GameState, RequiredTo
 from .fake_fill import (
@@ -35,11 +38,60 @@ from .saved_games import (
     list_saved_games,
     update_saved_game,
 )
+from .search import SearchResult, bfs_search, evaluate_predicate, state_view
+
+
+def _search_worker(start, predicate, max_depth, node_budget, time_budget_s, out_q):
+    """Run the brute-force search in a CHILD process so a pathological engine
+    state (e.g. a deep combat exploration that loops) can be hard-killed via
+    timeout instead of freezing the request thread."""
+    try:
+        out_q.put(
+            bfs_search(
+                start,
+                predicate,
+                max_depth=max_depth,
+                node_budget=node_budget,
+                time_budget_s=time_budget_s,
+                verbose=True,
+            )
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        out_q.put(e)
+
+
+def _run_search_guarded(start, predicate, max_depth, node_budget, time_budget_s) -> SearchResult:
+    """Run bfs_search in a child process; if it overruns its time budget (or
+    hangs in an engine edge case), terminate it and report not-found rather
+    than blocking forever."""
+    # 'fork' (not 'spawn'): the child is a memory copy — no module re-import
+    # (which would re-run uvicorn/__main__) — and a forked CPU-bound child is
+    # reliably killed by terminate() between bytecodes.
+    ctx = mp.get_context("fork")
+    out_q = ctx.Queue()
+    proc = ctx.Process(
+        target=_search_worker,
+        args=(start, predicate, max_depth, node_budget, time_budget_s, out_q),
+        daemon=True,
+    )
+    proc.start()
+    try:
+        result = out_q.get(timeout=time_budget_s + 15)
+    except _queue.Empty:
+        result = SearchResult(found=False, reason="search timed out / hung — killed")
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+        proc.join(timeout=2)
+    if isinstance(result, Exception):
+        return SearchResult(found=False, reason=f"search error: {result}")
+    return result
 from .shortcuts import (
     Shortcut,
     compute_equip_intents,
     compute_move_intents,
     compute_play_intents,
+    compute_quick_draw_intents,
     compute_repeat_intents,
     compute_shortcuts,
     serialize_play_intent,
@@ -118,6 +170,11 @@ _branch_visited: set[str] = set()
 # Monotonic counter — total forward clicks in this session, independent of
 # rewinds. Powers the "Visited N" header chip.
 _branch_nodes_visited: int = 0
+
+# A throwaway scratch engine the AI agent drives WITHOUT touching the live
+# game/branch. The reach flow explores moves here, then applies only the final
+# sequence to the live branch in one shot (see /sandbox/* + /branch/apply-sequence).
+_sandbox: GameEngine | None = None
 
 
 def _branch_path_key(steps: list[BranchStep]) -> str:
@@ -871,6 +928,20 @@ def _serialize_hand_costs(hand: list[str] | None) -> list[dict[str, Any]]:
     return out
 
 
+def _gear_attached_ref(gs: GameState, gear) -> str | None:
+    """The host unit's CURRENT ``"controller:index"`` for a gear, resolved from
+    its stable ``attached_uid`` — or None if unequipped / the host has left
+    play. Keeps the UI's attachment display correct after units shift indices."""
+    uid = getattr(gear, "attached_uid", None)
+    if not uid:
+        return None
+    for controller, units in (("player_1", gs.player_1_units), ("player_2", gs.player_2_units)):
+        for i, u in enumerate(units):
+            if getattr(u, "uid", 0) == uid:
+                return f"{controller}:{i}"
+    return None
+
+
 def _serialize_state(gs: GameState) -> dict[str, Any]:
     return {
         "counter": gs.counter,
@@ -916,12 +987,30 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
         "player_1_hand_costs": _serialize_hand_costs(gs.player_1_hand),
         "player_2_hand_costs": _serialize_hand_costs(gs.player_2_hand),
         "player_1_units": [
-            {"card": u.card, "location": u.location, "exhausted": u.exhausted, "bonus_might": u.bonus_might}
-            for u in gs.player_1_units
+            {
+                "card": u.card,
+                "location": u.location,
+                "exhausted": u.exhausted,
+                "bonus_might": u.bonus_might,
+                # CURRENT Might shown on the board = printed + buffs + Might
+                # granted by EFFECT-TEXT equipment attached to this unit.
+                "effective_might": (card_might_of(u.card) or 0)
+                + u.bonus_might
+                + attached_might_bonus(gs.player_1_gears, f"player_1:{i}", gs.total_turn_number),
+            }
+            for i, u in enumerate(gs.player_1_units)
         ],
         "player_2_units": [
-            {"card": u.card, "location": u.location, "exhausted": u.exhausted, "bonus_might": u.bonus_might}
-            for u in gs.player_2_units
+            {
+                "card": u.card,
+                "location": u.location,
+                "exhausted": u.exhausted,
+                "bonus_might": u.bonus_might,
+                "effective_might": (card_might_of(u.card) or 0)
+                + u.bonus_might
+                + attached_might_bonus(gs.player_2_gears, f"player_2:{i}", gs.total_turn_number),
+            }
+            for i, u in enumerate(gs.player_2_units)
         ],
         "player_1_spells": [
             {
@@ -942,11 +1031,23 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
             for s in gs.player_2_spells
         ],
         "player_1_gears": [
-            {"card": g.card, "location": g.location, "exhausted": g.exhausted, "attached_to": g.attached_to}
+            {
+                "card": g.card,
+                "location": g.location,
+                "exhausted": g.exhausted,
+                # Recomputed from the stable uid so it's the host's CURRENT
+                # position (or None if the host has left play).
+                "attached_to": _gear_attached_ref(gs, g),
+            }
             for g in gs.player_1_gears
         ],
         "player_2_gears": [
-            {"card": g.card, "location": g.location, "exhausted": g.exhausted, "attached_to": g.attached_to}
+            {
+                "card": g.card,
+                "location": g.location,
+                "exhausted": g.exhausted,
+                "attached_to": _gear_attached_ref(gs, g),
+            }
             for g in gs.player_2_gears
         ],
         # Dead units (e.g. killed in combat), by card name, in death order.
@@ -1116,6 +1217,7 @@ def _serialize_output(out: EngineOutput) -> dict[str, Any]:
             *compute_play_intents(_engine, RequiredTo.PLAYER_1),
             *compute_move_intents(_engine, RequiredTo.PLAYER_1),
             *compute_equip_intents(_engine, RequiredTo.PLAYER_1),
+            *compute_quick_draw_intents(_engine, RequiredTo.PLAYER_1),
             *compute_repeat_intents(_engine, RequiredTo.PLAYER_1),
         )
     ]
@@ -1125,6 +1227,7 @@ def _serialize_output(out: EngineOutput) -> dict[str, Any]:
             *compute_play_intents(_engine, RequiredTo.PLAYER_2),
             *compute_move_intents(_engine, RequiredTo.PLAYER_2),
             *compute_equip_intents(_engine, RequiredTo.PLAYER_2),
+            *compute_quick_draw_intents(_engine, RequiredTo.PLAYER_2),
             *compute_repeat_intents(_engine, RequiredTo.PLAYER_2),
         )
     ]
@@ -1171,6 +1274,33 @@ def _serialize_branch() -> dict[str, Any]:
         # an unrelated random game.
         "shuffle_seed": _last_shuffle_seed,
         "snapshot": get_snapshot(),
+    }
+
+
+def _engine_snapshot(engine: GameEngine) -> dict[str, Any]:
+    """Legal-move + state snapshot for an ARBITRARY engine (e.g. the sandbox),
+    in the same shape /branch's snapshot uses: state + per-player options +
+    play intents. Lets the agent read a forked engine's moves without touching
+    the live game."""
+    out = engine.start()
+
+    def _intents(actor: RequiredTo) -> list[dict[str, Any]]:
+        return [
+            serialize_play_intent(i)
+            for i in (
+                *compute_play_intents(engine, actor),
+                *compute_move_intents(engine, actor),
+                *compute_equip_intents(engine, actor),
+                *compute_repeat_intents(engine, actor),
+            )
+        ]
+
+    return {
+        "state": _serialize_state(engine.game_state),
+        "player_1_options": list(out.player_1_options),
+        "player_2_options": list(out.player_2_options),
+        "player_1_intents": _intents(RequiredTo.PLAYER_1),
+        "player_2_intents": _intents(RequiredTo.PLAYER_2),
     }
 
 
@@ -1248,6 +1378,27 @@ class BranchBackBody(BaseModel):
     at the initial post-fake-fill counter)."""
 
     steps: int = Field(..., gt=0, description="number of path entries to remove")
+
+
+class BranchSearchBody(BaseModel):
+    """Brute-force search for a move path to a target state, then replay it
+    onto the live branch. ``predicate`` is the JSON match spec evaluated by
+    ``search.evaluate_predicate`` (see that module for the grammar)."""
+
+    predicate: dict[str, Any] = Field(..., description="goal predicate (JSON match spec)")
+    max_depth: int = Field(default=14, ge=1, le=160, description="max plies to explore")
+    node_budget: int = Field(default=20000, ge=1, le=500000, description="max nodes to expand")
+    time_budget_s: float = Field(default=20.0, gt=0, le=120, description="wall-clock cap (seconds)")
+    label: str = Field(default="AI search", description="label for the single branch node")
+
+
+class ApplySequenceBody(BaseModel):
+    """Apply a whole pre-computed atomic-action sequence to the LIVE engine and
+    record it as ONE branch node (used to land an AI-found state in one shot,
+    no move-by-move stepping)."""
+
+    steps: list[BranchChainStep] = Field(default_factory=list, description="atomic {actor,action} in order")
+    label: str = Field(default="AI: reach", description="label for the single branch node")
 
 
 class FakeFillUpdateBody(BaseModel):
@@ -1600,6 +1751,174 @@ def create_app() -> FastAPI:
                 _branch_visited.add(_branch_path_key(_branch_path[:i]))
 
             _branch_nodes_visited += 1
+            return _serialize_branch()
+
+    @app.post("/branch/search")
+    def branch_search(body: BranchSearchBody) -> dict[str, Any]:
+        """Brute-force the game tree (no AI) for the SHORTEST legal move path
+        whose resulting state satisfies ``predicate``, starting from a CLEAN
+        game (the turn-1 root, nothing played), then REPLAY that path onto a
+        freshly-reset branch so the tree/board land at the target.
+
+        Searching from the clean root (not the current live position) is
+        deliberate: this is a "generate an example reaching state X" tool, so
+        each call starts from a fresh game. Searching from the drifted live
+        state would compound prior searches until the game ran out of legal
+        moves (explored=1, frontier=0). Returns the transcript and stats."""
+        global _branch_path, _branch_states, _branch_visited, _branch_nodes_visited, _last_output
+        with _engine_lock:
+            # Start from the clean root when we have it; fall back to the live
+            # state only if setup somehow never captured a root.
+            start = copy.deepcopy(
+                _initial_state if _initial_state is not None else _engine.game_state
+            )
+            result = bfs_search(
+                start,
+                body.predicate,
+                max_depth=body.max_depth,
+                node_budget=body.node_budget,
+                time_budget_s=body.time_budget_s,
+                verbose=True,
+            )
+            steps_out: list[dict[str, Any]] = []
+            if result.found and result.moves:
+                # Reset the live engine + branch to the clean root the search
+                # ran from, so the example we land is exactly the path found
+                # (and doesn't pile onto whatever branch was there before).
+                if _initial_state is not None:
+                    _restore_state(_initial_state)
+                    _reset_branch_tree()
+                    _branch_states = []
+                # Apply the found path and record each move as its OWN real
+                # branch node — exactly the nodes you'd get by clicking those
+                # moves yourself. The search ran silently off to the side, so
+                # you never watched it step; what lands on the tree is just the
+                # finished sequence of REAL game moves, with the current
+                # position at the end (the target). There is intentionally NO
+                # "AI"/prompt node: the goal text is not a game action and must
+                # never appear on the tree. Because every step is a genuine
+                # node you can walk backward/forward through the actual states.
+                for move in result.moves:
+                    try:
+                        for actor, action in move.steps:
+                            _last_output = _engine.apply_action(action=action, actor=actor)
+                        _last_output = _auto_fake_fill(_engine, _last_output)
+                    except ValueError as e:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"replay of '{move.label}' failed: {e}",
+                        ) from e
+                    saved = _capture_state()
+                    step: BranchStep = {
+                        "actor": move.actor,
+                        "action": move.label,
+                        "label": move.label,
+                        "intent_only": False,
+                        "shortcut": None,
+                        "intent": None,
+                        "chain": [
+                            {"actor": actor.value, "action": action}
+                            for actor, action in move.steps
+                        ],
+                    }
+                    _branch_path = [*_branch_path, step]
+                    _branch_states = [*_branch_states, saved]
+                    steps_out.append({"actor": move.actor, "label": move.label})
+                for i in range(1, len(_branch_path) + 1):
+                    _branch_visited.add(_branch_path_key(_branch_path[:i]))
+                _branch_nodes_visited = len(_branch_path)
+            return {
+                "found": result.found,
+                "depth": result.depth,
+                "nodes_explored": result.nodes_explored,
+                "reason": result.reason,
+                "steps": steps_out,
+                "branch": _serialize_branch(),
+            }
+
+    @app.post("/branch/check")
+    def branch_check(body: BranchSearchBody) -> dict[str, Any]:
+        """Does the CURRENT live state satisfy ``predicate``? Used by the
+        agent fallback as a deterministic 'are we there yet' test."""
+        with _engine_lock:
+            return {"satisfied": evaluate_predicate(body.predicate, state_view(_engine.game_state))}
+
+    # --- Sandbox: a forked engine the agent drives WITHOUT touching the live
+    #     game/branch. Reach explores here, then commits the final sequence in
+    #     one shot via /branch/apply-sequence. -----------------------------------
+    @app.post("/sandbox/start")
+    def sandbox_start() -> dict[str, Any]:
+        """Fork the current live state into the scratch sandbox and return its
+        legal-move snapshot. The live game is untouched."""
+        global _sandbox
+        with _engine_lock:
+            _sandbox = GameEngine(game_state=copy.deepcopy(_engine.game_state))
+            return {"snapshot": _engine_snapshot(_sandbox)}
+
+    @app.post("/sandbox/forward")
+    def sandbox_forward(body: BranchForwardBody) -> dict[str, Any]:
+        """Apply one move (raw action or expanded chain) to the SANDBOX and
+        return its new snapshot. Never touches the live game."""
+        with _engine_lock:
+            if _sandbox is None:
+                raise HTTPException(status_code=400, detail="no sandbox; call /sandbox/start first")
+            if body.chain:
+                steps = [(RequiredTo(s.actor), s.action) for s in body.chain]
+            else:
+                steps = [(RequiredTo(body.actor), body.action)]
+            try:
+                for actor, action in steps:
+                    _sandbox.apply_action(action=action, actor=actor)
+                    _sandbox.start()  # settle ABCD (e.g. after end_turn) before the next move
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            return {"snapshot": _engine_snapshot(_sandbox)}
+
+    @app.post("/sandbox/check")
+    def sandbox_check(body: BranchSearchBody) -> dict[str, Any]:
+        """Does the SANDBOX state satisfy ``predicate``?"""
+        with _engine_lock:
+            if _sandbox is None:
+                raise HTTPException(status_code=400, detail="no sandbox; call /sandbox/start first")
+            return {"satisfied": evaluate_predicate(body.predicate, state_view(_sandbox.game_state))}
+
+    @app.post("/branch/apply-sequence")
+    def branch_apply_sequence(body: ApplySequenceBody) -> dict[str, Any]:
+        """Apply a full atomic-action sequence to the LIVE engine and record it
+        as ONE branch node — landing an AI-found state in a single step (no
+        move-by-move stepping in the UI)."""
+        global _branch_path, _branch_states, _branch_visited, _branch_nodes_visited, _last_output, _sandbox
+        with _engine_lock:
+            chain: list[dict[str, str]] = []
+            for s in body.steps:
+                try:
+                    actor = RequiredTo(s.actor)
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=f"bad actor {s.actor}") from e
+                try:
+                    _last_output = _engine.apply_action(action=s.action, actor=actor)
+                    _last_output = _engine.start()  # settle between steps (turn boundaries)
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=f"apply '{s.action}': {e}") from e
+                chain.append({"actor": s.actor, "action": s.action})
+            _last_output = _auto_fake_fill(_engine, _last_output)
+            primary_actor = body.steps[0].actor if body.steps else _engine.game_state.current_player.value
+            saved = _capture_state()
+            step: BranchStep = {
+                "actor": primary_actor,
+                "action": body.label,
+                "label": body.label,
+                "intent_only": False,
+                "shortcut": None,
+                "intent": None,
+                "chain": chain,
+            }
+            _branch_path = [*_branch_path, step]
+            _branch_states = [*_branch_states, saved]
+            for i in range(1, len(_branch_path) + 1):
+                _branch_visited.add(_branch_path_key(_branch_path[:i]))
+            _branch_nodes_visited += 1
+            _sandbox = None  # done with the scratch engine
             return _serialize_branch()
 
     @app.post("/branch/back")
