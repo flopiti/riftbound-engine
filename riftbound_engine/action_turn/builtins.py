@@ -1602,7 +1602,7 @@ def _resolve_showdown(ctx: ActionTurnContext) -> None:
         else:
             gs.battlefield_2_controller = winner
         if previous_controller != winner:
-            ctx.engine.award_bf_point(winner, bf)
+            ctx.engine.award_bf_point(winner, bf, via="conquer")
     else:
         if bf == "battlefield_1":
             gs.battlefield_1_controller = None
@@ -1832,6 +1832,85 @@ def _exhaust_and_recycle_rune(ctx: ActionTurnContext) -> None:
     ctx.engine.add_power(ctx.actor, domain, 1)
 
 
+#: The six real (non-Colorless) domains a rune/Power can belong to. A Gold
+#: token's "[Add] 1 rune of any type" lets the controller produce 1 Power of
+#: any one of these. Mirrors shortcuts._ALL_DOMAINS.
+_GOLD_DOMAINS: tuple[str, ...] = ("Fury", "Calm", "Mind", "Body", "Chaos", "Order")
+
+
+@register_turn_action("use_gold")
+def _use_gold(ctx: ActionTurnContext) -> None:
+    """Activate a Gold gear token: "Kill this, exhaust: [Add] 1 Power of any
+    domain."
+
+    Payload is ``<gear_index>:<Domain>`` (e.g. ``play:use_gold:0:Fury``). The
+    token at ``gear_index`` must be one the actor controls, be a ``Gold`` token,
+    and be **ready** (a token played exhausted can't be used until it readies on
+    the owner's Awake step). Using it pays the printed cost — the token is
+    KILLED (removed from play; tokens cease to exist rather than going to trash)
+    and it would exhaust (moot, since it's leaving play) — and adds 1 Power of
+    the chosen domain to the actor's pool for this turn.
+
+    Action-timing only: like playing a gear, it can't be slipped in while a
+    play/spell/chain/showdown/combat is mid-resolution.
+    """
+    from ..engine import RequiredTo as RT
+
+    payload = ctx.payload.strip()
+    parts = payload.split(":")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(
+            "play:use_gold requires '<gear_index>:<domain>' "
+            "(e.g. play:use_gold:0:Fury)"
+        )
+    try:
+        index = int(parts[0])
+    except ValueError as e:
+        raise ValueError(
+            f"play:use_gold gear index must be an integer, got {parts[0]!r}"
+        ) from e
+    domain = parts[1].strip()
+    if domain not in _GOLD_DOMAINS:
+        raise ValueError(
+            f"play:use_gold domain must be one of {', '.join(_GOLD_DOMAINS)}, "
+            f"got {domain!r}"
+        )
+
+    gs = ctx.engine._game_state
+    if gs.pending_play is not None:
+        raise ValueError("a play is waiting for a location; choose one first")
+    if gs.pending_spell_choice is not None:
+        raise ValueError("a spell is waiting for target selection; choose its targets first")
+    if gs.pending_chain is not None:
+        raise ValueError("the chain is open; pass priority until it resolves")
+    if gs.pending_showdown is not None:
+        raise ValueError("a showdown is in progress; resolve it first")
+    if gs.pending_combat is not None:
+        raise ValueError("a contested showdown is in combat; commit your kills first")
+
+    if ctx.actor == RT.PLAYER_1:
+        gears = gs.player_1_gears
+    elif ctx.actor == RT.PLAYER_2:
+        gears = gs.player_2_gears
+    else:
+        raise ValueError("use_gold requires player_1 or player_2")
+
+    if index < 0 or index >= len(gears):
+        raise ValueError(f"use_gold index out of range: {index} (gear count {len(gears)})")
+    gear = gears[index]
+    if gear.card != "Gold":
+        raise ValueError(f"gear at index {index} is '{gear.card}', not a Gold token")
+    if gear.exhausted:
+        raise ValueError(
+            f"Gold token at index {index} is exhausted — it can only be used while ready"
+        )
+
+    # Pay the cost (kill the token — tokens leave the game, not to trash) and
+    # produce the Power.
+    gears.pop(index)
+    ctx.engine.add_power(ctx.actor, domain, 1)
+
+
 @register_turn_action("assign_damage")
 def _assign_damage(ctx: ActionTurnContext) -> None:
     """Commit one player's combat damage assignment in a PendingCombat.
@@ -1969,7 +2048,7 @@ def _assign_damage(ctx: ActionTurnContext) -> None:
             else:
                 gs.battlefield_2_controller = winner
             if previous_controller != winner:
-                ctx.engine.award_bf_point(winner, bf)
+                ctx.engine.award_bf_point(winner, bf, via="conquer")
         else:
             # Both sides wiped — BF goes neutral.
             if bf == "battlefield_1":

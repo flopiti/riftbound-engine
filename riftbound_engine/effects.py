@@ -163,6 +163,13 @@ def _rune_pool(engine, who) -> list:
     return gs.player_1_runes if who == RequiredTo.PLAYER_1 else gs.player_2_runes
 
 
+def _gears(engine, who) -> list:
+    from .engine import RequiredTo
+
+    gs = engine._game_state
+    return gs.player_1_gears if who == RequiredTo.PLAYER_1 else gs.player_2_gears
+
+
 def _rune_library(engine, who) -> list | None:
     from .engine import RequiredTo
 
@@ -239,6 +246,21 @@ def _draw_1(ctx: EffectContext) -> None:
 @register_effect("SCORE_1_POINT")
 def _score_1(ctx: EffectContext) -> None:
     ctx.engine.add_score(ctx.controller, 1)
+
+
+@register_effect("PLAY_GOLD_EXHAUSTED")
+def _play_gold_exhausted(ctx: EffectContext) -> None:
+    """Create a Gold gear token (a Colorless Gear token) under the controller,
+    entering EXHAUSTED at their base. The token carries its own activated
+    ability ("Kill this, exhaust: Add 1 Power of any domain"), which the engine
+    exposes as the ``play:use_gold`` action once the token is ready (it readies
+    on the controller's next Awake step). Used by Plundering Poro and other
+    Gold-token producers."""
+    from .engine import PlayedGear
+
+    _gears(ctx.engine, ctx.controller).append(
+        PlayedGear(card="Gold", location="base", exhausted=True)
+    )
 
 
 @register_effect("CHANNEL_1_RUNE")

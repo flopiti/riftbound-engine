@@ -30,7 +30,15 @@ from dataclasses import dataclass, field
 ON_PLAY_UNIT = "ON_PLAY_UNIT"
 ON_PLAY_SPELL = "ON_PLAY_SPELL"
 ON_DEATH = "ON_DEATH"
+#: A battlefield is CONQUERED — control of it changes hands (showdown win or an
+#: uncontested move-in). Distinct from holding it across turns.
 ON_CONQUER = "ON_CONQUER"
+#: A battlefield is HELD — the active player still controls it at their
+#: beginning phase (it did NOT change hands; they kept it since last turn).
+ON_HOLD = "ON_HOLD"
+#: A point is SCORED at a battlefield — fires for ANY point, whether it came
+#: from conquering or holding. ("Score here" cares only that a point landed.)
+ON_SCORE = "ON_SCORE"
 TURN_START = "TURN_START"
 TURN_END = "TURN_END"
 ON_CHANNEL = "ON_CHANNEL"
@@ -42,6 +50,8 @@ EVENT_KINDS = frozenset(
         ON_PLAY_SPELL,
         ON_DEATH,
         ON_CONQUER,
+        ON_HOLD,
+        ON_SCORE,
         TURN_START,
         TURN_END,
         ON_CHANNEL,
@@ -92,10 +102,14 @@ TRIGGER_EVENT_MAP: dict[str, TriggerSpec] = {
     "WHEN_FRIENDLY_UNIT_DIES": TriggerSpec(ON_DEATH, FRIENDLY),
     "IF_UNIT_DIE_COMBAT": TriggerSpec(ON_DEATH, ANY),
     # --- a battlefield is conquered / scored / held -------------------------
+    # These three are now DISTINCT events (previously all mapped to ON_CONQUER,
+    # which made conquer/hold triggers fire on each other and forced the planner
+    # to exclude them). CONQUER = control changed hands; HOLD = kept it across
+    # turns at the beginning phase; SCORE = any point landed (either source).
     "WHEN_I_CONQUER": TriggerSpec(ON_CONQUER, FRIENDLY),
     "WHEN_CONQUER_HERE": TriggerSpec(ON_CONQUER, HERE),
-    "WHEN_SCORE_HERE": TriggerSpec(ON_CONQUER, HERE),
-    "WHEN_HOLD_HERE": TriggerSpec(ON_CONQUER, HERE),
+    "WHEN_HOLD_HERE": TriggerSpec(ON_HOLD, HERE),
+    "WHEN_SCORE_HERE": TriggerSpec(ON_SCORE, HERE),
     # --- start of a turn ----------------------------------------------------
     "AT_START_BEGGINNING_PHASE": TriggerSpec(TURN_START, FRIENDLY),
     "AT_START_EACH_FIRST_BEGGINNING_PHASE": TriggerSpec(TURN_START, FRIENDLY),

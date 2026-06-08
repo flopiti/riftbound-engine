@@ -1278,21 +1278,31 @@ class GameEngine:
         else:
             raise ValueError("add_score requires player_1 or player_2")
 
-    def award_bf_point(self, actor: RequiredTo, battlefield: str) -> bool:
+    def award_bf_point(
+        self, actor: RequiredTo, battlefield: str, *, via: str = "conquer"
+    ) -> bool:
         """Award ``actor`` 1 point for ``battlefield`` if it hasn't already
         scored this turn. Returns ``True`` when a point was awarded, ``False``
         when the per-BF-per-turn cap suppressed it.
 
         Used by both B-phase HOLD scoring and showdown wins so the cap is
-        enforced uniformly regardless of source.
+        enforced uniformly regardless of source. ``via`` says WHICH it is:
+
+          * ``"conquer"`` — control changed hands → fire ON_CONQUER.
+          * ``"hold"``    — kept across turns at the beginning phase → ON_HOLD.
+
+        Either way a point landed, so ON_SCORE fires too — that's the event
+        "score here" triggers listen for (any point, regardless of source).
         """
         if battlefield in self._game_state.scored_bfs_this_turn:
             return False
         self._game_state.scored_bfs_this_turn.add(battlefield)
         self.add_score(actor, 1)
-        # Conquer/hold/score-here triggers fire when the point lands.
+        # The conquer/hold-specific event first, then the generic score event.
+        kind = "ON_HOLD" if via == "hold" else "ON_CONQUER"
+        self._emit(GameEvent(kind=kind, controller=actor.value, battlefield=battlefield))
         self._emit(
-            GameEvent(kind="ON_CONQUER", controller=actor.value, battlefield=battlefield)
+            GameEvent(kind="ON_SCORE", controller=actor.value, battlefield=battlefield)
         )
         return True
 
@@ -2639,9 +2649,9 @@ class GameEngine:
             # is enforced via award_bf_point — same cap applies if the same
             # battlefield later changes hands and scores via showdown.
             if gs.battlefield_1_controller == actor:
-                self.award_bf_point(actor, "battlefield_1")
+                self.award_bf_point(actor, "battlefield_1", via="hold")
             if gs.battlefield_2_controller == actor:
-                self.award_bf_point(actor, "battlefield_2")
+                self.award_bf_point(actor, "battlefield_2", via="hold")
             gs.abcd_b_done = True
         elif key == "c":
             if not gs.abcd_b_done:
@@ -3103,6 +3113,19 @@ class GameEngine:
                 # chain produces the [Equip] cost from runes and then applies
                 # play:equip. The raw play:equip action handler still validates
                 # + pays when that chain runs. See shortcuts.py.
+
+                # Gold gear tokens: each READY one can be killed+exhausted to add
+                # 1 Power of any domain (action_turn/builtins.py::_use_gold). One
+                # option per (token, domain) so the chooser picks the colour.
+                active_gears = (
+                    self._game_state.player_1_gears
+                    if active == RequiredTo.PLAYER_1
+                    else self._game_state.player_2_gears
+                )
+                for gi, gear in enumerate(active_gears):
+                    if gear.card == "Gold" and not gear.exhausted:
+                        for dom in ("Fury", "Calm", "Mind", "Body", "Chaos", "Order"):
+                            options.append(f"play:use_gold:{gi}:{dom}")
 
                 options.append("play:end_turn")
             return EngineOutput(

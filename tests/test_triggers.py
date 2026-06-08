@@ -10,7 +10,7 @@ from unittest import mock
 from riftbound_engine import GameEngine, RequiredTo
 from riftbound_engine import abilities as A
 from riftbound_engine import effects as E
-from riftbound_engine.csv_data import card_type_of, csv_cards
+from riftbound_engine.csv_data import card_has_accelerate, card_type_of, csv_cards
 from riftbound_engine.engine import PlayedUnit, Rune
 from riftbound_engine.triggers import (
     ON_CONQUER,
@@ -300,9 +300,19 @@ class TriggeredAbilityEndToEndTests(unittest.TestCase):
         _bank(engine, RequiredTo.PLAYER_1)
         ready = engine.start()
         hand = list(ready.game_state.player_1_hand or [])
-        unit_idx = next((i for i, c in enumerate(hand) if card_type_of(c) == "Unit"), None)
+        # Pick a NON-[Accelerate] unit: an Accelerate unit opens its pay-to-ready
+        # decision after choose_location and DEFERS its on-play trigger, which
+        # this test (about on-play → chain) isn't exercising.
+        unit_idx = next(
+            (
+                i
+                for i, c in enumerate(hand)
+                if card_type_of(c) == "Unit" and not card_has_accelerate(c)
+            ),
+            None,
+        )
         if unit_idx is None:
-            self.skipTest("dealt hand contains no Unit-type cards")
+            self.skipTest("dealt hand contains no non-Accelerate Unit cards")
         unit_card = hand[unit_idx]
 
         # Force exactly this unit to carry WHEN_YOU_PLAY_ME → DRAW_1.
