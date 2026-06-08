@@ -170,6 +170,10 @@ def label_for_action(game_state: Any, actor: Any, action: str) -> str:
             else f"Exhaust & Recycle rune #{idx}"
         )
 
+    m = re.fullmatch(r"play:use_gold:(\d+):(\w+)", action)
+    if m:
+        return f"Gold token → +1 {m.group(2)} Power (kill)"
+
     m = re.fullmatch(r"play:equip:(\d+):(player_[12]):(\d+)", action)
     if m:
         gi, ctrl, ui = int(m.group(1)), m.group(2), int(m.group(3))
