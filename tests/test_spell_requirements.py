@@ -865,6 +865,10 @@ class MultiPhraseChoiceFlowTests(unittest.TestCase):
         )
         eng.apply_action(action="play:choose_spell_targets:p1-1", actor=RequiredTo.PLAYER_1)
         gs = eng._game_state
+        # Piercing Light has [Repeat] → it asks whether to repeat after the
+        # picks; decline so it lands on the chain with this round's targets.
+        self.assertIsNotNone(gs.pending_spell_repeat)
+        eng.apply_action(action="play:choose_repeat:no", actor=RequiredTo.PLAYER_1)
         self.assertEqual(gs.player_1_spells[0].targets, ["player_1:0", "player_1:1"])
 
     def test_multi_phrase_blocked_without_enough_distinct_units(self):

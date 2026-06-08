@@ -96,12 +96,18 @@ def dispatch_turn_play(engine, actor, action: str) -> None:
     holder_has_effect_choice = (
         effect_choice is not None and actor == effect_choice.actor
     )
+    # A pending [Repeat] decision belongs to the spell's caster, who may be
+    # the non-active player (a Reaction cast on the opponent's turn). Let them
+    # decide AND bank runes to pay; handlers validate the actor themselves.
+    repeat = getattr(gs, "pending_spell_repeat", None)
+    holder_has_repeat = repeat is not None and actor == repeat.actor
     if (
         verb not in _OPPONENT_OK_VERBS
         and actor != gs.current_player
         and not holder_has_priority
         and not holder_has_focus
         and not holder_has_effect_choice
+        and not holder_has_repeat
     ):
         raise ValueError("only the active player may take action-turn plays")
     if actor not in (RT.PLAYER_1, RT.PLAYER_2):

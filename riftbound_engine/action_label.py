@@ -189,6 +189,13 @@ def label_for_action(game_state: Any, actor: Any, action: str) -> str:
         unit_name = unit.card if unit else f"unit #{idx}"
         return f"Move {unit_name} from {from_label} → {to_label}"
 
+    if action == "play:choose_repeat:yes":
+        rep = getattr(gs, "pending_spell_repeat", None)
+        card = rep.card if rep else None
+        return f"Repeat {card}" if card else "Repeat spell"
+    if action == "play:choose_repeat:no":
+        return "Don't repeat"
+
     m = re.fullmatch(r"play:choose_effect_target:(.+)", action)
     if m:
         token = m.group(1)

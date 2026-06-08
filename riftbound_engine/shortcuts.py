@@ -427,6 +427,12 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         # Mid-combat the only legal actions are the damage assignments
         # surfaced by the engine — no cards may be played.
         return []
+    if getattr(gs, "pending_spell_repeat", None) is not None:
+        # A [Repeat] decision owns the clock — only the repeat picker
+        # (compute_repeat_intents) and the decline option are valid.
+        return []
+    if getattr(gs, "pending_effect_choice", None) is not None:
+        return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
         return []
     reaction_only, showdown_only = _picker_phase(gs, actor)
@@ -566,6 +572,108 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
     return out
 
 
+#: Sentinel card index for [Repeat] payment shortcuts (the repeat isn't a
+#: hand card, so it has no real index).
+REPEAT_CARD_INDEX = 10_001
+
+
+def _repeat_cost_as_plan_inputs(cost: dict) -> tuple[int, int, tuple[str, ...]]:
+    """Convert a parsed [Repeat] cost ({energy, power:{dom:n}, any_power}) into
+    the (energy_cost, power_cost, cost_domains) shape ``_plan_payments`` wants.
+
+    The 18 authored repeat costs are energy-only, energy + one specific-domain
+    rune, or energy + an any-type rune — never specific+any mixed — so this
+    maps cleanly: a specific-domain power restricts ``cost_domains`` to that
+    domain; an any-type power lets any domain pay."""
+    energy = int(cost.get("energy", 0))
+    power_map = dict(cost.get("power", {}))
+    any_power = int(cost.get("any_power", 0))
+    specific = sum(power_map.values())
+    if specific:
+        return energy, specific, tuple(power_map.keys())
+    if any_power:
+        return energy, any_power, _ALL_DOMAINS
+    return energy, 0, ()
+
+
+def _build_repeat_shortcut(
+    actor: RequiredTo, card_name: str, plan: list[ShortcutStep]
+) -> Shortcut:
+    """A payment plan for repeating ``card_name``: rune steps then
+    ``play:choose_repeat:yes``. Empty ``plan`` ⇒ already affordable from the
+    pool (the chip is a bare "Repeat", no rune cost annotation)."""
+    domain_counts = _domain_counts(plan)
+    if domain_counts:
+        plan_desc = ", ".join(f"{n} {d}" for d, n in domain_counts)
+        label = f"Repeat {card_name} ({plan_desc})"
+    else:
+        label = f"Repeat {card_name}"
+    key = _domain_multiset_key(plan) or "free"
+    return Shortcut(
+        actor=actor,
+        card_index=REPEAT_CARD_INDEX,
+        card_name=card_name,
+        play_action="repeat",
+        energy_cost=0,
+        power_cost=0,
+        cost_domains=(),
+        plan=tuple(plan),
+        domain_counts=tuple(domain_counts),
+        key=key,
+        label=label,
+        final_action="play:choose_repeat:yes",
+        synthetic=f"shortcut:repeat:{key}",
+    )
+
+
+def compute_repeat_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayIntent]:
+    """The [Repeat] payment picker: when a repeat decision is pending for
+    ``actor``, one PlayIntent ("Repeat <card>") whose combos are every valid
+    way to pay the additional cost — the SAME pre-costed chips the initial
+    cast uses. Declining is a separate flat ``play:choose_repeat:no`` option
+    surfaced by the engine, not here.
+
+    Returns [] when no repeat is pending for this actor, or when the cost
+    can't be paid at all (no affordable plan and not free from the pool) — in
+    that case only the decline option is offered."""
+    gs = engine._game_state
+    repeat = getattr(gs, "pending_spell_repeat", None)
+    if repeat is None or repeat.actor != actor:
+        return []
+
+    energy_cost, power_cost, cost_domains = _repeat_cost_as_plan_inputs(repeat.cost)
+    runes = gs.player_1_runes if actor == RequiredTo.PLAYER_1 else gs.player_2_runes
+    current_energy = gs.player_1_energy if actor == RequiredTo.PLAYER_1 else gs.player_2_energy
+    current_power = dict(
+        gs.player_1_power if actor == RequiredTo.PLAYER_1 else gs.player_2_power
+    )
+    plans = _plan_payments(
+        energy_cost, power_cost, cost_domains, list(runes), current_energy, current_power
+    )
+    if plans:
+        combos = tuple(_build_repeat_shortcut(actor, repeat.card, plan) for plan in plans)
+    elif engine.can_afford_equip_cost(actor, repeat.cost):
+        # Already affordable from the pool → a single bare "Repeat" chip whose
+        # chain is just the commit (no rune steps).
+        combos = (_build_repeat_shortcut(actor, repeat.card, []),)
+    else:
+        return []  # can't pay → only the decline option
+
+    return [
+        PlayIntent(
+            actor=actor,
+            card_index=REPEAT_CARD_INDEX,
+            card_name=repeat.card,
+            play_action="repeat",
+            energy_cost=energy_cost,
+            power_cost=power_cost,
+            cost_domains=cost_domains,
+            combos=combos,
+            synthetic="intent:repeat",
+        )
+    ]
+
+
 def _build_equip_shortcut(
     actor: RequiredTo,
     gear_index: int,
@@ -630,6 +738,8 @@ def compute_equip_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInt
         or gs.pending_spell_choice is not None
         or gs.pending_payment is not None
         or gs.pending_combat is not None
+        or getattr(gs, "pending_spell_repeat", None) is not None
+        or getattr(gs, "pending_effect_choice", None) is not None
     ):
         return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
@@ -735,6 +845,8 @@ def compute_move_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         or gs.pending_spell_choice is not None
         or gs.pending_payment is not None
         or gs.pending_combat is not None
+        or getattr(gs, "pending_spell_repeat", None) is not None
+        or getattr(gs, "pending_effect_choice", None) is not None
     ):
         return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
@@ -793,6 +905,10 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
     if gs.pending_payment is not None:
         return []
     if gs.pending_combat is not None:
+        return []
+    if getattr(gs, "pending_spell_repeat", None) is not None:
+        return []
+    if getattr(gs, "pending_effect_choice", None) is not None:
         return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
         return []
@@ -962,10 +1078,16 @@ def serialize_play_intent(i: PlayIntent) -> dict[str, Any]:
     auto-skips into combos[0].chain, otherwise the path step stores
     `intent` for the tier-2 disambiguation render."""
     verb = "Cast" if i.play_action == "play_spell" else "Play"
+    if i.play_action == "repeat":
+        label = f"Repeat {i.card_name}"
+    elif i.play_action in ("equip", "move"):
+        label = i.card_name
+    else:
+        label = f"{verb} {i.card_name}"
     return {
         "actor": i.actor.value,
         "action": i.synthetic or _intent_synthetic_action(i),
-        "label": i.card_name if i.play_action in ("equip", "move") else f"{verb} {i.card_name}",
+        "label": label,
         "card_index": i.card_index,
         "card_name": i.card_name,
         "play_action": i.play_action,

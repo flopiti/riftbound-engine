@@ -145,6 +145,10 @@ class PlayedSpell:
     card: str
     targets: list[str] = field(default_factory=list)
     order: int = 0
+    #: Extra target lists from [Repeat] rounds beyond the base cast — one inner
+    #: list per repeat the caster paid for (the base cast's targets live in
+    #: ``targets``). Empty for non-repeated spells.
+    repeat_targets: list[list[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -238,6 +242,11 @@ class PendingSpellChoice:
     #: For LOCATION phrases, the chosen location(s) ("base"/"battlefield_1"/…).
     #: Collected last, via ``play:choose_spell_location:<loc>``.
     locations: list[str] = field(default_factory=list)
+    #: Finalized target lists from PRIOR selection rounds — non-empty only when
+    #: this choice is a repeat round (the [Repeat] keyword re-opened selection
+    #: after the caster paid the additional cost). Threaded through so the
+    #: finalizer can accumulate every round's targets onto the one spell.
+    prior_rounds: list[list[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -278,6 +287,29 @@ class PendingEffectChoice:
 
 
 @dataclass
+class PendingSpellRepeat:
+    """A just-played [Repeat] spell waiting for the caster to decide whether
+    to pay the additional cost and repeat its effect.
+
+    Set after a selection round finalizes (or immediately after cast for a
+    no-target spell). While set, the caster may bank Energy/Power by
+    exhausting/recycling runes — the same "shortcut payment way" the base
+    cost is paid — and then either ``play:choose_repeat:yes`` (pay the cost,
+    re-open selection for another round) or ``play:choose_repeat:no`` (push
+    the spell, with every round's targets, onto the chain).
+
+    ``rounds`` accumulates the finalized target list from each completed
+    selection round (the base cast plus each repeat so far). ``cost`` is the
+    parsed Repeat cost (``card_repeat_cost`` shape).
+    """
+
+    actor: RequiredTo
+    card: str
+    cost: dict
+    rounds: list[list[str]] = field(default_factory=list)
+
+
+@dataclass
 class ChainItem:
     """One spell sitting on the chain (the priority stack).
 
@@ -293,6 +325,8 @@ class ChainItem:
     #: ability item (which carries an ``effect`` instead).
     card: str | None = None
     targets: list[str] = field(default_factory=list)
+    #: Extra [Repeat]-round target lists beyond the base cast (see PlayedSpell).
+    repeat_targets: list[list[str]] = field(default_factory=list)
     #: Set when this item is a TRIGGERED ABILITY rather than a cast spell.
     #: On resolution the engine runs each of ``effect.effects`` via the
     #: effect registry (see ``_resolve_chain``); a spell item (``effect is
@@ -506,6 +540,9 @@ class GameState:
     #: Set while a resolving triggered ability waits for its controller to
     #: pick an effect target (or pass). See PendingEffectChoice.
     pending_effect_choice: "PendingEffectChoice | None" = None
+    #: Set while a just-played [Repeat] spell waits for the caster to decide
+    #: whether to pay the additional cost and repeat. See PendingSpellRepeat.
+    pending_spell_repeat: "PendingSpellRepeat | None" = None
     #: The priority stack. Set the moment a spell is played and cleared when
     #: both players pass in a row (the chain resolves). While set, the player
     #: holding priority may cast a Reaction spell or `play:pass_priority`.
@@ -675,11 +712,21 @@ class GameEngine:
                 for u in self._game_state.player_2_units
             ],
             player_1_spells=[
-                PlayedSpell(card=s.card, targets=list(s.targets), order=s.order)
+                PlayedSpell(
+                    card=s.card,
+                    targets=list(s.targets),
+                    order=s.order,
+                    repeat_targets=[list(r) for r in s.repeat_targets],
+                )
                 for s in self._game_state.player_1_spells
             ],
             player_2_spells=[
-                PlayedSpell(card=s.card, targets=list(s.targets), order=s.order)
+                PlayedSpell(
+                    card=s.card,
+                    targets=list(s.targets),
+                    order=s.order,
+                    repeat_targets=[list(r) for r in s.repeat_targets],
+                )
                 for s in self._game_state.player_2_spells
             ],
             player_1_gears=[
@@ -714,6 +761,21 @@ class GameEngine:
                     trash=list(self._game_state.pending_spell_choice.trash),
                     spells=list(self._game_state.pending_spell_choice.spells),
                     locations=list(self._game_state.pending_spell_choice.locations),
+                    prior_rounds=[list(r) for r in self._game_state.pending_spell_choice.prior_rounds],
+                )
+            ),
+            pending_spell_repeat=(
+                None
+                if self._game_state.pending_spell_repeat is None
+                else PendingSpellRepeat(
+                    actor=self._game_state.pending_spell_repeat.actor,
+                    card=self._game_state.pending_spell_repeat.card,
+                    cost={
+                        "energy": int(self._game_state.pending_spell_repeat.cost.get("energy", 0)),
+                        "power": dict(self._game_state.pending_spell_repeat.cost.get("power", {})),
+                        "any_power": int(self._game_state.pending_spell_repeat.cost.get("any_power", 0)),
+                    },
+                    rounds=[list(r) for r in self._game_state.pending_spell_repeat.rounds],
                 )
             ),
             pending_effect_choice=(
@@ -740,6 +802,7 @@ class GameEngine:
                             actor=it.actor,
                             card=it.card,
                             targets=list(it.targets),
+                            repeat_targets=[list(r) for r in it.repeat_targets],
                             effect=it.effect,
                             label=it.label,
                         )
@@ -948,6 +1011,8 @@ class GameEngine:
             raise ValueError("cannot end the turn while a spell is waiting for target selection")
         if self._game_state.pending_effect_choice is not None:
             raise ValueError("cannot end the turn while an effect choice is pending")
+        if self._game_state.pending_spell_repeat is not None:
+            raise ValueError("cannot end the turn while a [Repeat] decision is pending")
         if self._game_state.pending_chain is not None:
             raise ValueError("cannot end the turn while the chain is open — resolve it first")
         # Energy and Power are per-turn: clear both players' pools so nothing
@@ -1371,10 +1436,43 @@ class GameEngine:
             return False
         return True
 
+    def offer_repeat_or_push(
+        self, actor: RequiredTo, card: str, rounds: list[list[str]]
+    ) -> None:
+        """After a selection round finalizes, branch on the [Repeat] keyword.
+
+        ``rounds`` holds the finalized target list for every selection round
+        so far (the base cast plus each repeat). If the card has a (supported)
+        Repeat cost AND it hasn't been repeated yet, pause on a repeat decision
+        (``pending_spell_repeat``); otherwise push the spell straight onto the
+        chain with all rounds. A non-repeat spell always arrives here with a
+        single round, so this is a transparent pass-through for it.
+
+        [Repeat] may be used AT MOST ONCE: the base cast plus a single repeat
+        round (two rounds total). Once two rounds have been finalized we push
+        straight to the chain instead of re-offering, so a caster can't pay to
+        repeat the same spell indefinitely."""
+        from .csv_data import card_repeat_cost
+
+        cost = card_repeat_cost(card)
+        already_repeated = len(rounds) >= 2
+        if cost is not None and not already_repeated:
+            self._game_state.pending_spell_repeat = PendingSpellRepeat(
+                actor=actor, card=card, cost=cost, rounds=[list(r) for r in rounds]
+            )
+            return
+        self._push_spell_to_chain(actor, card, rounds)
+
     def _push_spell_to_chain(
-        self, actor: RequiredTo, card: str, targets: list[str]
+        self, actor: RequiredTo, card: str, rounds: list[list[str]]
     ) -> None:
         """Put a just-played spell onto the chain and (re)open priority.
+
+        ``rounds`` is one target list per resolution the spell will get: index
+        0 is the base cast, indices 1+ are paid-for [Repeat] rounds. The base
+        targets become ``ChainItem.targets``; the extras ride along as
+        ``repeat_targets`` (recorded for when spell effects exist — today the
+        spell still resolves as a single chain item).
 
         The newest spell goes to the FRONT (``items[0]`` = top of chain).
         Priority lands on the caster and the consecutive-pass counter resets
@@ -1385,7 +1483,9 @@ class GameEngine:
         it shows in the spell overlay the moment it's cast (not only after
         the chain resolves). The chain just tracks the open priority window;
         ``_resolve_chain`` closes it without touching the pile."""
-        item = ChainItem(actor=actor, card=card, targets=list(targets))
+        base = list(rounds[0]) if rounds else []
+        repeats = [list(r) for r in rounds[1:]] if rounds else []
+        item = ChainItem(actor=actor, card=card, targets=base, repeat_targets=repeats)
         chain = self._game_state.pending_chain
         if chain is None:
             self._game_state.pending_chain = PendingChain(
@@ -1406,7 +1506,9 @@ class GameEngine:
             if actor == RequiredTo.PLAYER_1
             else self._game_state.player_2_spells
         )
-        spells.append(PlayedSpell(card=card, targets=list(targets), order=order))
+        spells.append(
+            PlayedSpell(card=card, targets=base, order=order, repeat_targets=repeats)
+        )
         # NOTE: spell-play triggers ("when you play a spell…") fire when the
         # spell RESOLVES, not here at cast time — see _execute_chain_item.
         # House rule: the spell gets its reaction window alone; only after it
@@ -1454,6 +1556,9 @@ class GameEngine:
         eff = item.effect
         if eff is None:
             if item.card is not None:
+                # Run the spell's OWN tagged effects against its chosen
+                # target(s) — one pass per [Repeat] round — then discard it.
+                self._run_spell_effects(item)
                 # A resolved spell goes to its caster's TRASH (the discard
                 # pile shown next to the main deck), like any spent card.
                 gs = self._game_state
@@ -1486,6 +1591,33 @@ class GameEngine:
             codes=list(eff.effects),
         )
 
+    def _run_spell_effects(self, item: "ChainItem") -> None:
+        """Resolve a cast spell's tagged effects against the units it targeted.
+
+        A spell's taxonomy ability has no trigger — it's the card's own
+        effect — so we gather every ``activeEffect`` across the spell's
+        abilities and run them with the chosen ``targets``. With [Repeat],
+        each extra paid round (``repeat_targets``) re-runs the same effects
+        against that round's targets, so e.g. Frigid Touch stacks -2 Might
+        per round. Unknown effect codes fall through to the registry's
+        logged no-op, exactly like triggered abilities."""
+        codes: list[str] = []
+        for ability in _abilities.triggered_abilities_for(item.card or ""):
+            codes.extend(ability.active_effects)
+        if not codes:
+            return
+        rounds = [list(item.targets)] + [list(rt) for rt in item.repeat_targets]
+        for picks in rounds:
+            self._run_effect_codes(
+                controller=item.actor,
+                source=None,
+                trigger="",
+                event_kind="",
+                label=item.card or "",
+                codes=codes,
+                targets=picks,
+            )
+
     def _run_effect_codes(
         self,
         controller: RequiredTo,
@@ -1494,6 +1626,7 @@ class GameEngine:
         event_kind: str,
         label: str,
         codes: list[str],
+        targets: list[str] | None = None,
     ) -> None:
         """Run an ability's effect codes in order.
 
@@ -1513,6 +1646,7 @@ class GameEngine:
                 code=code,
                 trigger=trigger,
                 event_kind=event_kind,
+                targets=tuple(targets or ()),
             )
             line_label = label or source or code
             if _effects.is_choice_effect(code):
@@ -2204,6 +2338,13 @@ class GameEngine:
                 showdown is not None
                 and self._game_state.pending_chain is None
                 and self._game_state.pending_spell_choice is None
+                # A [Repeat] decision or a resolving effect-choice is a
+                # finer-grained sub-step that must be answered before the
+                # showdown menu reopens — otherwise a repeatable Action/
+                # Reaction cast IN the showdown would never get its repeat
+                # prompt (the showdown menu would grab the clock first).
+                and self._game_state.pending_spell_repeat is None
+                and self._game_state.pending_effect_choice is None
             ):
                 from .csv_data import card_playable_in_showdown
                 from .requirements import spell_playable
@@ -2303,6 +2444,23 @@ class GameEngine:
                     player_1_options=p1_options,
                     player_2_options=p2_options,
                     required_action=_required_action(next_actor, RequiredStep.ACTION_TURN),
+                )
+
+            repeat = self._game_state.pending_spell_repeat
+            if repeat is not None:
+                # A [Repeat] spell just finished a selection round. The caster
+                # decides whether to pay again and repeat. The WAYS TO PAY are
+                # surfaced as pre-costed picker chips (player_X_intents, via
+                # shortcuts.compute_repeat_intents) — the exact same shortcut
+                # payment flow the initial cast uses. The only flat option here
+                # is to DECLINE; everyone else is suppressed.
+                chooser = repeat.actor
+                opts = ["play:choose_repeat:no"]
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=opts if chooser == RequiredTo.PLAYER_1 else [],
+                    player_2_options=opts if chooser == RequiredTo.PLAYER_2 else [],
+                    required_action=_required_action(chooser, RequiredStep.ACTION_TURN),
                 )
 
             effect_choice = self._game_state.pending_effect_choice

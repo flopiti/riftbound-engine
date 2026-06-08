@@ -161,6 +161,84 @@ class EffectExecutorTests(unittest.TestCase):
         self.assertTrue(E.execute_effect(ctx))
         self.assertEqual(engine._game_state.player_1_units[0].bonus_might, 2)
 
+    def test_spell_resolution_runs_tagged_effect_on_targets(self) -> None:
+        from riftbound_engine.engine import ChainItem, PendingChain
+
+        engine = GameEngine()
+        engine._game_state.player_2_units = [PlayedUnit(card="Foe", location="battlefield_1")]
+        # A cast Frigid Touch on the chain, targeting the enemy unit.
+        item = ChainItem(actor=RequiredTo.PLAYER_1, card="Frigid Touch", targets=["player_2:0"])
+        engine._game_state.pending_chain = PendingChain(items=[item], priority=RequiredTo.PLAYER_1)
+        stub = (A.Ability(active_effects=("GIVE_UNIT_-2M",)),)
+        with mock.patch.object(A, "triggered_abilities_for", side_effect=lambda n: stub if n == "Frigid Touch" else ()):
+            engine._execute_chain_item(item)
+        self.assertEqual(engine._game_state.player_2_units[0].bonus_might, -2)
+        self.assertIn("Frigid Touch", engine._game_state.player_1_trash)
+
+    def test_give_unit_delta_is_dynamic(self) -> None:
+        # One handler covers the whole GIVE_UNIT_±NM family — amount parsed
+        # from the code (Frigid Touch -2, Discipline +2, +3, -1, …).
+        for code, expected in [
+            ("GIVE_UNIT_-2M", -2),
+            ("GIVE_UNIT_+2M", 2),
+            ("GIVE_UNIT_+3M", 3),
+            ("GIVE_UNIT_-1M", -1),
+        ]:
+            with self.subTest(code=code):
+                engine = GameEngine()
+                engine._game_state.player_2_units = [PlayedUnit(card="Foe", location="battlefield_1")]
+                ctx = E.EffectContext(
+                    engine=engine, controller=RequiredTo.PLAYER_1, source=None,
+                    code=code, targets=("player_2:0",),
+                )
+                self.assertTrue(E.execute_effect(ctx))
+                self.assertEqual(engine._game_state.player_2_units[0].bonus_might, expected)
+
+    def test_give_me_delta_is_dynamic(self) -> None:
+        for code, expected in [("GIVE_ME_+1", 1), ("GIVE_ME_+2M", 2)]:
+            with self.subTest(code=code):
+                engine = GameEngine()
+                engine._game_state.player_1_units = [PlayedUnit(card="Me", location="base")]
+                ctx = E.EffectContext(
+                    engine=engine, controller=RequiredTo.PLAYER_1, source="player_1:0", code=code
+                )
+                self.assertTrue(E.execute_effect(ctx))
+                self.assertEqual(engine._game_state.player_1_units[0].bonus_might, expected)
+
+    def test_return_to_hand_moves_target_to_owner_hand(self) -> None:
+        engine = GameEngine()
+        engine._game_state.player_2_units = [PlayedUnit(card="Foe", location="battlefield_1")]
+        engine._game_state.player_2_hand = ["X"]
+        ctx = E.EffectContext(
+            engine=engine, controller=RequiredTo.PLAYER_1, source=None,
+            code="RETURN_TO_HAND", targets=("player_2:0",),
+        )
+        self.assertTrue(E.execute_effect(ctx))
+        self.assertEqual(engine._game_state.player_2_units, [])
+        self.assertEqual(engine._game_state.player_2_hand, ["X", "Foe"])
+
+    def test_enemy_units_minus_3_floored_at_1(self) -> None:
+        from riftbound_engine import csv_data
+
+        engine = GameEngine()
+        # Controller p1 → effect hits p2's units. Printed mights: 5, 2, 1.
+        engine._game_state.player_2_units = [
+            PlayedUnit(card="Big", location="base"),
+            PlayedUnit(card="Mid", location="base"),
+            PlayedUnit(card="Small", location="base"),
+        ]
+        printed = {"Big": 5, "Mid": 2, "Small": 1}
+        ctx = E.EffectContext(
+            engine=engine, controller=RequiredTo.PLAYER_1, source=None,
+            code="GIVE_ENEMY_UNITS_-3M_MIN_1",
+        )
+        with mock.patch.object(csv_data, "card_might_of", side_effect=lambda n: printed.get(n)):
+            self.assertTrue(E.execute_effect(ctx))
+        u = engine._game_state.player_2_units
+        self.assertEqual(u[0].bonus_might, -3)  # 5 → 2
+        self.assertEqual(u[1].bonus_might, -1)  # 2 → 1 (floored)
+        self.assertEqual(u[2].bonus_might, 0)   # 1 → 1 (untouched, never buffs)
+
 
 # --------------------------------------------------------------------------- #
 # Drain ordering (APNAP) — active player's triggers resolve last (LIFO).

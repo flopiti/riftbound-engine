@@ -591,9 +591,17 @@ class GameEngineTests(unittest.TestCase):
         "Forces no target pick" must match the engine's actual parking rule in
         action_turn/builtins.py::_play_spell, which is ``spell_target_plan(req)``
         being empty — NOT ``selectable_unit_requirement``, which reports None
-        for multi-phrase trees that DO park (e.g. ANY UNIT (1)|ANY UNIT (1))."""
+        for multi-phrase trees that DO park (e.g. ANY UNIT (1)|ANY UNIT (1)).
+
+        [Repeat] spells are also skipped: they pause on a repeat decision
+        instead of landing straight on the chain, which would break the
+        chain/clear assertions these helpers feed."""
+        from riftbound_engine.csv_data import card_has_repeat
+
         for i, card in enumerate(hand):
             if card_type_of(card) != "Spell":
+                continue
+            if card_has_repeat(card):
                 continue
             req = card_spell_requirement_of(card)
             if not spell_target_plan(req) and spell_playable(engine._game_state, card):

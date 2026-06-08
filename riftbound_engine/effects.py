@@ -13,6 +13,7 @@ a real handler; every ``@register_effect`` below is one ticked off.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -35,6 +36,10 @@ class EffectContext:
     code: str
     trigger: str = ""
     event_kind: str = ""
+    #: Chosen target unit refs ("player_1:0" form). Set for spell effects
+    #: (the units picked to satisfy the Spell Choice Requirement) and any
+    #: targeted ability; empty for self/owner-scoped effects.
+    targets: tuple[str, ...] = ()
 
 
 Handler = Callable[[EffectContext], None]
@@ -53,22 +58,48 @@ def register_effect(code: str) -> Callable[[Handler], Handler]:
     return decorator
 
 
+# Pattern handlers — for FAMILIES of codes that differ only by a number
+# (e.g. every GIVE_UNIT_+1M / +2M / -3M). One regex covers the whole family,
+# so a new amount needs no new registration. Exact handlers in ``_REGISTRY``
+# always win; patterns are the fallback (checked in registration order).
+_PATTERN_HANDLERS: list[tuple[re.Pattern[str], Handler]] = []
+
+
+def register_effect_pattern(pattern: str) -> Callable[[Handler], Handler]:
+    """Declare a handler for every code matching ``pattern`` (a full-match
+    regex). The handler reads ``ctx.code`` to recover the specific amount."""
+
+    compiled = re.compile(pattern)
+
+    def decorator(fn: Handler) -> Handler:
+        _PATTERN_HANDLERS.append((compiled, fn))
+        return fn
+
+    return decorator
+
+
 def registered_effect_codes() -> frozenset[str]:
     return frozenset(_REGISTRY)
 
 
 def is_implemented(code: str) -> bool:
-    return code in _REGISTRY
+    return code in _REGISTRY or any(p.fullmatch(code) for p, _ in _PATTERN_HANDLERS)
 
 
 def execute_effect(ctx: EffectContext) -> bool:
     """Run the handler for ``ctx.code``. Returns ``True`` if a real handler
-    ran, ``False`` if the code is unimplemented (caller logs a no-op)."""
+    ran, ``False`` if the code is unimplemented (caller logs a no-op).
+
+    Exact registry first, then pattern handlers (signed-amount families)."""
     handler = _REGISTRY.get(ctx.code)
-    if handler is None:
-        return False
-    handler(ctx)
-    return True
+    if handler is not None:
+        handler(ctx)
+        return True
+    for pattern, fn in _PATTERN_HANDLERS:
+        if pattern.fullmatch(ctx.code):
+            fn(ctx)
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -233,15 +264,51 @@ def _discard_1_draw_1(ctx: EffectContext) -> None:
     _draw_n(ctx.engine, ctx.controller, 1)
 
 
-def _buff_source(ctx: EffectContext, amount: int) -> None:
-    _, _, unit = _resolve_unit(ctx.engine, ctx.source)
+# --------------------------------------------------------------------------- #
+# Might modifiers — one DYNAMIC family. The amount is parsed from the code, so
+# every GIVE_UNIT_±NM / GIVE_ME_±N (any N, any sign) is covered by one handler
+# each; no new registration when a new value shows up. (Durations aren't
+# modelled yet — a "+2 this turn" buff is a permanent ``bonus_might`` bump,
+# consistent across all might effects until an end-of-turn layer exists.)
+# --------------------------------------------------------------------------- #
+#: Trailing signed amount, with an optional "M" suffix ("+2M", "-1M", "+1").
+_SIGNED_AMOUNT_RE = re.compile(r"([+-]\d+)M?$")
+
+
+def _amount_from_code(code: str) -> int:
+    m = _SIGNED_AMOUNT_RE.search(code)
+    return int(m.group(1)) if m else 0
+
+
+def _buff_unit(unit, amount: int) -> None:
     if unit is not None:
         unit.bonus_might += amount
 
 
-@register_effect("GIVE_ME_+1")
-def _give_me_1(ctx: EffectContext) -> None:
-    _buff_source(ctx, 1)
+def _buff_source(ctx: EffectContext, amount: int) -> None:
+    """Apply ``amount`` to the ability's OWN unit (the source)."""
+    _, _, unit = _resolve_unit(ctx.engine, ctx.source)
+    _buff_unit(unit, amount)
+
+
+def _buff_targets(ctx: EffectContext, amount: int) -> None:
+    """Apply ``amount`` to each chosen target unit."""
+    for ref in ctx.targets:
+        _, _, unit = _resolve_unit(ctx.engine, ref)
+        _buff_unit(unit, amount)
+
+
+@register_effect_pattern(r"GIVE_UNIT_[+-]\d+M")
+def _give_unit_delta(ctx: EffectContext) -> None:
+    """GIVE_UNIT_+2M / -1M / +3M …: the chosen target unit(s) get ±N Might.
+    With [Repeat] the spell re-runs per round, so the delta stacks."""
+    _buff_targets(ctx, _amount_from_code(ctx.code))
+
+
+@register_effect_pattern(r"GIVE_ME_[+-]\d+M?")
+def _give_me_delta(ctx: EffectContext) -> None:
+    """GIVE_ME_+1 / +2M …: the source unit gets ±N Might."""
+    _buff_source(ctx, _amount_from_code(ctx.code))
 
 
 # --------------------------------------------------------------------------- #
@@ -338,11 +405,48 @@ register_choice_effect(
 )
 
 
-@register_effect("GIVE_ME_+2M")
-def _give_me_2(ctx: EffectContext) -> None:
-    _buff_source(ctx, 2)
-
-
 @register_effect("ADDITIONAL_2M")
 def _additional_2m(ctx: EffectContext) -> None:
+    # "+2 Might" on the source — same as GIVE_ME_+2M but a distinct code.
     _buff_source(ctx, 2)
+
+
+@register_effect("RETURN_TO_HAND")
+def _return_to_hand(ctx: EffectContext) -> None:
+    """Gust: return the chosen target unit(s) to their owner's hand. The
+    Spell Choice Requirement already restricts the pick (a unit at a
+    battlefield with ≤3 Might), so here we just move it. Units are resolved
+    BEFORE any removal so multiple targets don't shift each other's indices."""
+    from .engine import RequiredTo
+
+    pending = []
+    for ref in ctx.targets:
+        units, _, unit = _resolve_unit(ctx.engine, ref)
+        if unit is None:
+            continue
+        side = ref.split(":", 1)[0]
+        owner = RequiredTo.PLAYER_1 if side == RequiredTo.PLAYER_1.value else RequiredTo.PLAYER_2
+        pending.append((units, unit, owner))
+    for units, unit, owner in pending:
+        if unit in units:
+            units.remove(unit)
+            hand = _hand(ctx.engine, owner)
+            if hand is not None:
+                hand.append(unit.card)
+
+
+@register_effect("GIVE_ENEMY_UNITS_-3M_MIN_1")
+def _enemy_units_minus_3_min_1(ctx: EffectContext) -> None:
+    """Thousand-Tailed Watcher: every ENEMY unit gets -3 Might, but a unit
+    can't be reduced below 1 (and a unit already at/below 1 is untouched —
+    the floor only caps the reduction, it never buffs)."""
+    from .csv_data import card_might_of
+    from .engine import RequiredTo
+
+    opp = ctx.engine.opponent_of(ctx.controller)
+    gs = ctx.engine._game_state
+    units = gs.player_1_units if opp == RequiredTo.PLAYER_1 else gs.player_2_units
+    for unit in units:
+        effective = (card_might_of(unit.card) or 0) + unit.bonus_might
+        reduction = max(0, min(3, effective - 1))  # cap so might floors at 1
+        unit.bonus_might -= reduction

@@ -579,6 +579,82 @@ def card_equip_cost(name: str) -> dict[str, object] | None:
     return {"energy": energy, "power": power, "any_power": any_power}
 
 
+# --------------------------------------------------------------------------- #
+# [Repeat] keyword — a spell may be cast, then (per its Repeat cost) paid for
+# AGAIN to repeat its effect. The cost lives in the structured CSV column
+# "Repeat Cost" as a compact DSL: space-separated tokens, each
+#   <n>E         → n Energy
+#   <n><Domain>  → n Power of that rune domain (Fury/Calm/Mind/Body/Chaos/Order)
+#   <n>ANY       → n Power payable from any domain ("rune of any type")
+# e.g. "2E 1Fury", "1E 1ANY", "1Chaos". Blank ⇒ no (supported) Repeat cost.
+# --------------------------------------------------------------------------- #
+_REPEAT_TOKEN_RE = re.compile(
+    r"(\d+)\s*(E|ANY|FURY|CALM|MIND|BODY|CHAOS|ORDER)\b", re.IGNORECASE
+)
+
+
+@lru_cache(maxsize=1)
+def _csv_repeat_cost_index() -> dict[str, str]:
+    """Lowercased card name → raw CSV ``Repeat Cost`` field (compact DSL)."""
+    rows = _csv_rows_raw()
+    if len(rows) < 2:
+        return {}
+    header = rows[0]
+    i_name = _header_index(header, "Name")
+    i_rep = _header_index(header, "Repeat Cost")
+    if i_name is None or i_rep is None:
+        return {}
+    out: dict[str, str] = {}
+    for parts in rows[1:]:
+        if len(parts) <= max(i_name, i_rep):
+            continue
+        name = parts[i_name].strip().lower()
+        if name and name not in out:
+            out[name] = parts[i_rep]
+    return out
+
+
+def card_repeat_cost(name: str) -> dict[str, object] | None:
+    """Parse a card's [Repeat] cost from the structured ``Repeat Cost`` column.
+
+    Returns the same shape as :func:`card_equip_cost` —
+    ``{"energy": int, "power": {domain: int}, "any_power": int}`` — so the
+    engine's existing ``can_afford_equip_cost`` / ``_deduct_equip_cost`` can
+    charge it. Returns ``None`` when the card has no (supported) Repeat cost.
+    """
+    if not name:
+        return None
+    index = _csv_repeat_cost_index()
+    raw = index.get(name.strip().lower())
+    if raw is None:
+        sep = name.find(", ")
+        if sep >= 0:
+            raw = index.get(name[sep + 2 :].strip().lower())
+    if not raw or not raw.strip():
+        return None
+    energy = 0
+    power: dict[str, int] = {}
+    any_power = 0
+    for m in _REPEAT_TOKEN_RE.finditer(raw):
+        n = int(m.group(1))
+        kind = m.group(2).upper()
+        if kind == "E":
+            energy += n
+        elif kind == "ANY":
+            any_power += n
+        else:
+            dom = kind.capitalize()
+            power[dom] = power.get(dom, 0) + n
+    if energy == 0 and not power and any_power == 0:
+        return None
+    return {"energy": energy, "power": power, "any_power": any_power}
+
+
+def card_has_repeat(name: str) -> bool:
+    """Whether the card has a (supported) [Repeat] cost authored."""
+    return card_repeat_cost(name) is not None
+
+
 @lru_cache(maxsize=1)
 def _csv_card_domain_index() -> dict[str, str]:
     """Lowercased card name → raw CSV ``Domain`` field (may be 'Fury, Chaos')."""

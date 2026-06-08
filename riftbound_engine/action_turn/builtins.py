@@ -510,7 +510,9 @@ def _play_spell(ctx: ActionTurnContext) -> None:
             actor=ctx.actor, card=card, requirement=raw_req or ""
         )
     else:
-        ctx.engine._push_spell_to_chain(ctx.actor, card, [])
+        # No target picks — a single empty round. offer_repeat_or_push opens
+        # the [Repeat] decision if the spell has one, else pushes to the chain.
+        ctx.engine.offer_repeat_or_push(ctx.actor, card, [[]])
 
 
 @register_turn_action("choose_location")
@@ -679,8 +681,12 @@ def _finalize_spell_choice(ctx: ActionTurnContext, choice) -> None:
     targets += [f"trash:{t}" for t in choice.trash]
     targets += [f"spell:{s}" for s in choice.spells]
     targets += [f"location:{loc}" for loc in choice.locations]
-    ctx.engine._push_spell_to_chain(ctx.actor, choice.card, targets)
+    # Accumulate this round's targets onto any prior [Repeat] rounds, then
+    # branch: offer another repeat (if the keyword + affordability allow) or
+    # push the spell with every round onto the chain.
+    rounds = [list(r) for r in choice.prior_rounds] + [targets]
     ctx.engine._game_state.pending_spell_choice = None
+    ctx.engine.offer_repeat_or_push(ctx.actor, choice.card, rounds)
 
 
 @register_turn_action("choose_spell_destination")
@@ -999,6 +1005,79 @@ def _choose_effect_target(ctx: ActionTurnContext) -> None:
     ctx.engine._drain_triggers()
 
 
+@register_turn_action("choose_repeat")
+def _choose_repeat(ctx: ActionTurnContext) -> None:
+    """Decide whether to repeat a just-played [Repeat] spell.
+
+    Wire format: ``play:choose_repeat:yes`` (pay the additional cost and
+    re-open target selection for another round) or ``play:choose_repeat:no``
+    (push the spell onto the chain with every round's targets).
+
+    Only the spell's caster may answer. ``yes`` requires the repeat cost be
+    affordable from the caster's CURRENT pools — they bank Energy/Power by
+    exhausting/recycling runes first (the same way the base cost is paid),
+    which is offered alongside this decision while it's pending.
+    """
+    from ..csv_data import card_spell_requirement_of
+    from ..engine import PendingSpellChoice
+    from ..requirements import (
+        battlefield_picks,
+        gear_picks,
+        location_picks,
+        spell_picks,
+        spell_target_plan,
+        trash_picks,
+    )
+
+    gs = ctx.engine._game_state
+    rep = gs.pending_spell_repeat
+    if rep is None:
+        raise ValueError("no [Repeat] decision is pending")
+    if ctx.actor != rep.actor:
+        raise ValueError(
+            f"the [Repeat] decision belongs to {rep.actor.value}, not {ctx.actor.value}"
+        )
+    choice = ctx.payload.strip().lower()
+    if choice not in ("yes", "no"):
+        raise ValueError("play:choose_repeat requires 'yes' or 'no'")
+
+    if choice == "no":
+        gs.pending_spell_repeat = None
+        ctx.engine._push_spell_to_chain(rep.actor, rep.card, rep.rounds)
+        return
+
+    # yes — must be able to pay the additional cost from current pools.
+    if not ctx.engine.can_afford_equip_cost(rep.actor, rep.cost):
+        raise ValueError(
+            "cannot repeat: the additional cost isn't affordable yet — "
+            "exhaust/recycle runes to bank the Energy/Power first"
+        )
+    ctx.engine._deduct_equip_cost(rep.actor, rep.cost)
+    gs.pending_spell_repeat = None
+
+    # Re-open selection for another round. If the spell forces target picks,
+    # park a fresh PendingSpellChoice carrying the rounds so far; otherwise
+    # there's nothing to pick, so record an empty round and re-offer at once.
+    raw_req = card_spell_requirement_of(rep.card)
+    has_picks = bool(
+        spell_target_plan(raw_req)
+        or battlefield_picks(raw_req)
+        or gear_picks(raw_req)
+        or trash_picks(raw_req)
+        or spell_picks(raw_req)
+        or location_picks(raw_req)
+    )
+    if has_picks:
+        gs.pending_spell_choice = PendingSpellChoice(
+            actor=rep.actor,
+            card=rep.card,
+            requirement=raw_req or "",
+            prior_rounds=[list(r) for r in rep.rounds],
+        )
+    else:
+        ctx.engine.offer_repeat_or_push(rep.actor, rep.card, rep.rounds + [[]])
+
+
 @register_turn_action("pass_priority")
 def _pass_priority(ctx: ActionTurnContext) -> None:
     """Pass priority on the open chain.
@@ -1022,6 +1101,10 @@ def _pass_priority(ctx: ActionTurnContext) -> None:
     if gs.pending_effect_choice is not None:
         raise ValueError(
             "resolve the pending effect choice before passing priority"
+        )
+    if gs.pending_spell_repeat is not None:
+        raise ValueError(
+            "resolve the pending [Repeat] decision before passing priority"
         )
     if ctx.actor != chain.priority:
         raise ValueError(
@@ -1354,11 +1437,16 @@ def _may_tap_runes(gs, actor) -> bool:
 
     The player on the clock is the one allowed to bank Energy/Power to pay
     for a play:
+      * a [Repeat] decision is pending → its caster (banking to afford the
+        repeat — "the same shortcut payment way" as the base cost);
       * a chain is open → the priority holder;
       * else a showdown is open → the FOCUS holder (you tap to afford the
         Action/Reaction you're about to play in the showdown);
       * otherwise → the active player.
     """
+    repeat = getattr(gs, "pending_spell_repeat", None)
+    if repeat is not None:
+        return actor == repeat.actor
     chain = gs.pending_chain
     if chain is not None:
         return actor == chain.priority

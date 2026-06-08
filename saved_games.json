@@ -122,6 +122,445 @@
           "label": "Pass (priority)"
         }
       ]
+    },
+    {
+      "id": "ravenbo",
+      "name": "ravenbo",
+      "description": "",
+      "created_at": 1780792118.883486,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 1403825914
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:2",
+          "label": "Play Ravenbloom Student (2 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:2"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Ravenbloom Student on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:1:Calm\u00d71#Chaos\u00d71",
+          "label": "Play Lonely Poro (1 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:1"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Lonely Poro on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1780793266.931536
+    },
+    {
+      "id": "gust-test",
+      "name": "gust_test",
+      "description": "",
+      "created_at": 1780792346.238945,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 366422693
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:3",
+          "label": "Play Plundering Poro (2 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:3"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Plundering Poro on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:2:Calm\u00d71#Chaos\u00d71",
+          "label": "Play Scuttle Crab (1 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:2"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Scuttle Crab on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:play_spell:0:Chaos\u00d71",
+          "label": "Cast Gust (1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_spell:0"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_spell_targets:p2-0",
+          "label": "Gust \u2192 Scuttle Crab",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_spell_targets:p2-0"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1780793183.848053
     }
   ]
 }

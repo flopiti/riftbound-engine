@@ -40,6 +40,7 @@ from .shortcuts import (
     compute_equip_intents,
     compute_move_intents,
     compute_play_intents,
+    compute_repeat_intents,
     compute_shortcuts,
     serialize_play_intent,
 )
@@ -207,6 +208,24 @@ def _expand_synthetic_action(
         raise ValueError(
             f"could not resolve {action!r} for {actor.value} in the replayed state"
         )
+    # [Repeat] payment synthetics — recompute against the (seeded) replay
+    # state and expand to the rune steps + play:choose_repeat:yes chain. The
+    # tier-1 "intent:repeat" auto-applies its first/only combo, same as a
+    # card intent.
+    if action == "intent:repeat" or action.startswith("shortcut:repeat:"):
+        from .shortcuts import compute_repeat_intents, execution_steps
+
+        intents = compute_repeat_intents(engine, actor)
+        combos = intents[0].combos if intents else ()
+        if action == "intent:repeat":
+            if not combos:
+                raise ValueError("intent:repeat has no affordable combo in the replayed state")
+            return [a for _, a in execution_steps(combos[0])]
+        key = action[len("shortcut:repeat:") :]
+        for c in combos:
+            if c.key == key:
+                return [a for _, a in execution_steps(c)]
+        raise ValueError(f"could not resolve {action!r} for {actor.value} in the replayed state")
     if action.startswith("intent:"):
         try:
             card_index = int(action[len("intent:") :])
@@ -905,11 +924,21 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
             for u in gs.player_2_units
         ],
         "player_1_spells": [
-            {"card": s.card, "targets": list(s.targets), "order": s.order}
+            {
+                "card": s.card,
+                "targets": list(s.targets),
+                "order": s.order,
+                "repeat_count": len(s.repeat_targets),
+            }
             for s in gs.player_1_spells
         ],
         "player_2_spells": [
-            {"card": s.card, "targets": list(s.targets), "order": s.order}
+            {
+                "card": s.card,
+                "targets": list(s.targets),
+                "order": s.order,
+                "repeat_count": len(s.repeat_targets),
+            }
             for s in gs.player_2_spells
         ],
         "player_1_gears": [
@@ -947,6 +976,22 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 "source_card": gs.pending_effect_choice.source_card,
                 "options": list(gs.pending_effect_choice.options),
                 "label": gs.pending_effect_choice.label,
+            }
+        ),
+        "pending_spell_repeat": (
+            None
+            if gs.pending_spell_repeat is None
+            else {
+                "actor": gs.pending_spell_repeat.actor.value,
+                "card": gs.pending_spell_repeat.card,
+                "cost": {
+                    "energy": int(gs.pending_spell_repeat.cost.get("energy", 0)),
+                    "power": dict(gs.pending_spell_repeat.cost.get("power", {})),
+                    "any_power": int(gs.pending_spell_repeat.cost.get("any_power", 0)),
+                },
+                # How many times the effect will have happened so far (base +
+                # repeats already paid). Lets the UI show "Repeat (x2)?".
+                "rounds": len(gs.pending_spell_repeat.rounds),
             }
         ),
         "pending_chain": (
@@ -1071,6 +1116,7 @@ def _serialize_output(out: EngineOutput) -> dict[str, Any]:
             *compute_play_intents(_engine, RequiredTo.PLAYER_1),
             *compute_move_intents(_engine, RequiredTo.PLAYER_1),
             *compute_equip_intents(_engine, RequiredTo.PLAYER_1),
+            *compute_repeat_intents(_engine, RequiredTo.PLAYER_1),
         )
     ]
     p2_intents = [
@@ -1079,6 +1125,7 @@ def _serialize_output(out: EngineOutput) -> dict[str, Any]:
             *compute_play_intents(_engine, RequiredTo.PLAYER_2),
             *compute_move_intents(_engine, RequiredTo.PLAYER_2),
             *compute_equip_intents(_engine, RequiredTo.PLAYER_2),
+            *compute_repeat_intents(_engine, RequiredTo.PLAYER_2),
         )
     ]
     return {
@@ -1116,6 +1163,13 @@ def _serialize_branch() -> dict[str, Any]:
         "path": [dict(step) for step in _branch_path],
         "visited": sorted(_branch_visited),
         "nodes_visited": _branch_nodes_visited,
+        # Identity of the CURRENT shuffle. Changes whenever the engine is
+        # re-seeded (server restart, /reset, loading a different save). The
+        # client records this when a save is loaded/created so it can detect
+        # that the engine re-shuffled out from under it (e.g. the dev server
+        # restarted on a code change) and refuse to overwrite the save with
+        # an unrelated random game.
+        "shuffle_seed": _last_shuffle_seed,
         "snapshot": get_snapshot(),
     }
 
@@ -1276,6 +1330,16 @@ def create_app() -> FastAPI:
     @app.get("/decks")
     def decks_list() -> dict[str, Any]:
         return {"decks": _serialize_decks()}
+
+    @app.get("/decks/{deck_id}/text")
+    def decks_text(deck_id: str) -> dict[str, Any]:
+        """Raw deck-file text for one deck, so the UI can show its full
+        composition (every card line) and pre-fill an edit form."""
+        try:
+            path = deck_file_path(deck_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"id": deck_id, "text": path.read_text(encoding="utf-8")}
 
     @app.post("/decks")
     def decks_create(body: DeckSaveBody) -> dict[str, Any]:
