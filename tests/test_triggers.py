@@ -98,7 +98,6 @@ class AbilitiesLoaderTests(unittest.TestCase):
                             "activeEffects": ["DRAW_1"],
                             "conditions": [],
                             "costs": [],
-                            "activationSpeeds": [],
                             "passiveEffects": [],
                         }
                     ]

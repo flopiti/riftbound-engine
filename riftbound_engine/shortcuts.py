@@ -25,9 +25,11 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from .csv_data import (
+    card_accelerate_cost,
     card_domains_of,
     card_energy_of,
     card_equip_cost,
+    card_has_accelerate,
     card_has_quick_draw,
     card_is_equipment,
     card_is_reaction,
@@ -139,6 +141,43 @@ def _domain_multiset_key(plan: list[ShortcutStep]) -> str:
     for s in plan:
         counts[s.rune_domain] = counts.get(s.rune_domain, 0) + 1
     return "#".join(sorted(f"{d}×{n}" for d, n in counts.items()))
+
+
+def _rune_outputs(plan: list[ShortcutStep]) -> list[tuple[str, str, int]]:
+    """Break a plan down by what each rune PRODUCES, not just which domains are
+    tapped — so the UI can show "Energy from a Mind rune" distinctly from "Mind
+    power". Each rune step contributes:
+
+      * ``exhaust_rune``             → +1 ENERGY (of its domain)
+      * ``recycle_rune``             → +1 POWER  (of its domain)
+      * ``exhaust_and_recycle_rune`` → +1 ENERGY AND +1 POWER (one rune, both)
+
+    Returns ``[(kind, domain, count), ...]`` with ``kind`` in
+    ``{"energy", "power"}``, energy first then power, each domain-sorted. This
+    is why "1 Mind" (one exhaust-and-recycle) and "2 Mind" (exhaust one +
+    recycle another) are the SAME thing: both yield 1 Energy + 1 Mind power."""
+    energy: dict[str, int] = {}
+    power: dict[str, int] = {}
+    for s in plan:
+        if s.action != "recycle_rune":  # exhaust / exhaust_and_recycle → Energy
+            energy[s.rune_domain] = energy.get(s.rune_domain, 0) + 1
+        if s.action != "exhaust_rune":  # recycle / exhaust_and_recycle → Power
+            power[s.rune_domain] = power.get(s.rune_domain, 0) + 1
+    out: list[tuple[str, str, int]] = []
+    for d, n in sorted(energy.items()):
+        out.append(("energy", d, n))
+    for d, n in sorted(power.items()):
+        out.append(("power", d, n))
+    return out
+
+
+def _output_key(plan: list[ShortcutStep]) -> str:
+    """Dedup key by PRODUCED outputs (Energy-by-domain + power-by-domain). Two
+    plans that yield the same Energy/power from the same domains are
+    interchangeable to the player even if they tap a different NUMBER of runes
+    (e.g. one dual-purpose rune vs two), so they collapse to one chip. Plans
+    that differ in WHICH domain supplies the Energy stay distinct."""
+    return "|".join(f"{k}:{d}×{n}" for k, d, n in _rune_outputs(plan))
 
 
 def _domain_counts(plan: list[ShortcutStep]) -> list[tuple[str, int]]:
@@ -326,20 +365,24 @@ def _plan_payments(
 
     all_plans.sort(key=sort_key)
 
-    # Collapse plans with the same domain multiset — internal action
-    # assignment is an implementation detail for the user.
-    seen_domain_keys: set[str] = set()
+    # Collapse plans with the same PRODUCED OUTPUTS (Energy-by-domain +
+    # power-by-domain). Whether the cost is met by one dual-purpose rune or two
+    # single-purpose runes is an implementation detail — the player sees the
+    # same Energy/power result, so it's one chip. (Previously this collapsed by
+    # rune-count-per-domain, which surfaced "1 Mind" AND "2 Mind" as separate
+    # chips for the same 1 Energy + 1 Mind cost.)
+    seen_output_keys: set[str] = set()
     plans: list[list[ShortcutStep]] = []
     for p in all_plans:
-        dk = _domain_multiset_key(p)
-        if dk in seen_domain_keys:
+        ok = _output_key(p)
+        if ok in seen_output_keys:
             continue
-        seen_domain_keys.add(dk)
+        seen_output_keys.add(ok)
         plans.append(p)
 
-    # Final ordering for display: total rune count ascending, then
-    # domain-multiset key for stability.
-    plans.sort(key=lambda p: (len(p), _domain_multiset_key(p)))
+    # Final ordering for display: total rune count ascending, then output key
+    # for stability.
+    plans.sort(key=lambda p: (len(p), _output_key(p)))
     return plans
 
 
@@ -359,7 +402,13 @@ def _build_shortcut(
     plan: list[ShortcutStep],
 ) -> Shortcut:
     domain_counts = _domain_counts(plan)
-    verb = "Cast" if play_action == "play_spell" else "Play"
+    verb = (
+        "Cast"
+        if play_action == "play_spell"
+        else "Accelerate"
+        if play_action == "accelerate"
+        else "Play"
+    )
     if domain_counts:
         plan_desc = ", ".join(f"{n} {d}" for d, n in domain_counts)
         label = f"{verb} {card_name} ({plan_desc})"
@@ -431,6 +480,10 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
     if getattr(gs, "pending_spell_repeat", None) is not None:
         # A [Repeat] decision owns the clock — only the repeat picker
         # (compute_repeat_intents) and the decline option are valid.
+        return []
+    if getattr(gs, "pending_accelerate", None) is not None:
+        # An [Accelerate] decision owns the clock — only the accelerate picker
+        # (compute_accelerate_intents) and the decline option are valid.
         return []
     if getattr(gs, "pending_effect_choice", None) is not None:
         return []
@@ -675,6 +728,86 @@ def compute_repeat_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayIn
     ]
 
 
+#: Sentinel card index for [Accelerate] payment shortcuts (the accelerate isn't
+#: a hand card, so it has no real index).
+ACCELERATE_CARD_INDEX = 10_002
+
+
+def _build_accelerate_shortcut(
+    actor: RequiredTo, card_name: str, plan: list[ShortcutStep]
+) -> Shortcut:
+    """A payment plan for accelerating ``card_name``: rune steps then
+    ``play:choose_accelerate:yes``. Empty ``plan`` ⇒ already affordable from
+    the pool (a bare "Accelerate" chip, no rune annotation)."""
+    domain_counts = _domain_counts(plan)
+    if domain_counts:
+        plan_desc = ", ".join(f"{n} {d}" for d, n in domain_counts)
+        label = f"Accelerate {card_name} ({plan_desc})"
+    else:
+        label = f"Accelerate {card_name}"
+    key = _domain_multiset_key(plan) or "free"
+    return Shortcut(
+        actor=actor,
+        card_index=ACCELERATE_CARD_INDEX,
+        card_name=card_name,
+        play_action="accelerate",
+        energy_cost=0,
+        power_cost=0,
+        cost_domains=(),
+        plan=tuple(plan),
+        domain_counts=tuple(domain_counts),
+        key=key,
+        label=label,
+        final_action="play:choose_accelerate:yes",
+        synthetic=f"shortcut:accelerate:{key}",
+    )
+
+
+def compute_accelerate_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayIntent]:
+    """The [Accelerate] payment picker: when an accelerate decision is pending
+    for ``actor``, one PlayIntent ("Accelerate <card>") whose combos are every
+    valid way to pay the additional cost — the SAME pre-costed chips a normal
+    play uses. Declining is the flat ``play:choose_accelerate:no`` option the
+    engine surfaces, not here.
+
+    Returns [] when no accelerate is pending for this actor, or the cost can't
+    be paid at all (only the decline option is offered then)."""
+    gs = engine._game_state
+    acc = getattr(gs, "pending_accelerate", None)
+    if acc is None or acc.actor != actor:
+        return []
+
+    energy_cost, power_cost, cost_domains = _repeat_cost_as_plan_inputs(acc.cost)
+    runes = gs.player_1_runes if actor == RequiredTo.PLAYER_1 else gs.player_2_runes
+    current_energy = gs.player_1_energy if actor == RequiredTo.PLAYER_1 else gs.player_2_energy
+    current_power = dict(
+        gs.player_1_power if actor == RequiredTo.PLAYER_1 else gs.player_2_power
+    )
+    plans = _plan_payments(
+        energy_cost, power_cost, cost_domains, list(runes), current_energy, current_power
+    )
+    if plans:
+        combos = tuple(_build_accelerate_shortcut(actor, acc.card, plan) for plan in plans)
+    elif engine.can_afford_equip_cost(actor, acc.cost):
+        combos = (_build_accelerate_shortcut(actor, acc.card, []),)
+    else:
+        return []  # can't pay → only the decline option
+
+    return [
+        PlayIntent(
+            actor=actor,
+            card_index=ACCELERATE_CARD_INDEX,
+            card_name=acc.card,
+            play_action="accelerate",
+            energy_cost=energy_cost,
+            power_cost=power_cost,
+            cost_domains=cost_domains,
+            combos=combos,
+            synthetic="intent:accelerate",
+        )
+    ]
+
+
 def _build_equip_shortcut(
     actor: RequiredTo,
     gear_index: int,
@@ -740,6 +873,7 @@ def compute_equip_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInt
         or gs.pending_payment is not None
         or gs.pending_combat is not None
         or getattr(gs, "pending_spell_repeat", None) is not None
+        or getattr(gs, "pending_accelerate", None) is not None
         or getattr(gs, "pending_effect_choice", None) is not None
     ):
         return []
@@ -866,6 +1000,7 @@ def compute_quick_draw_intents(engine: GameEngine, actor: RequiredTo) -> list[Pl
         or gs.pending_payment is not None
         or gs.pending_combat is not None
         or getattr(gs, "pending_spell_repeat", None) is not None
+        or getattr(gs, "pending_accelerate", None) is not None
         or getattr(gs, "pending_effect_choice", None) is not None
     ):
         return []
@@ -964,6 +1099,7 @@ def compute_move_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         or gs.pending_payment is not None
         or gs.pending_combat is not None
         or getattr(gs, "pending_spell_repeat", None) is not None
+        or getattr(gs, "pending_accelerate", None) is not None
         or getattr(gs, "pending_effect_choice", None) is not None
     ):
         return []
@@ -1025,6 +1161,8 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
     if gs.pending_combat is not None:
         return []
     if getattr(gs, "pending_spell_repeat", None) is not None:
+        return []
+    if getattr(gs, "pending_accelerate", None) is not None:
         return []
     if getattr(gs, "pending_effect_choice", None) is not None:
         return []
@@ -1149,6 +1287,12 @@ def serialize_shortcut(s: Shortcut) -> dict[str, Any]:
         "power_cost": s.power_cost,
         "cost_domains": list(s.cost_domains),
         "domain_counts": [{"domain": d, "count": n} for d, n in s.domain_counts],
+        # What each tapped rune PRODUCES, so the chip can show Energy (a tapped/
+        # exhausted rune) distinctly from domain power (a recycled rune) instead
+        # of a bare per-domain rune count. kind ∈ {"energy","power"}.
+        "rune_outputs": [
+            {"kind": k, "domain": d, "count": n} for k, d, n in _rune_outputs(list(s.plan))
+        ],
         "key": s.key,
         "chain": [
             {"actor": s.actor.value, "action": a}
@@ -1200,6 +1344,8 @@ def serialize_play_intent(i: PlayIntent) -> dict[str, Any]:
         label = f"Repeat {i.card_name}"
     elif i.play_action == "quick_draw":
         label = f"Quick-Draw {i.card_name}"
+    elif i.play_action == "accelerate":
+        label = f"Accelerate {i.card_name}"
     elif i.play_action in ("equip", "move"):
         label = i.card_name
     else:

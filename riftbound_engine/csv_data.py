@@ -481,6 +481,31 @@ def card_is_reaction(name: str) -> bool:
     return "[reaction]" in card_ability_of(name).lower()
 
 
+#: "[Accelerate] (You may pay 1 energy and 1 fury rune as an additional cost to
+#: have me enter ready.)" — capture the energy amount, the power amount, and the
+#: rune DOMAIN of the extra cost.
+_ACCELERATE_RE = re.compile(
+    r"\[accelerate\][^()]*\(\s*you may pay\s+(\d+)\s+energy\s+and\s+(\d+)\s+(\w+)\s+rune",
+    re.IGNORECASE,
+)
+
+
+def card_has_accelerate(name: str) -> bool:
+    """Whether the card carries the ``[Accelerate]`` keyword — pay an extra
+    cost as you play it to have it enter READY instead of exhausted."""
+    return "[accelerate]" in card_ability_of(name).lower()
+
+
+def card_accelerate_cost(name: str) -> tuple[int, int, str] | None:
+    """The Accelerate ADDITIONAL cost as ``(energy, power, domain)``, or None if
+    the card has no parseable Accelerate clause. ``domain`` is Title-cased to
+    match :func:`card_domains_of` (e.g. ``"Fury"``)."""
+    m = _ACCELERATE_RE.search(card_ability_of(name))
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), m.group(3).capitalize())
+
+
 def card_is_action(name: str) -> bool:
     """Whether the card carries the ``[Action]`` keyword — playable on your
     own turn OR during a showdown. Read straight from the ability text so it

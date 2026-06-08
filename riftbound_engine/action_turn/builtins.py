@@ -33,6 +33,10 @@ def _play_unit(ctx: ActionTurnContext) -> None:
     immediately** when the play starts.
 
     Only cards whose CSV ``Card Type`` is ``Unit`` may be played this way.
+
+    [Accelerate] is NOT paid here — it's offered as a separate decision AFTER
+    the location is chosen (see ``choose_location`` / ``choose_accelerate``),
+    mirroring the [Repeat] flow.
     """
     from ..csv_data import card_type_of
     from ..engine import PendingPlay
@@ -554,10 +558,40 @@ def _choose_location(ctx: ActionTurnContext) -> None:
     else:
         raise ValueError("choose_location requires player_1 or player_2")
 
-    # Units enter the battlefield exhausted (summoning sickness); they ready
-    # on the owner's next Awake (ABCD step A).
-    units.append(PlayedUnit(card=pending.card, location=location, exhausted=True))
+    # Units enter exhausted (summoning sickness) and ready on the owner's next
+    # Awake (ABCD step A). A unit with [Accelerate] may pay an extra cost to
+    # enter ready, but that's a SEPARATE decision offered right after this
+    # location choice (see below / choose_accelerate).
+    card = pending.card
+    units.append(PlayedUnit(card=card, location=location, exhausted=True))
     gs.pending_play = None
+
+    unit_index = len(units) - 1
+    source_ref = f"{ctx.actor.value}:{unit_index}"
+    battlefield = location if location != "base" else None
+
+    # [Accelerate]: open the pay-to-ready decision instead of firing the
+    # "when you play me" event now. The event is DEFERRED to choose_accelerate
+    # so the decision resolves before any on-play trigger/chain opens (mirrors
+    # how [Repeat] sequences its decision). A unit without Accelerate fires the
+    # event immediately, exactly as before.
+    from ..csv_data import card_accelerate_cost, card_has_accelerate
+
+    if card_has_accelerate(card):
+        acc = card_accelerate_cost(card)
+        if acc is not None:
+            from ..engine import PendingAccelerate
+
+            acc_e, acc_p, acc_dom = acc
+            gs.pending_accelerate = PendingAccelerate(
+                actor=ctx.actor,
+                card=card,
+                unit_index=unit_index,
+                cost={"energy": acc_e, "power": {acc_dom: acc_p} if acc_p else {}, "any_power": 0},
+                source_ref=source_ref,
+                battlefield=battlefield,
+            )
+            return
 
     # The unit has entered play — fire "when played" triggers. The new unit is
     # the source (its index is the last in the controller's list). Battlefield
@@ -568,8 +602,8 @@ def _choose_location(ctx: ActionTurnContext) -> None:
         GameEvent(
             kind="ON_PLAY_UNIT",
             controller=ctx.actor.value,
-            source=f"{ctx.actor.value}:{len(units) - 1}",
-            battlefield=location if location != "base" else None,
+            source=source_ref,
+            battlefield=battlefield,
         )
     )
 
@@ -1076,6 +1110,58 @@ def _choose_repeat(ctx: ActionTurnContext) -> None:
         )
     else:
         ctx.engine.offer_repeat_or_push(rep.actor, rep.card, rep.rounds + [[]])
+
+
+@register_turn_action("choose_accelerate")
+def _choose_accelerate(ctx: ActionTurnContext) -> None:
+    """Decide whether to [Accelerate] a just-played unit.
+
+    Wire format: ``play:choose_accelerate:yes`` (pay the additional cost; the
+    unit enters READY) or ``play:choose_accelerate:no`` (decline; it stays
+    exhausted). Either way the unit's deferred "when you play me" event fires
+    once the decision is made.
+
+    Only the unit's controller may answer. ``yes`` requires the Accelerate cost
+    be affordable from the controller's CURRENT pools — they bank Energy/Power
+    by exhausting/recycling runes first, offered alongside this decision while
+    it's pending (compute_accelerate_intents)."""
+    from ..engine import RequiredTo as RT
+    from ..triggers import GameEvent
+
+    gs = ctx.engine._game_state
+    acc = gs.pending_accelerate
+    if acc is None:
+        raise ValueError("no [Accelerate] decision is pending")
+    if ctx.actor != acc.actor:
+        raise ValueError(
+            f"the [Accelerate] decision belongs to {acc.actor.value}, not {ctx.actor.value}"
+        )
+    choice = ctx.payload.strip().lower()
+    if choice not in ("yes", "no"):
+        raise ValueError("play:choose_accelerate requires 'yes' or 'no'")
+
+    if choice == "yes":
+        if not ctx.engine.can_afford_equip_cost(acc.actor, acc.cost):
+            raise ValueError(
+                "cannot Accelerate: the additional cost isn't affordable yet — "
+                "exhaust/recycle runes to bank the Energy/Power first"
+            )
+        ctx.engine._deduct_equip_cost(acc.actor, acc.cost)
+        units = gs.player_1_units if acc.actor == RT.PLAYER_1 else gs.player_2_units
+        if 0 <= acc.unit_index < len(units):
+            units[acc.unit_index].exhausted = False  # enters READY
+
+    gs.pending_accelerate = None
+
+    # Fire the deferred "when you play me" event now that the decision is made.
+    ctx.engine._emit(
+        GameEvent(
+            kind="ON_PLAY_UNIT",
+            controller=acc.actor.value,
+            source=acc.source_ref,
+            battlefield=acc.battlefield,
+        )
+    )
 
 
 @register_turn_action("pass_priority")

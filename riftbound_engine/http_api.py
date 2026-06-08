@@ -88,6 +88,7 @@ def _run_search_guarded(start, predicate, max_depth, node_budget, time_budget_s)
     return result
 from .shortcuts import (
     Shortcut,
+    compute_accelerate_intents,
     compute_equip_intents,
     compute_move_intents,
     compute_play_intents,
@@ -1095,6 +1096,20 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 "rounds": len(gs.pending_spell_repeat.rounds),
             }
         ),
+        "pending_accelerate": (
+            None
+            if gs.pending_accelerate is None
+            else {
+                "actor": gs.pending_accelerate.actor.value,
+                "card": gs.pending_accelerate.card,
+                "unit_index": gs.pending_accelerate.unit_index,
+                "cost": {
+                    "energy": int(gs.pending_accelerate.cost.get("energy", 0)),
+                    "power": dict(gs.pending_accelerate.cost.get("power", {})),
+                    "any_power": int(gs.pending_accelerate.cost.get("any_power", 0)),
+                },
+            }
+        ),
         "pending_chain": (
             None
             if gs.pending_chain is None
@@ -1219,6 +1234,7 @@ def _serialize_output(out: EngineOutput) -> dict[str, Any]:
             *compute_equip_intents(_engine, RequiredTo.PLAYER_1),
             *compute_quick_draw_intents(_engine, RequiredTo.PLAYER_1),
             *compute_repeat_intents(_engine, RequiredTo.PLAYER_1),
+            *compute_accelerate_intents(_engine, RequiredTo.PLAYER_1),
         )
     ]
     p2_intents = [
@@ -1229,6 +1245,7 @@ def _serialize_output(out: EngineOutput) -> dict[str, Any]:
             *compute_equip_intents(_engine, RequiredTo.PLAYER_2),
             *compute_quick_draw_intents(_engine, RequiredTo.PLAYER_2),
             *compute_repeat_intents(_engine, RequiredTo.PLAYER_2),
+            *compute_accelerate_intents(_engine, RequiredTo.PLAYER_2),
         )
     ]
     return {
@@ -1292,6 +1309,7 @@ def _engine_snapshot(engine: GameEngine) -> dict[str, Any]:
                 *compute_move_intents(engine, actor),
                 *compute_equip_intents(engine, actor),
                 *compute_repeat_intents(engine, actor),
+                *compute_accelerate_intents(engine, actor),
             )
         ]
 

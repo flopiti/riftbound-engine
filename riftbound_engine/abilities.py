@@ -43,7 +43,6 @@ class Ability:
     triggers: tuple[str, ...] = ()
     conditions: tuple[str, ...] = ()
     costs: tuple[str, ...] = ()
-    activation_speeds: tuple[str, ...] = ()
     active_effects: tuple[str, ...] = ()
     passive_effects: tuple[str, ...] = ()
     #: True ⇒ EFFECT text: only active while the card is attached to another
@@ -58,7 +57,6 @@ class Ability:
             self.triggers
             or self.conditions
             or self.costs
-            or self.activation_speeds
             or self.active_effects
             or self.passive_effects
         )
@@ -73,7 +71,6 @@ def _ability_from_dict(d: dict) -> Ability:
         triggers=_seq("triggers"),
         conditions=_seq("conditions"),
         costs=_seq("costs"),
-        activation_speeds=_seq("activationSpeeds"),
         active_effects=_seq("activeEffects"),
         passive_effects=_seq("passiveEffects"),
         effect_text=bool(d.get("effectText")),

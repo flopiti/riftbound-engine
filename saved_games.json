@@ -937,10 +937,10 @@
       "updated_at": 1780870132.070795
     },
     {
-      "id": "watcher-test",
-      "name": "watcher test",
+      "id": "star-crossed",
+      "name": "star-crossed",
       "description": "",
-      "created_at": 1780871641.5618129,
+      "created_at": 1780928271.507361,
       "setup": {
         "player_1_deck": "ezreal_prodigal_explorer",
         "player_2_deck": "irelia_nates",
@@ -950,111 +950,790 @@
         "mulligan_bottom": "",
         "mode": "early",
         "advanced_seed": 42,
-        "shuffle_seed": 3392644305
+        "shuffle_seed": 3404876101
       },
       "moves": [
         {
           "actor": "player_1",
-          "action": "AI: I Need a thousand tailed watcher in the hands of",
-          "label": "AI: I Need a thousand tailed watcher in the hands of (10 moves)",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
           "chain": [
             {
               "actor": "player_1",
               "action": "play:end_turn"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:end_turn"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:end_turn"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:exhaust_rune:0"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:exhaust_rune:2"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:exhaust_rune:3"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:exhaust_rune:1"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:exhaust_rune:4"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:play_champion:10000"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:choose_location:base"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:end_turn"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:end_turn"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:move_unit:0:battlefield_1"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:pass_showdown"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:pass_showdown"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:exhaust_rune:0"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:exhaust_rune:1"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:play_unit:2"
-            },
-            {
-              "actor": "player_2",
-              "action": "play:choose_location:battlefield_1"
             }
           ]
         },
         {
           "actor": "player_2",
-          "action": "play:pass_priority",
-          "label": "Pass (priority)",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
           "chain": [
             {
               "actor": "player_2",
-              "action": "play:pass_priority"
+              "action": "play:end_turn"
             }
           ]
         },
         {
           "actor": "player_1",
-          "action": "play:pass_priority",
-          "label": "Pass (priority)",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
           "chain": [
             {
               "actor": "player_1",
-              "action": "play:pass_priority"
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Ravenbloom Student",
+          "label": "Ravenbloom Student",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:4"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:choose_location:base",
+          "label": "player_1:play:choose_location:base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Ezreal, Prodigy",
+          "label": "Ezreal, Prodigy",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_and_recycle_rune:3"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:5"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_champion:10000"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:choose_location:base",
+          "label": "player_1:play:choose_location:base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:move_unit:1:battlefield_1",
+          "label": "player_1:play:move_unit:1:battlefield_1",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:1:battlefield_1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "Lonely Poro",
+          "label": "Lonely Poro",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:0"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:choose_location:base",
+          "label": "player_2:play:choose_location:base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
             }
           ]
         },
@@ -1071,78 +1750,102 @@
         },
         {
           "actor": "player_1",
-          "action": "shortcut:play_unit:4:Chaos\u00d74#Mind\u00d73",
-          "label": "Play Thousand-Tailed Watcher (4 Chaos, 3 Mind)",
+          "action": "play:end_turn",
+          "label": "End turn",
           "chain": [
             {
               "actor": "player_1",
-              "action": "play:exhaust_and_recycle_rune:0"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:exhaust_rune:1"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:exhaust_rune:3"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:exhaust_rune:0"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:exhaust_rune:2"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:exhaust_rune:4"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:exhaust_rune:5"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:play_unit:4"
-            }
-          ]
-        },
-        {
-          "actor": "player_1",
-          "action": "play:choose_location:base",
-          "label": "Place Thousand-Tailed Watcher on Base",
-          "chain": [
-            {
-              "actor": "player_1",
-              "action": "play:choose_location:base"
-            }
-          ]
-        },
-        {
-          "actor": "player_1",
-          "action": "play:pass_priority",
-          "label": "Pass (priority)",
-          "chain": [
-            {
-              "actor": "player_1",
-              "action": "play:pass_priority"
+              "action": "play:end_turn"
             }
           ]
         },
         {
           "actor": "player_2",
-          "action": "play:pass_priority",
-          "label": "Pass (priority)",
+          "action": "shortcut:play_champion:10000:Calm\u00d74#Chaos\u00d71",
+          "label": "Play Irelia, Fervent (4 Calm, 1 Chaos)",
           "chain": [
             {
               "actor": "player_2",
-              "action": "play:pass_priority"
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:4"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:5"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:7"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_champion:10000"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Irelia, Fervent on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:1:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:1:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
             }
           ]
         }
-      ],
-      "updated_at": 1780871643.004551
+      ]
     }
   ]
 }

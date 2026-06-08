@@ -19,7 +19,7 @@ GUST_REQ = "ANY UNIT (1[<=3M BF])"
 # nonexistent file), so Gust's tagged RETURN_TO_HAND effect won't load on its
 # own. Stub it the same way the trigger tests do so the effect actually runs.
 _GUST_ABILITY = _abilities.Ability(
-    activation_speeds=("REACTION",), active_effects=("RETURN_TO_HAND",)
+    active_effects=("RETURN_TO_HAND",)
 )
 
 

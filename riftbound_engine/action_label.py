@@ -196,6 +196,13 @@ def label_for_action(game_state: Any, actor: Any, action: str) -> str:
     if action == "play:choose_repeat:no":
         return "Don't repeat"
 
+    if action == "play:choose_accelerate:yes":
+        acc = getattr(gs, "pending_accelerate", None)
+        card = acc.card if acc else None
+        return f"Accelerate {card}" if card else "Accelerate"
+    if action == "play:choose_accelerate:no":
+        return "Don't accelerate"
+
     m = re.fullmatch(r"play:choose_effect_target:(.+)", action)
     if m:
         token = m.group(1)

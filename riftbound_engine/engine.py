@@ -328,6 +328,30 @@ class PendingSpellRepeat:
 
 
 @dataclass
+class PendingAccelerate:
+    """A just-played [Accelerate] unit waiting for its controller to decide
+    whether to pay the additional cost to enter READY.
+
+    Modeled on :class:`PendingSpellRepeat`: it appears AFTER the unit's
+    location is chosen. While set, the controller may bank Energy/Power by
+    exhausting/recycling runes (the same shortcut-payment way), then either
+    ``play:choose_accelerate:yes`` (pay the cost, ready the unit) or
+    ``play:choose_accelerate:no`` (decline; the unit stays exhausted).
+
+    The unit's "when you play me" event is DEFERRED until this decision
+    resolves, so its trigger/chain doesn't interleave with the decision —
+    ``source_ref`` / ``battlefield`` carry what the emit needs.
+    """
+
+    actor: RequiredTo
+    card: str
+    unit_index: int
+    cost: dict
+    source_ref: str
+    battlefield: str | None = None
+
+
+@dataclass
 class ChainItem:
     """One spell sitting on the chain (the priority stack).
 
@@ -577,6 +601,9 @@ class GameState:
     #: Set while a just-played [Repeat] spell waits for the caster to decide
     #: whether to pay the additional cost and repeat. See PendingSpellRepeat.
     pending_spell_repeat: "PendingSpellRepeat | None" = None
+    #: Set while a just-played [Accelerate] unit waits for its controller to
+    #: decide whether to pay the extra cost to enter ready. See PendingAccelerate.
+    pending_accelerate: "PendingAccelerate | None" = None
     #: The priority stack. Set the moment a spell is played and cleared when
     #: both players pass in a row (the chain resolves). While set, the player
     #: holding priority may cast a Reaction spell or `play:pass_priority`.
@@ -825,6 +852,22 @@ class GameEngine:
                         "any_power": int(self._game_state.pending_spell_repeat.cost.get("any_power", 0)),
                     },
                     rounds=[list(r) for r in self._game_state.pending_spell_repeat.rounds],
+                )
+            ),
+            pending_accelerate=(
+                None
+                if self._game_state.pending_accelerate is None
+                else PendingAccelerate(
+                    actor=self._game_state.pending_accelerate.actor,
+                    card=self._game_state.pending_accelerate.card,
+                    unit_index=self._game_state.pending_accelerate.unit_index,
+                    cost={
+                        "energy": int(self._game_state.pending_accelerate.cost.get("energy", 0)),
+                        "power": dict(self._game_state.pending_accelerate.cost.get("power", {})),
+                        "any_power": int(self._game_state.pending_accelerate.cost.get("any_power", 0)),
+                    },
+                    source_ref=self._game_state.pending_accelerate.source_ref,
+                    battlefield=self._game_state.pending_accelerate.battlefield,
                 )
             ),
             pending_effect_choice=(
@@ -1782,11 +1825,24 @@ class GameEngine:
         for picks, uids in rounds:
             resolved, reason = self._resolve_round_targets(item.requirement, picks, uids, caster)
             if resolved is None:
-                # Targets no longer satisfy the requirement (e.g. buffed past
-                # Gust's 3-Might cap, or left play) → the effect can't apply.
-                # Emit a dedicated "fizzle" feed line carrying the SPECIFIC
-                # reason so the UI can explain why nothing happened.
+                # The chosen target no longer satisfies the requirement (buffed
+                # past Gust's 3-Might cap, or removed in reaction). Only the
+                # TARGETED effects fizzle — any UNtargeted effect in the same
+                # ability still resolves (e.g. Stupefy's "Draw 1" happens even
+                # though the "-1 Might" had no unit to land on). If EVERY effect
+                # was targeted, the whole thing did nothing.
+                untargeted = [c for c in codes if not _effects.effect_uses_targets(c)]
                 self._log_event("fizzle", f"{item.card} did nothing — {reason}")
+                if untargeted:
+                    self._run_effect_codes(
+                        controller=item.actor,
+                        source=None,
+                        trigger="",
+                        event_kind="",
+                        label=item.card or "",
+                        codes=untargeted,
+                        targets=[],
+                    )
                 continue
             self._run_effect_codes(
                 controller=item.actor,
@@ -2808,6 +2864,22 @@ class GameEngine:
                 # is to DECLINE; everyone else is suppressed.
                 chooser = repeat.actor
                 opts = ["play:choose_repeat:no"]
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=opts if chooser == RequiredTo.PLAYER_1 else [],
+                    player_2_options=opts if chooser == RequiredTo.PLAYER_2 else [],
+                    required_action=_required_action(chooser, RequiredStep.ACTION_TURN),
+                )
+
+            accel = self._game_state.pending_accelerate
+            if accel is not None:
+                # A just-played [Accelerate] unit is waiting on its controller's
+                # pay-to-ready decision. Like [Repeat], the WAYS TO PAY are
+                # pre-costed picker chips (player_X_intents, via
+                # shortcuts.compute_accelerate_intents); the only flat option
+                # here is to DECLINE.
+                chooser = accel.actor
+                opts = ["play:choose_accelerate:no"]
                 return EngineOutput(
                     game_state=self.game_state,
                     player_1_options=opts if chooser == RequiredTo.PLAYER_1 else [],

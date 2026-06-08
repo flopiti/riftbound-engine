@@ -45,14 +45,25 @@ class EffectContext:
 Handler = Callable[[EffectContext], None]
 _REGISTRY: dict[str, Handler] = {}
 
+#: Codes whose effect ACTS ON the chosen target(s) (``ctx.targets``). These are
+#: the only effects that should fizzle when a spell's target leaves play /
+#: stops satisfying the requirement; UNtargeted effects in the same spell (e.g.
+#: Stupefy's "Draw 1") still resolve. Populated via ``targeted=True`` below.
+_TARGETED_CODES: set[str] = set()
+_TARGETED_PATTERNS: list[re.Pattern[str]] = []
 
-def register_effect(code: str) -> Callable[[Handler], Handler]:
-    """Declare the handler for an ``activeEffect`` code."""
+
+def register_effect(code: str, *, targeted: bool = False) -> Callable[[Handler], Handler]:
+    """Declare the handler for an ``activeEffect`` code. Pass ``targeted=True``
+    when the effect acts on the chosen target(s) so it (and only it) fizzles
+    if the target is no longer valid at resolution."""
 
     def decorator(fn: Handler) -> Handler:
         if code in _REGISTRY:
             raise ValueError(f"effect {code!r} is already registered")
         _REGISTRY[code] = fn
+        if targeted:
+            _TARGETED_CODES.add(code)
         return fn
 
     return decorator
@@ -65,14 +76,19 @@ def register_effect(code: str) -> Callable[[Handler], Handler]:
 _PATTERN_HANDLERS: list[tuple[re.Pattern[str], Handler]] = []
 
 
-def register_effect_pattern(pattern: str) -> Callable[[Handler], Handler]:
+def register_effect_pattern(
+    pattern: str, *, targeted: bool = False
+) -> Callable[[Handler], Handler]:
     """Declare a handler for every code matching ``pattern`` (a full-match
-    regex). The handler reads ``ctx.code`` to recover the specific amount."""
+    regex). The handler reads ``ctx.code`` to recover the specific amount.
+    Pass ``targeted=True`` when the family acts on the chosen target(s)."""
 
     compiled = re.compile(pattern)
 
     def decorator(fn: Handler) -> Handler:
         _PATTERN_HANDLERS.append((compiled, fn))
+        if targeted:
+            _TARGETED_PATTERNS.append(compiled)
         return fn
 
     return decorator
@@ -84,6 +100,13 @@ def registered_effect_codes() -> frozenset[str]:
 
 def is_implemented(code: str) -> bool:
     return code in _REGISTRY or any(p.fullmatch(code) for p, _ in _PATTERN_HANDLERS)
+
+
+def effect_uses_targets(code: str) -> bool:
+    """True if ``code`` acts on the spell/ability's chosen target(s). Such an
+    effect fizzles when the target is gone at resolution; an untargeted effect
+    (Draw, Channel, Score, …) in the same ability still resolves."""
+    return code in _TARGETED_CODES or any(p.fullmatch(code) for p in _TARGETED_PATTERNS)
 
 
 def execute_effect(ctx: EffectContext) -> bool:
@@ -298,7 +321,7 @@ def _buff_targets(ctx: EffectContext, amount: int) -> None:
         _buff_unit(unit, amount)
 
 
-@register_effect_pattern(r"GIVE_UNIT_[+-]\d+M")
+@register_effect_pattern(r"GIVE_UNIT_[+-]\d+M", targeted=True)
 def _give_unit_delta(ctx: EffectContext) -> None:
     """GIVE_UNIT_+2M / -1M / +3M …: the chosen target unit(s) get ±N Might.
     With [Repeat] the spell re-runs per round, so the delta stacks."""
@@ -411,7 +434,7 @@ def _additional_2m(ctx: EffectContext) -> None:
     _buff_source(ctx, 2)
 
 
-@register_effect("RETURN_TO_HAND")
+@register_effect("RETURN_TO_HAND", targeted=True)
 def _return_to_hand(ctx: EffectContext) -> None:
     """Gust: return the chosen target unit(s) to their owner's hand. The
     Spell Choice Requirement already restricts the pick (a unit at a
