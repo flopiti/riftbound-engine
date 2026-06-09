@@ -207,6 +207,29 @@ def label_for_action(game_state: Any, actor: Any, action: str) -> str:
     if action == "play:choose_accelerate:no":
         return "Don't accelerate"
 
+    m = re.fullmatch(r"play:activate:(.+)", action)
+    if m:
+        ref = m.group(1)
+        gm = re.fullmatch(r"gear:(player_[12]):(\d+)", ref)
+        um = re.fullmatch(r"(player_[12]):(\d+)", ref)
+        name = None
+        if gm:
+            gears = gs.player_1_gears if gm.group(1) == "player_1" else gs.player_2_gears
+            gi = int(gm.group(2))
+            name = gears[gi].card if 0 <= gi < len(gears) else None
+        elif um:
+            us = gs.player_1_units if um.group(1) == "player_1" else gs.player_2_units
+            ui = int(um.group(2))
+            name = us[ui].card if 0 <= ui < len(us) else None
+        return f"Activate {name} (exhaust)" if name else "Activate (exhaust)"
+
+    if action == "play:choose_ability_cost:yes":
+        acc = getattr(gs, "pending_ability_cost", None)
+        card = acc.source_card if acc else None
+        return f"Exhaust {card} → use ability" if card else "Exhaust → use ability"
+    if action == "play:choose_ability_cost:no":
+        return "Don't exhaust"
+
     m = re.fullmatch(r"play:choose_effect_target:(.+)", action)
     if m:
         token = m.group(1)
@@ -224,6 +247,17 @@ def label_for_action(game_state: Any, actor: Any, action: str) -> str:
             if choice is not None and choice.code == "MAY_GIVE_UNIT_HERE_+1M":
                 return f"{src}: +1 Might → {uname}"
             return f"{src}: choose {uname}"
+        # Hand-card token (discard) — resolve against the chooser's hand.
+        hm = re.fullmatch(r"h-(\d+)", token)
+        if hm and choice is not None:
+            hand = (
+                gs.player_1_hand
+                if choice.actor.value == "player_1"
+                else gs.player_2_hand
+            ) or []
+            hi = int(hm.group(1))
+            cname = hand[hi] if 0 <= hi < len(hand) else f"card #{hi}"
+            return f"{src}: discard {cname}"
         return f"{src}: {token}"
 
     return action

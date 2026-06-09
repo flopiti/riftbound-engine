@@ -704,16 +704,46 @@ def _finalize_spell_choice(ctx: ActionTurnContext, choice) -> None:
     choices."""
     from ..requirements import token_to_ref
 
-    targets = [
+    unit_targets = [
         f"{c}:{i}"
         for picks in choice.chosen
         for c, i in (token_to_ref(tok) for tok in picks)
     ]
+
+    # ACTIVATED-ABILITY mode: the pick was for an in-play permanent's ability,
+    # not a cast spell. Put its effect on the chain with the chosen targets
+    # (no spell, no trash). The cost (exhaust) was already paid at activation.
+    if choice.activation_effects:
+        ctx.engine._backfill_unit_uids()  # ensure targets have stable uids
+        uids = [ctx.engine._target_token_uid(t) for t in unit_targets]
+        ctx.engine._game_state.pending_spell_choice = None
+        ctx.engine._push_activated_effect(
+            ctx.actor,
+            choice.activation_source,
+            tuple(choice.activation_effects),
+            unit_targets,
+            uids,
+            choice.requirement,
+        )
+        return
+
+    targets = list(unit_targets)
     targets += [f"move_dest:{d}" for d in choice.destinations]
     targets += [f"bf:{b}" for b in choice.battlefields]
     targets += [f"gear:{g}" for g in choice.gears]
     targets += [f"trash:{t}" for t in choice.trash]
-    targets += [f"spell:{s}" for s in choice.spells]
+    # Chain-spell picks were chosen as POSITIONAL c-<i> tokens; translate each to
+    # the target item's STABLE cid now (the chain is unchanged at finalize), so a
+    # counterspell can re-locate its target at resolution even after the chain
+    # shifts (other reactions stack, items resolve and pop).
+    chain = ctx.engine._game_state.pending_chain
+    for s in choice.spells:
+        cid = None
+        if s.startswith("c-") and chain is not None and s[2:].isdigit():
+            idx = int(s[2:])
+            if 0 <= idx < len(chain.items):
+                cid = chain.items[idx].cid
+        targets.append(f"spell_cid:{cid}" if cid is not None else f"spell:{s}")
     targets += [f"location:{loc}" for loc in choice.locations]
     # Accumulate this round's targets onto any prior [Repeat] rounds, then
     # branch: offer another repeat (if the keyword + affordability allow) or
@@ -983,11 +1013,14 @@ def _choose_effect_target(ctx: ActionTurnContext) -> None:
     +1 might").
 
     Wire format: ``play:choose_effect_target:<token>`` where ``<token>`` is
-    one of the choice's enumerated unit tokens (``p1-0`` / ``p2-1``), or
-    ``play:choose_effect_target:pass`` to decline (the "may").
+    one of the choice's enumerated tokens (units ``p1-0``/``p2-1``, or hand
+    cards ``h-0`` for a discard), or ``play:choose_effect_target:pass`` to
+    decline — but ONLY when the choice is optional (a "may"). A FORCED choice
+    (e.g. "discard 1") rejects ``pass``.
 
     Applies the pick, clears the pending state, then continues the ability's
-    remaining effect codes (which may open a new choice).
+    remaining effect codes (carrying the same targets), which may open a new
+    choice.
     """
     from ..effects import EffectContext, apply_choice_effect
 
@@ -1002,13 +1035,16 @@ def _choose_effect_target(ctx: ActionTurnContext) -> None:
     token = ctx.payload.strip().lower()
     if not token:
         raise ValueError(
-            "play:choose_effect_target requires a unit token or 'pass' "
+            "play:choose_effect_target requires a pick token or 'pass' "
             "(e.g. play:choose_effect_target:p1-0)"
         )
+    if token == "pass" and not choice.optional:
+        raise ValueError("this choice is mandatory — you must pick, you can't pass")
     if token != "pass" and token not in choice.options:
         raise ValueError(
             f"{token!r} is not a valid choice "
-            f"(options: {', '.join(choice.options)} or pass)"
+            f"(options: {', '.join(choice.options)}"
+            f"{' or pass' if choice.optional else ''})"
         )
 
     gs.pending_effect_choice = None
@@ -1022,6 +1058,7 @@ def _choose_effect_target(ctx: ActionTurnContext) -> None:
             code=choice.code,
             trigger=choice.trigger,
             event_kind=choice.event_kind,
+            targets=tuple(choice.continuation_targets),
         )
         text = apply_choice_effect(ectx, token)
         ctx.engine._log_event("effect", f"{choice.label}: {text}")
@@ -1035,6 +1072,7 @@ def _choose_effect_target(ctx: ActionTurnContext) -> None:
         event_kind=choice.event_kind,
         label=choice.label,
         codes=list(choice.remaining_effects),
+        targets=list(choice.continuation_targets),
     )
     ctx.engine._drain_triggers()
 
@@ -1162,6 +1200,114 @@ def _choose_accelerate(ctx: ActionTurnContext) -> None:
             battlefield=acc.battlefield,
         )
     )
+
+
+@register_turn_action("choose_ability_cost")
+def _choose_ability_cost(ctx: ActionTurnContext) -> None:
+    """Decide whether to pay a fired triggered ability's cost (EXHAUST_THIS).
+
+    ``play:choose_ability_cost:yes`` exhausts the ability's source and puts its
+    effect on the chain; ``:no`` declines and the effect never happens. Only the
+    ability's controller may answer. If the source became unpayable (exhausted /
+    left play) in the meantime, paying simply does nothing."""
+    from ..engine import RequiredTo as RT
+    from ..triggers import TriggeredEffect
+
+    gs = ctx.engine._game_state
+    pend = gs.pending_ability_cost
+    if pend is None:
+        raise ValueError("no ability-cost decision is pending")
+    if ctx.actor != pend.actor:
+        raise ValueError(
+            f"the ability-cost decision belongs to {pend.actor.value}, not {ctx.actor.value}"
+        )
+    choice = ctx.payload.strip().lower()
+    if choice not in ("yes", "no"):
+        raise ValueError("play:choose_ability_cost requires 'yes' or 'no'")
+
+    gs.pending_ability_cost = None
+
+    if choice == "yes":
+        src = ctx.engine._resolve_exhaustable_source(pend.source)
+        if src is not None and not src.exhausted:
+            src.exhausted = True  # pay the [exhaust this] cost
+            # Effect reaches the chain ONLY because the cost was paid.
+            ctx.engine._push_effect_to_chain(
+                TriggeredEffect(
+                    controller=pend.actor.value,
+                    source=pend.source,
+                    trigger=pend.trigger,
+                    event_kind=pend.event_kind,
+                    effects=tuple(pend.effects),
+                    conditions=tuple(pend.conditions),
+                    costs=(),  # already paid — don't re-gate
+                    label=pend.label,
+                    context_card=pend.context_card,
+                )
+            )
+    # 'no' (or unpayable) → the effect is not put on the chain.
+
+
+@register_turn_action("activate")
+def _activate(ctx: ActionTurnContext) -> None:
+    """Activate an in-play permanent's ACTIVATED ability (today: EXHAUST_THIS-
+    only, e.g. Heart of Dark Ice's "exhaust: give a unit +3 might").
+
+    Wire format: ``play:activate:<source>`` where source is a unit ref
+    ("player_1:0") or standalone-gear ref ("gear:player_1:0"). Action-speed: on
+    your own turn, nothing else mid-resolution. Pays by exhausting the source,
+    then either opens a target pick (reusing the spell-choice flow) or puts the
+    effect straight on the chain. Energy/rune-cost activated abilities (e.g. The
+    Syren) are not handled yet."""
+    from ..engine import PendingSpellChoice
+    from ..engine import RequiredTo as RT
+
+    gs = ctx.engine._game_state
+    blockers = (
+        gs.pending_play, gs.pending_spell_choice, gs.pending_chain, gs.pending_showdown,
+        gs.pending_combat, getattr(gs, "pending_spell_repeat", None),
+        getattr(gs, "pending_accelerate", None), getattr(gs, "pending_ability_cost", None),
+        getattr(gs, "pending_effect_choice", None),
+    )
+    if any(b is not None for b in blockers):
+        raise ValueError("cannot activate an ability mid-resolution")
+    src = ctx.payload.strip()
+    if not src:
+        raise ValueError("play:activate requires a source ref (e.g. play:activate:player_1:0)")
+    if ctx.actor not in (RT.PLAYER_1, RT.PLAYER_2):
+        raise ValueError("activate requires player_1 or player_2")
+    if gs.current_player != ctx.actor:
+        raise ValueError("you may only activate your own abilities on your turn")
+    owner = src.split(":")[1] if src.startswith("gear:") else src.split(":")[0]
+    if owner != ctx.actor.value:
+        raise ValueError("you may only activate a permanent you control")
+
+    ability = ctx.engine._activated_ability_at(src)
+    if ability is None:
+        raise ValueError(f"{src!r} has no activatable [exhaust] ability")
+    perm = ctx.engine._resolve_exhaustable_source(src)
+    if perm is None:
+        raise ValueError(f"{src!r} is not in play")
+    if perm.exhausted:
+        raise ValueError("source is already exhausted — its cost can't be paid")
+
+    effects = tuple(ability.active_effects)
+    req = ctx.engine._derive_activation_requirement(effects)
+    if req == "ANY UNIT (1)" and not (gs.player_1_units or gs.player_2_units):
+        raise ValueError("no valid target for this ability")
+
+    # Pay the cost: exhaust the source.
+    perm.exhausted = True
+    if req:
+        gs.pending_spell_choice = PendingSpellChoice(
+            actor=ctx.actor,
+            card=ctx.engine._card_name_for_ref(src) or "",
+            requirement=req,
+            activation_source=src,
+            activation_effects=effects,
+        )
+    else:
+        ctx.engine._push_activated_effect(ctx.actor, src, effects, [], [], "")
 
 
 @register_turn_action("pass_priority")
@@ -1546,6 +1692,21 @@ def _move_unit(ctx: ActionTurnContext) -> None:
             battlefield=destination,
             initiator=ctx.actor,
         )
+        # If the battlefield was held by the OPPONENT, they are the DEFENDER —
+        # fire their "when you defend here" abilities. (An UNCONTROLLED BF has
+        # no defender, so no ON_DEFEND.) Queued now; drained on the next
+        # start() before the showdown menu, so it resolves in the reaction
+        # window ahead of mustering. See engine.start() single drain point.
+        from ..triggers import GameEvent
+
+        if dest_controller is not None and dest_controller != ctx.actor:
+            ctx.engine._emit(
+                GameEvent(
+                    kind="ON_DEFEND",
+                    controller=dest_controller.value,
+                    battlefield=destination,
+                )
+            )
     # If a showdown is ALREADY open (this was a muster move), it stays open
     # and unlocked — the initiator can keep reinforcing or end mustering by
     # playing a card / passing.

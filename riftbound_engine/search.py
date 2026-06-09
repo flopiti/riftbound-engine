@@ -537,6 +537,7 @@ def _signature(gs: GameState):
         getattr(gs, "pending_effect_choice", None) is not None,
         getattr(gs, "pending_spell_repeat", None) is not None,
         getattr(gs, "pending_accelerate", None) is not None,
+        getattr(gs, "pending_ability_cost", None) is not None,
     )
 
 

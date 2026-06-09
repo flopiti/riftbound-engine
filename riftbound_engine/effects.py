@@ -300,13 +300,9 @@ def _opponent_discard_1(ctx: EffectContext) -> None:
         trash.append(hand.pop())
 
 
-@register_effect("DISCARD_1_DRAW_1")
-def _discard_1_draw_1(ctx: EffectContext) -> None:
-    hand = _hand(ctx.engine, ctx.controller)
-    trash = _trash(ctx.engine, ctx.controller)
-    if hand:
-        trash.append(hand.pop())
-    _draw_n(ctx.engine, ctx.controller, 1)
+# NOTE: DISCARD_1 and DISCARD_1_DRAW_1 are CHOICE effects (the player picks
+# WHICH card to discard) — registered via register_choice_effect further
+# below, not as instant handlers here.
 
 
 # --------------------------------------------------------------------------- #
@@ -350,6 +346,22 @@ def _give_unit_delta(ctx: EffectContext) -> None:
     _buff_targets(ctx, _amount_from_code(ctx.code))
 
 
+@register_effect("GIVE_FRIENDLY_+1M_AND_+1M_IF_ALONE", targeted=True)
+def _give_friendly_plus_alone(ctx: EffectContext) -> None:
+    """En Garde: "Give a friendly unit +1 Might this turn, then an additional
+    +1 Might this turn if it is the only unit you control THERE." So +1 always,
+    and +1 more when the target is the lone unit its controller has at its
+    location (base / either battlefield). Buff is this-turn ``bonus_might``."""
+    for ref in ctx.targets:
+        units, _, unit = _resolve_unit(ctx.engine, ref)
+        if unit is None:
+            continue
+        # "you control there" = the friendly target's controller (``units`` is
+        # that controller's unit list) at the target's own location.
+        here = sum(1 for u in units if u.location == unit.location)
+        unit.bonus_might += 2 if here == 1 else 1
+
+
 @register_effect_pattern(r"GIVE_ME_[+-]\d+M?")
 def _give_me_delta(ctx: EffectContext) -> None:
     """GIVE_ME_+1 / +2M …: the source unit gets ±N Might."""
@@ -368,11 +380,24 @@ def _give_me_delta(ctx: EffectContext) -> None:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class ChoiceEffect:
-    """Option enumerator + applier for one choice-effect code."""
+    """Option enumerator + applier for one choice-effect code.
+
+    ``optional`` ⇒ the chooser may decline (a "may" effect, e.g. Abandoned
+    Hall). When False the choice is FORCED (e.g. "discard 1"): the engine
+    won't offer a pass option, so the player must pick one of ``options``.
+
+    ``on_empty`` runs when there are NO options (nothing to pick) — instead
+    of the choice silently fizzling. It lets "do X, then do Y" effects still
+    do Y when X is impossible: e.g. DISCARD_1_DRAW_1 with an empty hand has
+    nothing to discard, but ``on_empty`` still draws. Returns a feed line (or
+    None for a plain fizzle)."""
 
     options: Callable[[EffectContext], list[str]]
     #: Applies the picked token; returns a human line for the event feed.
     apply: Callable[[EffectContext, str], str]
+    optional: bool = True
+    #: Ran when ``options`` is empty (no valid pick). Returns a feed line.
+    on_empty: Callable[[EffectContext], str | None] | None = None
 
 
 _CHOICE_REGISTRY: dict[str, ChoiceEffect] = {}
@@ -383,10 +408,14 @@ def register_choice_effect(
     *,
     options: Callable[[EffectContext], list[str]],
     apply: Callable[[EffectContext, str], str],
+    optional: bool = True,
+    on_empty: Callable[[EffectContext], str | None] | None = None,
 ) -> None:
     if code in _CHOICE_REGISTRY:
         raise ValueError(f"choice effect {code!r} is already registered")
-    _CHOICE_REGISTRY[code] = ChoiceEffect(options=options, apply=apply)
+    _CHOICE_REGISTRY[code] = ChoiceEffect(
+        options=options, apply=apply, optional=optional, on_empty=on_empty
+    )
 
 
 def is_choice_effect(code: str) -> bool:
@@ -397,8 +426,25 @@ def choice_effect_options(ctx: EffectContext) -> list[str]:
     return _CHOICE_REGISTRY[ctx.code].options(ctx)
 
 
+def choice_effect_optional(code: str) -> bool:
+    """Whether the choice may be declined (a "may"). Forced choices return
+    False so the engine omits the pass option."""
+    ce = _CHOICE_REGISTRY.get(code)
+    return ce.optional if ce is not None else True
+
+
 def apply_choice_effect(ctx: EffectContext, token: str) -> str:
     return _CHOICE_REGISTRY[ctx.code].apply(ctx, token)
+
+
+def run_choice_effect_on_empty(ctx: EffectContext) -> str | None:
+    """Run the choice's ``on_empty`` fallback (when there were no options),
+    or ``None`` if it has none. Lets a combined effect still do its non-choice
+    half (e.g. DISCARD_1_DRAW_1 still draws when the hand is empty)."""
+    ce = _CHOICE_REGISTRY.get(ctx.code)
+    if ce is None or ce.on_empty is None:
+        return None
+    return ce.on_empty(ctx)
 
 
 def _resolve_wire_token(engine, token: str):
@@ -450,6 +496,75 @@ register_choice_effect(
 )
 
 
+# --------------------------------------------------------------------------- #
+# Hand-card choice effects (discard). Tokens are ``h-<i>`` hand indices for
+# the effect's controller — the choice machinery is token-agnostic, so each
+# effect interprets its own token scheme.
+# --------------------------------------------------------------------------- #
+def _own_hand_options(ctx: EffectContext) -> list[str]:
+    """One ``h-<i>`` token per card in the controller's hand."""
+    hand = _hand(ctx.engine, ctx.controller) or []
+    return [f"h-{i}" for i in range(len(hand))]
+
+
+def _hand_index_from_token(token: str) -> int | None:
+    m = token.strip().lower()
+    if not m.startswith("h-"):
+        return None
+    try:
+        return int(m[2:])
+    except ValueError:
+        return None
+
+
+def _discard_picked(ctx: EffectContext, token: str) -> str:
+    """Move the chosen hand card to the controller's trash. Returns a feed
+    line; raises if the token doesn't point at a hand card."""
+    i = _hand_index_from_token(token)
+    hand = _hand(ctx.engine, ctx.controller)
+    trash = _trash(ctx.engine, ctx.controller)
+    if i is None or hand is None or not (0 <= i < len(hand)):
+        raise ValueError(f"{token!r} does not point at a card in hand")
+    card = hand.pop(i)
+    trash.append(card)
+    return f"discard {card}"
+
+
+def _discard_picked_then_draw(ctx: EffectContext, token: str) -> str:
+    line = _discard_picked(ctx, token)
+    drawn = _draw_n(ctx.engine, ctx.controller, 1)
+    return f"{line}, draw 1" if drawn else f"{line} (deck empty, no draw)"
+
+
+# Standalone "discard 1" — a FORCED choice (you pick WHICH card, but can't
+# decline). Composable: tag a card ``[DISCARD_1, DRAW_1]`` and the engine
+# pauses on the discard, then runs the instant DRAW_1 next — so the draw
+# happens even if the hand is emptied by the discard.
+register_choice_effect(
+    "DISCARD_1",
+    options=_own_hand_options,
+    apply=_discard_picked,
+    optional=False,
+)
+
+# Combined "discard 1, then draw 1" (Zaun Warrens). Single forced choice:
+# pick a card to discard, then draw. With an empty hand there's nothing to
+# discard, so the choice has no options — but the "then draw 1" still happens
+# via on_empty (you just don't discard).
+def _draw_1_only(ctx: EffectContext) -> str:
+    drawn = _draw_n(ctx.engine, ctx.controller, 1)
+    return "no card to discard, draw 1" if drawn else "no card to discard, deck empty"
+
+
+register_choice_effect(
+    "DISCARD_1_DRAW_1",
+    options=_own_hand_options,
+    apply=_discard_picked_then_draw,
+    optional=False,
+    on_empty=_draw_1_only,
+)
+
+
 @register_effect("ADDITIONAL_2M")
 def _additional_2m(ctx: EffectContext) -> None:
     # "+2 Might" on the source — same as GIVE_ME_+2M but a distinct code.
@@ -480,20 +595,94 @@ def _return_to_hand(ctx: EffectContext) -> None:
                 hand.append(unit.card)
 
 
-@register_effect("GIVE_UNIT_SHIELD", targeted=True)
-def _give_unit_shield(ctx: EffectContext) -> None:
-    """Grant the chosen target unit(s) [Shield] THIS TURN (e.g. Fortified
-    Position: "choose a unit; it gains [Shield 2] this turn"). The amount comes
-    from the granting card's own reminder text ([Shield N]); bonus_shield
-    expires at end of turn and only matters while the unit defends."""
+@register_effect("MAY_MOVE_ENEMY_UNIT", targeted=True)
+def _may_move_enemy_unit(ctx: EffectContext) -> None:
+    """Charm: move the chosen enemy unit to the location the caster picked.
+
+    Both halves are the spell's Spell Choice Requirement ("MOVE ENEMY UNIT"),
+    captured at cast: by resolution ``ctx.targets`` is the picked unit ref(s)
+    followed by one ``move_dest:<location>`` token per moved unit (in pick
+    order). An effect-driven move is a FREE relocation — it does NOT exhaust the
+    unit and may send it anywhere (base <-> either battlefield); the cast-time
+    destination options already enforced "any location except the current one".
+
+    Units are re-located by uid before this runs, so a target that left play is
+    already dropped (and the round fizzles via the requirement re-check)."""
+    from .engine import UNIT_LOCATIONS
+
+    unit_refs = [t for t in ctx.targets if t.startswith(("player_1:", "player_2:"))]
+    dests = [t.split(":", 1)[1] for t in ctx.targets if t.startswith("move_dest:")]
+    for ref, dest in zip(unit_refs, dests):
+        if dest not in UNIT_LOCATIONS:
+            continue
+        _, _, unit = _resolve_unit(ctx.engine, ref)
+        if unit is not None:
+            unit.location = dest
+
+
+def _shield_grant_amount(ctx: EffectContext) -> int:
+    """[Shield N] amount the granting card confers (Fortified Position → 2),
+    read from its reminder text; 1 if unspecified."""
     from .csv_data import card_ability_of, shield_amount_in_text
 
     src_card = ctx.engine._card_name_for_ref(ctx.source)
-    amount = shield_amount_in_text(card_ability_of(src_card) if src_card else "")
-    for ref in ctx.targets:
-        _, _, unit = _resolve_unit(ctx.engine, ref)
-        if unit is not None:
-            unit.bonus_shield += amount
+    return shield_amount_in_text(card_ability_of(src_card) if src_card else "")
+
+
+def _give_picked_unit_shield(ctx: EffectContext, token: str) -> str:
+    """Grant the chosen unit [Shield N] this turn (bonus_shield, expires at end
+    of turn; only matters while the unit defends)."""
+    unit = _resolve_wire_token(ctx.engine, token)
+    if unit is None:
+        raise ValueError(f"{token!r} does not point at a unit in play")
+    amount = _shield_grant_amount(ctx)
+    unit.bonus_shield += amount
+    return f"[Shield {amount}] → {unit.card}"
+
+
+# Fortified Position: "When you defend here, choose a unit. It gains [Shield N]
+# this turn." A triggered (battlefield) ability with no Spell Choice
+# Requirement, so the target is picked through the choice mechanism — the
+# defender chooses one of their units HERE (``ctx.source`` is the battlefield
+# slot). Forced (not a "may"); if somehow no units are here, it just does
+# nothing.
+register_choice_effect(
+    "GIVE_UNIT_SHIELD",
+    options=_units_here_options,
+    apply=_give_picked_unit_shield,
+    optional=False,
+)
+
+
+@register_effect("COUNTER_SPELL", targeted=True)
+def _counter_spell(ctx: EffectContext) -> None:
+    """Defy: counter the chosen spell on the chain. The target was captured by
+    its stable ``cid`` (token ``spell_cid:<n>``) at cast time, so we re-locate
+    it now even though the chain shifted. Defy is a [Reaction] resolving on TOP
+    of the chain, so its target is still sitting below it — we remove it before
+    it can resolve and send it to its caster's trash WITHOUT running its effect
+    or firing ON_PLAY_SPELL. If the target already left the chain (resolved or
+    countered first), this is a clean no-op."""
+    from .engine import RequiredTo
+
+    gs = ctx.engine._game_state
+    for token in ctx.targets:
+        if not token.startswith("spell_cid:"):
+            continue
+        rest = token.split(":", 1)[1]
+        if not rest.lstrip("-").isdigit():
+            continue
+        idx, item = ctx.engine._chain_item_by_cid(int(rest))
+        # Only card-spells can be countered (not triggered-ability items), and
+        # only if still on the chain.
+        if item is None or item.card is None or gs.pending_chain is None:
+            continue
+        del gs.pending_chain.items[idx]
+        trash = (
+            gs.player_1_trash if item.actor == RequiredTo.PLAYER_1 else gs.player_2_trash
+        )
+        trash.append(item.card)
+        ctx.engine._log_event("effect", f"{item.card} countered → trash")
 
 
 @register_effect("GIVE_ENEMY_UNITS_-3M_MIN_1")

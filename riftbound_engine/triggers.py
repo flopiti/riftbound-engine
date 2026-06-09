@@ -39,6 +39,10 @@ ON_HOLD = "ON_HOLD"
 #: A point is SCORED at a battlefield — fires for ANY point, whether it came
 #: from conquering or holding. ("Score here" cares only that a point landed.)
 ON_SCORE = "ON_SCORE"
+#: A showdown OPENS against a battlefield you control — you are the DEFENDER.
+#: Emitted for the defender (the prior controller) the moment the attacker
+#: moves in, before the muster/focus window.
+ON_DEFEND = "ON_DEFEND"
 TURN_START = "TURN_START"
 TURN_END = "TURN_END"
 ON_CHANNEL = "ON_CHANNEL"
@@ -52,6 +56,7 @@ EVENT_KINDS = frozenset(
         ON_CONQUER,
         ON_HOLD,
         ON_SCORE,
+        ON_DEFEND,
         TURN_START,
         TURN_END,
         ON_CHANNEL,
@@ -110,6 +115,9 @@ TRIGGER_EVENT_MAP: dict[str, TriggerSpec] = {
     "WHEN_CONQUER_HERE": TriggerSpec(ON_CONQUER, HERE),
     "WHEN_HOLD_HERE": TriggerSpec(ON_HOLD, HERE),
     "WHEN_SCORE_HERE": TriggerSpec(ON_SCORE, HERE),
+    # A showdown opened against a BF you control — fires for the card(s) HERE
+    # (the battlefield card / your units there) on the defending side.
+    "WHEN_YOU_DEFEND_HERE": TriggerSpec(ON_DEFEND, HERE),
     # --- start of a turn ----------------------------------------------------
     "AT_START_BEGGINNING_PHASE": TriggerSpec(TURN_START, FRIENDLY),
     "AT_START_EACH_FIRST_BEGGINNING_PHASE": TriggerSpec(TURN_START, FRIENDLY),
@@ -152,6 +160,10 @@ class TriggeredEffect:
     event_kind: str
     effects: tuple[str, ...]
     conditions: tuple[str, ...] = ()
+    #: The ability's COSTS (e.g. ``EXHAUST_THIS``). A payable cost turns the
+    #: triggered ability into a "you MAY pay to get the effect" decision when it
+    #: resolves; an unpayable/declined cost means the effect doesn't happen.
+    costs: tuple[str, ...] = ()
     label: str = ""
     #: Card NAME the triggering event was about, when there is one — e.g. the
     #: spell that just resolved for an ON_PLAY_SPELL trigger. Lets the UI

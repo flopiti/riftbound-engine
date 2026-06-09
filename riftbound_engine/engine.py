@@ -271,6 +271,13 @@ class PendingSpellChoice:
     #: after the caster paid the additional cost). Threaded through so the
     #: finalizer can accumulate every round's targets onto the one spell.
     prior_rounds: list[list[str]] = field(default_factory=list)
+    #: ACTIVATED-ABILITY mode: when set, this target pick is for an in-play
+    #: permanent's activated ability (not a cast spell). ``activation_source`` is
+    #: the permanent's ref ("player_1:0" / "gear:player_1:0"), ``activation_effects``
+    #: its effect codes. On finalize the chosen targets are put on the chain as
+    #: an EFFECT item (not a spell → no trash, no ON_PLAY_SPELL).
+    activation_source: str | None = None
+    activation_effects: tuple[str, ...] = ()
 
 
 @dataclass
@@ -308,6 +315,13 @@ class PendingEffectChoice:
     #: Trigger / event metadata carried through for the continuation context.
     trigger: str = ""
     event_kind: str = ""
+    #: True ⇒ the chooser may decline (a "may" effect, e.g. Abandoned Hall):
+    #: ``play:choose_effect_target:pass`` is offered. False ⇒ a FORCED choice
+    #: (e.g. "discard 1"): the player must pick, no pass option.
+    optional: bool = True
+    #: Targets carried into the continuation's effect codes (e.g. a spell's
+    #: chosen units), so codes after the choice still see them.
+    continuation_targets: tuple[str, ...] = ()
 
 
 @dataclass
@@ -358,6 +372,28 @@ class PendingAccelerate:
 
 
 @dataclass
+class PendingAbilityCost:
+    """A triggered ability whose trigger just fired but which carries a payable
+    cost (today: ``EXHAUST_THIS``). The controller MAY pay the cost to put the
+    ability's effect on the chain; declining means the effect never happens.
+    Set during trigger drain, BEFORE the effect is pushed — the effect only
+    reaches the chain if the player pays (``play:choose_ability_cost:yes``).
+
+    Carries everything needed to rebuild the TriggeredEffect and push it on pay
+    (so deep-copy/serialize stay flat — no nested dataclass)."""
+
+    actor: RequiredTo
+    source: str | None
+    source_card: str | None
+    trigger: str
+    event_kind: str
+    effects: tuple[str, ...]
+    conditions: tuple[str, ...] = ()
+    context_card: str | None = None
+    label: str = ""
+
+
+@dataclass
 class ChainItem:
     """One spell sitting on the chain (the priority stack).
 
@@ -394,6 +430,11 @@ class ChainItem:
     target_uids: list[int | None] = field(default_factory=list)
     #: Per-[Repeat]-round parallel of ``target_uids`` for ``repeat_targets``.
     repeat_target_uids: list[list[int | None]] = field(default_factory=list)
+    #: Stable per-game chain-item id, assigned when the item is pushed onto the
+    #: chain. Positional indices into ``pending_chain.items`` shift as items
+    #: resolve/pop, so a counterspell captures its target BY cid and re-locates
+    #: it at resolution (the chain analog of PlayedUnit.uid). 0 = unassigned.
+    cid: int = 0
 
 
 @dataclass
@@ -557,6 +598,10 @@ class GameState:
     #: life of a game; travels with branch snapshots so re-located targets stay
     #: consistent across goto/restore.
     next_unit_uid: int = 1
+    #: Next stable chain-item cid to hand out (see ChainItem.cid). Monotonic for
+    #: the life of a game; travels with snapshots so a counterspell's captured
+    #: target stays consistent across goto/restore.
+    next_chain_cid: int = 1
     #: Ordered list of every committed action that produced this state.
     #: Appended to inside ``GameEngine.apply_action`` AFTER the action
     #: succeeds, so failed/raised actions do not pollute it. Survives
@@ -614,6 +659,10 @@ class GameState:
     #: Set while a just-played [Accelerate] unit waits for its controller to
     #: decide whether to pay the extra cost to enter ready. See PendingAccelerate.
     pending_accelerate: "PendingAccelerate | None" = None
+    #: Set while a fired triggered ability waits for its controller to decide
+    #: whether to pay its cost (EXHAUST_THIS) to put the effect on the chain.
+    #: See PendingAbilityCost.
+    pending_ability_cost: "PendingAbilityCost | None" = None
     #: The priority stack. Set the moment a spell is played and cleared when
     #: both players pass in a row (the chain resolves). While set, the player
     #: holding priority may cast a Reaction spell or `play:pass_priority`.
@@ -750,6 +799,7 @@ class GameEngine:
         return GameState(
             counter=self._game_state.counter,
             next_unit_uid=self._game_state.next_unit_uid,
+            next_chain_cid=self._game_state.next_chain_cid,
             action_log=[
                 ActionLogEntry(sequence=e.sequence, actor=e.actor, action=e.action)
                 for e in self._game_state.action_log
@@ -848,6 +898,8 @@ class GameEngine:
                     spells=list(self._game_state.pending_spell_choice.spells),
                     locations=list(self._game_state.pending_spell_choice.locations),
                     prior_rounds=[list(r) for r in self._game_state.pending_spell_choice.prior_rounds],
+                    activation_source=self._game_state.pending_spell_choice.activation_source,
+                    activation_effects=tuple(self._game_state.pending_spell_choice.activation_effects),
                 )
             ),
             pending_spell_repeat=(
@@ -880,6 +932,21 @@ class GameEngine:
                     battlefield=self._game_state.pending_accelerate.battlefield,
                 )
             ),
+            pending_ability_cost=(
+                None
+                if self._game_state.pending_ability_cost is None
+                else PendingAbilityCost(
+                    actor=self._game_state.pending_ability_cost.actor,
+                    source=self._game_state.pending_ability_cost.source,
+                    source_card=self._game_state.pending_ability_cost.source_card,
+                    trigger=self._game_state.pending_ability_cost.trigger,
+                    event_kind=self._game_state.pending_ability_cost.event_kind,
+                    effects=tuple(self._game_state.pending_ability_cost.effects),
+                    conditions=tuple(self._game_state.pending_ability_cost.conditions),
+                    context_card=self._game_state.pending_ability_cost.context_card,
+                    label=self._game_state.pending_ability_cost.label,
+                )
+            ),
             pending_effect_choice=(
                 None
                 if self._game_state.pending_effect_choice is None
@@ -893,6 +960,10 @@ class GameEngine:
                     label=self._game_state.pending_effect_choice.label,
                     trigger=self._game_state.pending_effect_choice.trigger,
                     event_kind=self._game_state.pending_effect_choice.event_kind,
+                    optional=self._game_state.pending_effect_choice.optional,
+                    continuation_targets=tuple(
+                        self._game_state.pending_effect_choice.continuation_targets
+                    ),
                 )
             ),
             pending_chain=(
@@ -910,6 +981,7 @@ class GameEngine:
                             requirement=it.requirement,
                             target_uids=list(it.target_uids),
                             repeat_target_uids=[list(r) for r in it.repeat_target_uids],
+                            cid=it.cid,
                         )
                         for it in self._game_state.pending_chain.items
                     ],
@@ -1711,6 +1783,7 @@ class GameEngine:
             requirement=requirement,
             target_uids=base_uids,
             repeat_target_uids=repeat_uids,
+            cid=self._take_chain_cid(),
         )
         chain = self._game_state.pending_chain
         if chain is None:
@@ -1808,6 +1881,20 @@ class GameEngine:
             controller = RequiredTo(eff.controller)
         except ValueError:
             return
+        # Effect items can carry chosen targets (activated abilities pick a
+        # target up front, e.g. Heart of Dark Ice → a unit). Relocate them by
+        # uid at resolution; if they no longer satisfy the requirement (left
+        # play / changed), the effect fizzles. Triggered abilities have no
+        # pre-chosen targets, so this is a no-op for them.
+        targets: list[str] = []
+        if item.targets:
+            resolved, reason = self._resolve_round_targets(
+                item.requirement, list(item.targets), list(item.target_uids), controller.value
+            )
+            if resolved is None:
+                self._log_event("fizzle", f"{item.label or eff.source} did nothing — {reason}")
+                return
+            targets = resolved
         self._run_effect_codes(
             controller=controller,
             source=eff.source,
@@ -1815,6 +1902,7 @@ class GameEngine:
             event_kind=eff.event_kind,
             label=item.label or eff.source or "",
             codes=list(eff.effects),
+            targets=targets,
         )
 
     def _run_spell_effects(self, item: "ChainItem") -> None:
@@ -1920,12 +2008,21 @@ class GameEngine:
                         label=line_label,
                         trigger=trigger,
                         event_kind=event_kind,
+                        optional=_effects.choice_effect_optional(code),
+                        continuation_targets=tuple(targets or ()),
                     )
                     self._log_event(
                         "effect", f"{line_label}: {controller.value} to choose"
                     )
                     return
-                self._log_event("effect", f"{line_label}: {code} (no valid target)")
+                # No options to pick. Some choice effects still have a
+                # non-choice half to run (e.g. DISCARD_1_DRAW_1 with an empty
+                # hand still draws) — that's the on_empty fallback.
+                empty_line = _effects.run_choice_effect_on_empty(ctx)
+                if empty_line is not None:
+                    self._log_event("effect", f"{line_label}: {empty_line}")
+                else:
+                    self._log_event("effect", f"{line_label}: {code} (no valid target)")
                 continue
             ran = _effects.execute_effect(ctx)
             if ran:
@@ -1935,12 +2032,20 @@ class GameEngine:
 
     def _card_name_for_ref(self, ref: str | None) -> str | None:
         """The card NAME behind an ability-source ref — a battlefield slot
-        ("battlefield_1") or a unit ref ("player_1:0")."""
+        ("battlefield_1"), a unit ref ("player_1:0"), or a standalone-gear ref
+        ("gear:player_1:0")."""
         gs = self._game_state
         if ref == "battlefield_1":
             return gs.battlefield_1
         if ref == "battlefield_2":
             return gs.battlefield_2
+        if ref and ref.startswith("gear:"):
+            parts = ref.split(":")
+            if len(parts) == 3 and parts[2].isdigit():
+                gears = gs.player_1_gears if parts[1] == "player_1" else gs.player_2_gears
+                i = int(parts[2])
+                return gears[i].card if 0 <= i < len(gears) else None
+            return None
         if ref and ":" in ref:
             side, _, idx_s = ref.partition(":")
             units = (
@@ -2023,6 +2128,29 @@ class GameEngine:
                         f"equip:{side.value}:{gidx}:{gear.attached_uid}",
                         side.value,
                         host_unit.location,
+                        gear.card,
+                        ability,
+                    )
+        # Standalone GEAR rule-text triggered abilities (e.g. Chemtech Cask's
+        # "when you play a spell on an opponent's turn, you may exhaust me to
+        # play a Gold token"). Unlike the effect-text equipment above, these are
+        # the gear's OWN ability (not appended to a host), so they fire for the
+        # gear's controller. Source ref ``gear:<controller>:<index>`` lets an
+        # EXHAUST_THIS cost exhaust the gear itself.
+        for side, gears in (
+            (RequiredTo.PLAYER_1, gs.player_1_gears),
+            (RequiredTo.PLAYER_2, gs.player_2_gears),
+        ):
+            for gidx, gear in enumerate(gears):
+                for ability in _abilities.triggered_abilities_for(gear.card):
+                    if ability.effect_text:
+                        continue  # attached-equipment text handled above
+                    if not ability.triggers or not ability.active_effects:
+                        continue
+                    yield (
+                        f"gear:{side.value}:{gidx}",
+                        side.value,
+                        gear.location,
                         gear.card,
                         ability,
                     )
@@ -2158,6 +2286,7 @@ class GameEngine:
                     event_kind=event.kind,
                     effects=tuple(ability.active_effects),
                     conditions=tuple(ability.conditions),
+                    costs=tuple(ability.costs),
                     label=f"{card} — {matched[0]}",
                     # The card the event was about (e.g. the resolved spell
                     # for ON_PLAY_SPELL) — surfaced in the chain UI.
@@ -2174,21 +2303,145 @@ class GameEngine:
             bits.append(f"@{event.battlefield}")
         return " ".join(bits)
 
+    def _resolve_exhaustable_source(self, ref: str | None):
+        """The in-play unit or gear behind an ability's ``source`` ref, if it has
+        an exhaust state — used to pay an ``EXHAUST_THIS`` cost. Handles unit
+        refs (``"player_1:0"``) and standalone-gear refs (``"gear:player_1:0"``).
+        Battlefields (no exhaust state) and missing sources return None."""
+        if not ref or ref in ("battlefield_1", "battlefield_2"):
+            return None
+        gs = self._game_state
+        if ref.startswith("gear:"):
+            parts = ref.split(":")
+            if len(parts) == 3 and parts[2].isdigit():
+                gears = gs.player_1_gears if parts[1] == "player_1" else gs.player_2_gears
+                i = int(parts[2])
+                return gears[i] if 0 <= i < len(gears) else None
+            return None
+        parts = ref.split(":")
+        if len(parts) == 2 and parts[0] in ("player_1", "player_2") and parts[1].isdigit():
+            units = gs.player_1_units if parts[0] == "player_1" else gs.player_2_units
+            i = int(parts[1])
+            return units[i] if 0 <= i < len(units) else None
+        return None
+
+    def _activated_ability_at(self, source_ref: str | None):
+        """The EXHAUST_THIS-only activated ability on the permanent at
+        ``source_ref`` (unit or gear), or None. Energy/rune-cost activated
+        abilities (e.g. The Syren) are deferred, so they're not returned."""
+        from .abilities import activated_abilities_for
+
+        card = self._card_name_for_ref(source_ref)
+        if not card:
+            return None
+        for ab in activated_abilities_for(card):
+            if tuple(ab.costs) == ("EXHAUST_THIS",):
+                return ab
+        return None
+
+    @staticmethod
+    def _derive_activation_requirement(effects: tuple[str, ...]) -> str:
+        """The target requirement an activated ability's effects imply, in the
+        same grammar spells use. Today only ``GIVE_UNIT_±NM`` needs a target
+        ("a unit"); untargeted effects return "" (no pick)."""
+        import re as _re
+
+        for e in effects:
+            if _re.fullmatch(r"GIVE_UNIT_[+-]\d+M", e):
+                return "ANY UNIT (1)"
+        return ""
+
+    def _push_activated_effect(
+        self,
+        actor: RequiredTo,
+        source: str | None,
+        effects: tuple[str, ...],
+        targets: list[str],
+        target_uids: list[int | None],
+        requirement: str,
+    ) -> None:
+        """Put an activated ability's effect on the chain as an EFFECT item
+        carrying its chosen targets (so it resolves like a triggered ability,
+        but with pre-picked targets). The cost was already paid by the caller."""
+        from .triggers import TriggeredEffect
+
+        label = f"{self._card_name_for_ref(source) or 'ability'} — activated"
+        te = TriggeredEffect(
+            controller=actor.value,
+            source=source,
+            trigger="ACTIVATED",
+            event_kind="ACTIVATED",
+            effects=tuple(effects),
+            label=label,
+        )
+        item = ChainItem(
+            actor=actor,
+            card=None,
+            targets=list(targets),
+            effect=te,
+            label=label,
+            requirement=requirement,
+            target_uids=list(target_uids),
+            cid=self._take_chain_cid(),
+        )
+        chain = self._game_state.pending_chain
+        if chain is None:
+            self._game_state.pending_chain = PendingChain(
+                items=[item], priority=actor, consecutive_passes=0
+            )
+        else:
+            chain.items.insert(0, item)
+            chain.priority = actor
+            chain.consecutive_passes = 0
+        self._log_event("trigger", f"{label} → chain")
+
     def _drain_triggers(self) -> None:
         """Push every queued triggered ability onto the chain, then clear the
         queue. APNAP order: the active player's triggers go on FIRST so they
         end up BELOW the opponent's and resolve LAST (LIFO). Each push opens
-        or extends the chain via the same priority machinery spells use."""
+        or extends the chain via the same priority machinery spells use.
+
+        A triggered ability with a payable cost (``EXHAUST_THIS``) does NOT go
+        straight on the chain: its controller is first asked whether to pay
+        (PendingAbilityCost). The effect only reaches the chain if they pay —
+        so we pause here, stash the rest of the queue, and resume after the
+        decision. A source that's already exhausted / gone can't pay, so the
+        ability is simply dropped."""
+        if self._game_state.pending_ability_cost is not None:
+            return  # a cost decision owns the clock; resume after it resolves
         if not self._trigger_queue:
             return
-        queued = self._trigger_queue
-        self._trigger_queue = []
         active = self._game_state.current_player
 
         def _order(te: TriggeredEffect) -> int:
             return 0 if te.controller == getattr(active, "value", active) else 1
 
-        for te in sorted(queued, key=_order):
+        queue = sorted(self._trigger_queue, key=_order)
+        self._trigger_queue = []
+        for i, te in enumerate(queue):
+            if "EXHAUST_THIS" in te.costs:
+                src = self._resolve_exhaustable_source(te.source)
+                if src is None or src.exhausted:
+                    # Can't pay (source gone or already exhausted) → no effect.
+                    self._log_event("event", f"{te.label} — can't pay [exhaust], skipped")
+                    continue
+                try:
+                    actor = RequiredTo(te.controller)
+                except ValueError:
+                    continue
+                self._game_state.pending_ability_cost = PendingAbilityCost(
+                    actor=actor,
+                    source=te.source,
+                    source_card=self._card_name_for_ref(te.source),
+                    trigger=te.trigger,
+                    event_kind=te.event_kind,
+                    effects=tuple(te.effects),
+                    conditions=tuple(te.conditions),
+                    context_card=te.context_card,
+                    label=te.label,
+                )
+                self._trigger_queue = queue[i + 1 :]  # resume these after the decision
+                return
             self._push_effect_to_chain(te)
 
     def _push_effect_to_chain(self, te: TriggeredEffect) -> None:
@@ -2198,7 +2451,10 @@ class GameEngine:
             actor = RequiredTo(te.controller)
         except ValueError:
             return
-        item = ChainItem(actor=actor, card=None, targets=[], effect=te, label=te.label)
+        item = ChainItem(
+            actor=actor, card=None, targets=[], effect=te, label=te.label,
+            cid=self._take_chain_cid(),
+        )
         chain = self._game_state.pending_chain
         if chain is None:
             self._game_state.pending_chain = PendingChain(
@@ -2209,6 +2465,22 @@ class GameEngine:
             chain.priority = actor
             chain.consecutive_passes = 0
         self._log_event("trigger", f"{te.label} → chain")
+
+    def _take_chain_cid(self) -> int:
+        """Hand out the next stable chain-item cid (monotonic per game)."""
+        cid = self._game_state.next_chain_cid
+        self._game_state.next_chain_cid += 1
+        return cid
+
+    def _chain_item_by_cid(self, cid: int):
+        """The (index, ChainItem) on the chain with stable id ``cid``, or
+        ``(-1, None)`` if it's no longer there (resolved or already removed)."""
+        chain = self._game_state.pending_chain
+        if chain is not None:
+            for i, it in enumerate(chain.items):
+                if it.cid == cid:
+                    return i, it
+        return -1, None
 
     def _reaction_play_options(self, actor: RequiredTo) -> list[str]:
         """``play:play_spell:<i>`` for each Reaction spell ``actor`` could play
@@ -2917,6 +3189,20 @@ class GameEngine:
                     required_action=_required_action(chooser, RequiredStep.ACTION_TURN),
                 )
 
+            cost_dec = self._game_state.pending_ability_cost
+            if cost_dec is not None:
+                # A triggered ability fired but carries a payable cost; its
+                # controller decides whether to pay (exhaust the source) to put
+                # the effect on the chain, or decline. Flat yes/no options.
+                chooser = cost_dec.actor
+                opts = ["play:choose_ability_cost:yes", "play:choose_ability_cost:no"]
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=opts if chooser == RequiredTo.PLAYER_1 else [],
+                    player_2_options=opts if chooser == RequiredTo.PLAYER_2 else [],
+                    required_action=_required_action(chooser, RequiredStep.ACTION_TURN),
+                )
+
             accel = self._game_state.pending_accelerate
             if accel is not None:
                 # A just-played [Accelerate] unit is waiting on its controller's
@@ -2943,7 +3229,11 @@ class GameEngine:
                 # priority play continues.
                 opts = [
                     f"play:choose_effect_target:{t}" for t in effect_choice.options
-                ] + ["play:choose_effect_target:pass"]
+                ]
+                # A "may" effect can be declined; a FORCED choice (e.g.
+                # "discard 1") cannot — only the picks are offered.
+                if effect_choice.optional:
+                    opts.append("play:choose_effect_target:pass")
                 chooser = effect_choice.actor
                 return EngineOutput(
                     game_state=self.game_state,
@@ -3046,6 +3336,35 @@ class GameEngine:
                         continue
                     seen_play_card.add(card)
                     options.append(f"play:play_unit:{i}")
+
+                # Activated abilities ("exhaust: do X") on the active player's
+                # READY permanents (units + standalone gears). EXHAUST_THIS-only
+                # for now; offered as play:activate:<source ref>. Gated on a
+                # valid target existing when the ability targets a unit.
+                _gs = self._game_state
+                _have_unit = bool(_gs.player_1_units or _gs.player_2_units)
+                _av_units = _gs.player_1_units if active == RequiredTo.PLAYER_1 else _gs.player_2_units
+                _av_gears = _gs.player_1_gears if active == RequiredTo.PLAYER_1 else _gs.player_2_gears
+                for _ui, _u in enumerate(_av_units):
+                    if _u.exhausted:
+                        continue
+                    _ref = f"{active.value}:{_ui}"
+                    _ab = self._activated_ability_at(_ref)
+                    if _ab is None:
+                        continue
+                    if self._derive_activation_requirement(tuple(_ab.active_effects)) == "ANY UNIT (1)" and not _have_unit:
+                        continue
+                    options.append(f"play:activate:{_ref}")
+                for _gi, _g in enumerate(_av_gears):
+                    if _g.exhausted:
+                        continue
+                    _ref = f"gear:{active.value}:{_gi}"
+                    _ab = self._activated_ability_at(_ref)
+                    if _ab is None:
+                        continue
+                    if self._derive_activation_requirement(tuple(_ab.active_effects)) == "ANY UNIT (1)" and not _have_unit:
+                        continue
+                    options.append(f"play:activate:{_ref}")
 
                 # Spells are gated by the same Energy + domain Power cost
                 # gates as units. Unlike units they don't go to a location;

@@ -20,9 +20,10 @@ MainDeck:
 2 Ride the Wind
 3 Scuttle Crab
 2 Stacked Deck
-3 Stellacorn Herder
+2 Stellacorn Herder
 1 The Syren
 1 Vex, Apathetic
+1 Heart of Dark Ice
 
 Battlefields:
 1 Sunken Temple

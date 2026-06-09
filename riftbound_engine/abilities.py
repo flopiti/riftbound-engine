@@ -229,6 +229,18 @@ def attached_shield_bonus(gears, host_uid: int | None, current_turn: int | None 
     return total
 
 
+def activated_abilities_for(name: str) -> tuple[Ability, ...]:
+    """Abilities on ``name`` that are ACTIVATED — the player chooses to use
+    them by paying a cost. Shape: has costs + active effects, NO triggers, and
+    NOT effect-text (those are continuous equipment passives). e.g. Heart of
+    Dark Ice's "exhaust: give a unit +3 might"."""
+    return tuple(
+        a
+        for a in triggered_abilities_for(name)
+        if a.costs and a.active_effects and not a.triggers and not a.effect_text
+    )
+
+
 def reset_caches() -> None:
     """Clear memoized lookups (used by tests that swap the taxonomy file)."""
     _id_to_name.cache_clear()

@@ -1973,6 +1973,354 @@
         }
       ],
       "updated_at": 1780954487.892138
+    },
+    {
+      "id": "heart-of-dark-ice",
+      "name": "Heart of Dark Ice",
+      "description": "",
+      "created_at": 1781036291.532303,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 4206449629
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_gear:13:Calm\u00d73",
+          "label": "Play Heart of Dark Ice (3 Calm)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:3"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:7"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_gear:13"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:7:Calm\u00d71#Chaos\u00d71",
+          "label": "Play Lonely Poro (1 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:8"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:7"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Lonely Poro on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:activate:gear:player_2:0",
+          "label": "Activate (exhaust)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:activate:gear:player_2:0"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_spell_targets:p2-0",
+          "label": "Heart of Dark Ice \u2192 Lonely Poro",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_spell_targets:p2-0"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1781036294.1985228
     }
   ]
 }
