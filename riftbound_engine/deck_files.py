@@ -84,11 +84,22 @@ def resolve_card_name(raw: str, *, allowed_types: frozenset[str] | None = None) 
     hit = lower.get(name.lower())
     if hit:
         return hit
+    candidates = [name]
     if ", " in name:
-        suffix = name.split(", ", 1)[-1].strip()
-        if suffix in exact:
-            return exact[suffix]
-        hit = lower.get(suffix.lower())
+        candidates.append(name.split(", ", 1)[-1].strip())
+    for cand in candidates:
+        if cand in exact:
+            return exact[cand]
+        hit = lower.get(cand.lower())
+        if hit:
+            return hit
+        # Some legends are listed only as their starter-deck printing, named
+        # "<title> - Starter" (e.g. "Dark Child - Starter" for "Annie, Dark
+        # Child"). Match those too, returning the real CSV name.
+        starter = cand + " - Starter"
+        if starter in exact:
+            return exact[starter]
+        hit = lower.get(starter.lower())
         if hit:
             return hit
     allowed = f" (types: {', '.join(sorted(allowed_types))})" if allowed_types else ""

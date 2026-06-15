@@ -1,0 +1,45 @@
+# Body / Calm Lee Sin — 龙虾 by 英勇投弹手
+# Pulled from riftdecks.com (deck-long-xia-179407).
+
+Legend:
+1 Lee Sin, Blind Monk
+
+Champion:
+1 Lee Sin, Centered
+
+MainDeck:
+3 Lonely Poro
+2 Scuttle Crab
+3 First Mate
+1 Akshan, Mischievous
+3 Irelia, Fervent
+3 Rengar, Trophy Hunter
+2 Vilemaw
+2 Zhonya's Hourglass
+1 Charm
+3 Defy
+2 Punch First
+1 Repulse
+3 Challenge
+2 Desert's Call
+3 Discipline
+1 Emperor's Divide
+2 Meditation
+2 Wallop
+
+Battlefields:
+1 Abandoned Hall
+1 Grove of the God-Willow
+1 Monastery of Hirana
+
+Runes:
+7 Body Rune
+5 Calm Rune
+
+Sideboard:
+1 Repulse
+1 Sabotage
+1 Unyielding Spirit
+2 Block
+2 Akshan, Mischievous
+1 Dragon's Rage

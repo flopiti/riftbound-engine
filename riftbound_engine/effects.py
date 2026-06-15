@@ -346,6 +346,36 @@ def _give_unit_delta(ctx: EffectContext) -> None:
     _buff_targets(ctx, _amount_from_code(ctx.code))
 
 
+def _current_might(unit) -> int:
+    """A unit's current Might in play: printed Might + this-turn bonuses
+    (matches the per-battlefield Might totals; excludes defend-only Shield)."""
+    from .csv_data import card_might_of
+
+    return (card_might_of(unit.card) or 0) + unit.bonus_might
+
+
+@register_effect("INCREASE_MIGHT_TO", targeted=True)
+def _increase_might_to(ctx: EffectContext) -> None:
+    """Convergent Mutation: "Choose a friendly unit. This turn, increase its
+    Might to the Might of another friendly unit." The requirement picks TWO
+    friendly units as an unordered pair, and "increase to" only RAISES, so the
+    only beneficial resolution is to bring the lower-Might unit up to the
+    higher one's CURRENT Might (printed + buffs), snapshotted now. Equal Might
+    ⇒ no change. Fizzles if fewer than two targets survive to resolution."""
+    units = []
+    for ref in ctx.targets:
+        _, _, unit = _resolve_unit(ctx.engine, ref)
+        if unit is not None:
+            units.append(unit)
+    if len(units) < 2:
+        return
+    lower = min(units, key=_current_might)
+    higher = max(units, key=_current_might)
+    delta = _current_might(higher) - _current_might(lower)
+    if delta > 0:
+        lower.bonus_might += delta
+
+
 @register_effect("GIVE_FRIENDLY_+1M_AND_+1M_IF_ALONE", targeted=True)
 def _give_friendly_plus_alone(ctx: EffectContext) -> None:
     """En Garde: "Give a friendly unit +1 Might this turn, then an additional

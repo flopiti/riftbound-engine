@@ -1,0 +1,47 @@
+# Calm / Order Leona — by Rekian
+# Pulled from riftdecks.com (deck-leona-radiant-dawn-180977).
+
+Legend:
+1 Leona, Radiant Dawn
+
+Champion:
+1 Leona, Zealot
+
+MainDeck:
+2 Lonely Poro
+2 Nami, Headstrong
+2 Shen, Kinkou
+2 Leona, Determined
+2 Vex, Mocking
+3 Vi, Peacekeeper
+2 Monch
+2 Guardian Angel
+1 Zhonya's Hourglass
+3 Defy
+2 Sacrifice
+2 Discipline
+1 Hidden Blade
+1 Salvage
+1 Thwonk!
+3 Back Off
+3 Call to Glory
+3 Heroic Charge
+2 Zenith Blade
+
+Battlefields:
+1 Monastery of Hirana
+1 Targon's Peak
+1 The Papertree
+
+Runes:
+6 Calm Rune
+6 Order Rune
+
+Sideboard:
+1 Discipline
+1 Hidden Blade
+1 Not So Fast
+1 Salvage
+1 Zhonya's Hourglass
+1 Wind Wall
+2 Solari Chief

@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "player_1_deck": "ezreal_prodigal_explorer",
+  "player_2_deck": "irelia_nates",
+  "player_1_battlefield": "Abandoned Hall",
+  "player_2_battlefield": "Sunken Temple",
+  "first_turn": "player_1",
+  "mulligan_bottom": "",
+  "mode": "early",
+  "advanced_seed": 42
+}

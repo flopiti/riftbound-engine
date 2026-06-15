@@ -65,6 +65,24 @@ def _actor_value(actor: Any) -> str:
     return getattr(actor, "value", actor)
 
 
+def _describe_ability_cost(costs: tuple[str, ...]) -> str:
+    """A short imperative phrase for an ability's costs, e.g. "Pay 1 Energy",
+    "Exhaust", or "Exhaust + pay 1 Energy". Mirrors csv_data.parse_pay_cost."""
+    pay: list[str] = []
+    for c in costs:
+        m = re.fullmatch(r"PAY_(\d+)_ENERGY", c)
+        if m:
+            pay.append(f"{m.group(1)} Energy")
+            continue
+        m = re.fullmatch(r"PAY_(\d+)P", c) or re.fullmatch(r"PAY_(\d+)[A-Z]", c)
+        if m:
+            pay.append(f"{m.group(1)} Power")
+    pay_phrase = " + ".join(pay)
+    if "EXHAUST_THIS" in costs:
+        return f"Exhaust + pay {pay_phrase}" if pay_phrase else "Exhaust"
+    return f"Pay {pay_phrase}" if pay_phrase else "Use"
+
+
 def label_for_action(game_state: Any, actor: Any, action: str) -> str:
     """Translate one raw engine action string into the label the Control /
     branch UI shows. ``game_state`` is the state the action is an option in
@@ -225,10 +243,14 @@ def label_for_action(game_state: Any, actor: Any, action: str) -> str:
 
     if action == "play:choose_ability_cost:yes":
         acc = getattr(gs, "pending_ability_cost", None)
-        card = acc.source_card if acc else None
-        return f"Exhaust {card} → use ability" if card else "Exhaust → use ability"
+        costs = tuple(getattr(acc, "costs", ()) or ())
+        return f"{_describe_ability_cost(costs)} → use ability"
     if action == "play:choose_ability_cost:no":
-        return "Don't exhaust"
+        return "Don't pay"
+
+    m = re.fullmatch(r"play:pay_ability_power:(.+)", action)
+    if m:
+        return f"Pay 1 {m.group(1)} Power"
 
     m = re.fullmatch(r"play:choose_effect_target:(.+)", action)
     if m:

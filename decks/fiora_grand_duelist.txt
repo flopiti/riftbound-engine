@@ -1,0 +1,41 @@
+# Body / Order Fiora — 天津剑姬 by Talion
+# Pulled from riftdecks.com (deck-tian-jin-jian-ji-180858).
+
+Legend:
+1 Fiora, Grand Duelist
+
+Champion:
+1 Fiora, Worthy
+
+MainDeck:
+3 Akshan, Mischievous
+2 Rengar, Trophy Hunter
+3 Sett, Brawler
+2 Harnessed Dragon
+3 Rift Herald
+3 Elder Dragon
+3 Divining Shells
+1 Doran's Blade
+3 Shepherd's Heirloom
+3 Dazzling Aurora
+3 Sacrifice
+3 Challenge
+1 Hidden Blade
+3 Mobilize
+3 Riposte
+
+Battlefields:
+1 Amateur Recital
+1 Aspirant's Climb
+1 Trapping Grounds
+
+Runes:
+8 Body Rune
+4 Order Rune
+
+Sideboard:
+1 Repulse
+2 Sabotage
+2 Salvage
+1 Fiora, Victorious
+2 Divine Judgment

@@ -1,0 +1,44 @@
+# Mind / Order Lux — by AA Matmatu
+# Pulled from riftdecks.com (deck-lux-lady-of-luminosity-180580).
+
+Legend:
+1 Lux, Lady of Luminosity
+
+Champion:
+1 Lux, Crownguard
+
+MainDeck:
+3 Soaring Scout
+3 Watchful Sentry
+1 Fiora, Worthy
+3 Lecturing Yordle
+1 Ashe, Focused
+3 Ekko, Recurrent
+1 Renata Glasc, Mastermind
+3 Forge of the Future
+2 Sumpworks Map
+3 Retreat
+3 Sacrifice
+3 Stupefy
+1 Rally the Troops
+3 Shadow's Call
+1 Promising Future
+1 Sprite Burst
+3 Progress Day
+1 The Ruination
+
+Battlefields:
+1 Aspirant's Climb
+1 Ripper's Bay
+1 The Papertree
+
+Runes:
+6 Mind Rune
+6 Order Rune
+
+Sideboard:
+3 Cull the Weak
+1 Sumpworks Map
+1 Promising Future
+2 Sprite Burst
+1 The Ruination

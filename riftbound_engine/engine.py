@@ -133,6 +133,11 @@ class PlayedUnit:
     #: "not yet assigned"; _backfill_unit_uids gives every in-play unit a real
     #: id before anything references it.
     uid: int = 0
+    #: True for unit TOKENS (e.g. the 1-might Recruit token). Tokens are not
+    #: real cards: when they leave play (die in combat, killed by an effect,
+    #: or bounced/recalled to hand) they CEASE TO EXIST rather than going to
+    #: their owner's trash or hand. Every leave-play path checks this flag.
+    token: bool = False
 
 
 @dataclass
@@ -202,6 +207,9 @@ class PlayedGear:
     #: unequipped. Lets continuous "while attached THIS turn" conditions (e.g.
     #: Brutalizer's extra +2 Might) compare it to the current turn.
     attached_on_turn: int | None = None
+    #: True for gear TOKENS (e.g. the Gold token). Like unit tokens, a gear
+    #: token ceases to exist when it leaves play rather than going to trash.
+    token: bool = False
 
 
 @dataclass
@@ -389,8 +397,41 @@ class PendingAbilityCost:
     event_kind: str
     effects: tuple[str, ...]
     conditions: tuple[str, ...] = ()
+    #: The ability's cost codes (EXHAUST_THIS and/or PAY_* energy/power) — needed
+    #: so the pay handler knows what to charge, not just whether to exhaust.
+    costs: tuple[str, ...] = ()
     context_card: str | None = None
     label: str = ""
+
+
+@dataclass
+class PendingAbilityPayment:
+    """An ability's fixed costs (exhaust, Energy, specific-domain Power) are
+    already paid; this is the interactive step for an "N Power of ANY type" cost
+    when the player's Power pool spans MORE than one domain (a real choice of
+    which domain to drain — e.g. Power Nexus's "pay 4 Power of any type"). The
+    player picks one Power at a time via ``play:pay_ability_power:<domain>`` until
+    ``remaining`` hits 0, then the stored continuation runs.
+
+    ``kind`` discriminates the continuation:
+      * ``"triggered"`` — rebuild the TriggeredEffect (trigger/event_kind/
+        conditions/context_card/label) and push it to the chain;
+      * ``"activate"`` — resume the activated ability: open the target pick if
+        ``requirement`` is set, else push the activated effect straight to the
+        chain.
+    All fields are primitives/tuples so deep-copy and serialization stay flat."""
+
+    actor: RequiredTo
+    kind: str
+    source: str | None
+    effects: tuple[str, ...]
+    remaining: int
+    trigger: str = ""
+    event_kind: str = ""
+    conditions: tuple[str, ...] = ()
+    context_card: str | None = None
+    label: str = ""
+    requirement: str = ""
 
 
 @dataclass
@@ -663,6 +704,9 @@ class GameState:
     #: whether to pay its cost (EXHAUST_THIS) to put the effect on the chain.
     #: See PendingAbilityCost.
     pending_ability_cost: "PendingAbilityCost | None" = None
+    #: Set while an ability's "N Power of any type" cost waits for the controller
+    #: to pick which domain(s) to spend. See PendingAbilityPayment.
+    pending_ability_payment: "PendingAbilityPayment | None" = None
     #: The priority stack. Set the moment a spell is played and cleared when
     #: both players pass in a row (the chain resolves). While set, the player
     #: holding priority may cast a Reaction spell or `play:pass_priority`.
@@ -826,11 +870,11 @@ class GameEngine:
             player_1_hand=list(self._game_state.player_1_hand) if self._game_state.player_1_hand is not None else None,
             player_2_hand=list(self._game_state.player_2_hand) if self._game_state.player_2_hand is not None else None,
             player_1_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, uid=u.uid)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, uid=u.uid, token=u.token)
                 for u in self._game_state.player_1_units
             ],
             player_2_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, uid=u.uid)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, uid=u.uid, token=u.token)
                 for u in self._game_state.player_2_units
             ],
             player_1_spells=[
@@ -943,8 +987,26 @@ class GameEngine:
                     event_kind=self._game_state.pending_ability_cost.event_kind,
                     effects=tuple(self._game_state.pending_ability_cost.effects),
                     conditions=tuple(self._game_state.pending_ability_cost.conditions),
+                    costs=tuple(self._game_state.pending_ability_cost.costs),
                     context_card=self._game_state.pending_ability_cost.context_card,
                     label=self._game_state.pending_ability_cost.label,
+                )
+            ),
+            pending_ability_payment=(
+                None
+                if self._game_state.pending_ability_payment is None
+                else PendingAbilityPayment(
+                    actor=self._game_state.pending_ability_payment.actor,
+                    kind=self._game_state.pending_ability_payment.kind,
+                    source=self._game_state.pending_ability_payment.source,
+                    effects=tuple(self._game_state.pending_ability_payment.effects),
+                    remaining=self._game_state.pending_ability_payment.remaining,
+                    trigger=self._game_state.pending_ability_payment.trigger,
+                    event_kind=self._game_state.pending_ability_payment.event_kind,
+                    conditions=tuple(self._game_state.pending_ability_payment.conditions),
+                    context_card=self._game_state.pending_ability_payment.context_card,
+                    label=self._game_state.pending_ability_payment.label,
+                    requirement=self._game_state.pending_ability_payment.requirement,
                 )
             ),
             pending_effect_choice=(
@@ -2326,16 +2388,18 @@ class GameEngine:
         return None
 
     def _activated_ability_at(self, source_ref: str | None):
-        """The EXHAUST_THIS-only activated ability on the permanent at
-        ``source_ref`` (unit or gear), or None. Energy/rune-cost activated
-        abilities (e.g. The Syren) are deferred, so they're not returned."""
+        """The activated ability on the permanent at ``source_ref`` (unit or
+        gear) whose cost the engine can charge, or None. Chargeable costs are
+        ``EXHAUST_THIS`` plus the Energy/Power ``PAY_*`` codes (e.g. The Syren's
+        "1 energy, exhaust"). Abilities with a cost we can't pay yet (KILL_THIS,
+        RECYCLE_*, …) are not returned."""
         from .abilities import activated_abilities_for
 
         card = self._card_name_for_ref(source_ref)
         if not card:
             return None
         for ab in activated_abilities_for(card):
-            if tuple(ab.costs) == ("EXHAUST_THIS",):
+            if "EXHAUST_THIS" in ab.costs and self._cost_is_chargeable(tuple(ab.costs)):
                 return ab
         return None
 
@@ -2409,6 +2473,8 @@ class GameEngine:
         ability is simply dropped."""
         if self._game_state.pending_ability_cost is not None:
             return  # a cost decision owns the clock; resume after it resolves
+        if self._game_state.pending_ability_payment is not None:
+            return  # an any-type Power payment owns the clock; resume after it
         if not self._trigger_queue:
             return
         active = self._game_state.current_player
@@ -2419,15 +2485,15 @@ class GameEngine:
         queue = sorted(self._trigger_queue, key=_order)
         self._trigger_queue = []
         for i, te in enumerate(queue):
-            if "EXHAUST_THIS" in te.costs:
-                src = self._resolve_exhaustable_source(te.source)
-                if src is None or src.exhausted:
-                    # Can't pay (source gone or already exhausted) → no effect.
-                    self._log_event("event", f"{te.label} — can't pay [exhaust], skipped")
-                    continue
+            if te.costs and self._cost_is_chargeable(te.costs):
                 try:
                     actor = RequiredTo(te.controller)
                 except ValueError:
+                    continue
+                if not self._can_pay_ability_cost(actor, te.source, te.costs):
+                    # Can't pay (source gone/exhausted, or not enough Energy/Power)
+                    # → "you may pay" with no way to pay means no effect.
+                    self._log_event("event", f"{te.label} — can't pay cost, skipped")
                     continue
                 self._game_state.pending_ability_cost = PendingAbilityCost(
                     actor=actor,
@@ -2437,12 +2503,154 @@ class GameEngine:
                     event_kind=te.event_kind,
                     effects=tuple(te.effects),
                     conditions=tuple(te.conditions),
+                    costs=tuple(te.costs),
                     context_card=te.context_card,
                     label=te.label,
                 )
                 self._trigger_queue = queue[i + 1 :]  # resume these after the decision
                 return
+            # No cost, or a cost the engine can't charge yet (KILL_THIS,
+            # RECYCLE_1_RUNE, …): push straight to the chain (unchanged).
             self._push_effect_to_chain(te)
+
+    def _cost_is_chargeable(self, costs: tuple[str, ...]) -> bool:
+        """True iff EVERY cost code is one the engine can actually charge today
+        (``EXHAUST_THIS`` plus the Energy/Power ``PAY_*`` codes). An ability that
+        also carries an unsupported cost (KILL_THIS, SPEND_BUFF, …) is NOT gated —
+        it falls through to its previous behaviour so we never claim to honour a
+        cost we can't."""
+        from .csv_data import parse_pay_cost
+
+        _, unsupported = parse_pay_cost(tuple(costs), ())
+        return not unsupported
+
+    def _ability_pay_requirement(self, source: str | None, costs: tuple[str, ...]) -> dict:
+        """The Energy/Power requirement (equip-cost shape) for an ability's
+        ``PAY_*`` costs, resolving colored-rune costs against the SOURCE card's
+        domain. ``EXHAUST_THIS`` is excluded (paid by exhausting the source)."""
+        from .csv_data import card_domains_of, parse_pay_cost
+
+        card = self._card_name_for_ref(source)
+        domains = card_domains_of(card) if card else ()
+        req, _ = parse_pay_cost(tuple(costs), domains)
+        return req
+
+    def _can_pay_ability_cost(
+        self, actor: RequiredTo, source: str | None, costs: tuple[str, ...]
+    ) -> bool:
+        """Whether ``actor`` can currently pay an ability's costs: the source is
+        in play and ready if ``EXHAUST_THIS`` is required, and the Energy/Power
+        pools cover any ``PAY_*`` codes."""
+        if "EXHAUST_THIS" in costs:
+            src = self._resolve_exhaustable_source(source)
+            if src is None or src.exhausted:
+                return False
+        return self.can_afford_equip_cost(actor, self._ability_pay_requirement(source, costs))
+
+    def _charge_fixed_costs(
+        self, actor: RequiredTo, source: str | None, costs: tuple[str, ...]
+    ) -> int:
+        """Pay the parts of an ability's cost that involve NO choice: exhaust the
+        source (``EXHAUST_THIS``), spend Energy, and spend specific-domain Power.
+        Returns the leftover "N Power of any type" still to be paid (0 if none).
+        Caller must have checked affordability with ``_can_pay_ability_cost``."""
+        if "EXHAUST_THIS" in costs:
+            src = self._resolve_exhaustable_source(source)
+            if src is not None:
+                src.exhausted = True
+        req = self._ability_pay_requirement(source, costs)
+        if int(req.get("energy", 0)):
+            self.add_energy(actor, -int(req["energy"]))
+        for domain, amount in dict(req.get("power", {})).items():
+            if amount:
+                self.add_power(actor, domain, -int(amount))
+        return int(req.get("any_power", 0))
+
+    def _spend_any_power(self, actor: RequiredTo, amount: int) -> None:
+        """Greedily drain ``amount`` Power from ``actor``'s pool across whatever
+        domains hold Power (used when the any-type spend is forced — a single
+        domain, or the pool total equals the cost, so there's no real choice)."""
+        remaining = amount
+        pool = self.player_power(actor)
+        for domain in list(pool.keys()):
+            if remaining <= 0:
+                break
+            take = min(pool.get(domain, 0), remaining)
+            if take:
+                self.add_power(actor, domain, -take)
+                remaining -= take
+        if remaining > 0:
+            raise ValueError("internal error: still short on any-type Power")
+
+    def _charge_ability_cost(
+        self, actor: RequiredTo, source: str | None, costs: tuple[str, ...]
+    ) -> None:
+        """Pay an ability's costs in full, NON-interactively (any-type Power is
+        drained greedily). Used where there's no decision point to defer to."""
+        any_power = self._charge_fixed_costs(actor, source, costs)
+        if any_power > 0:
+            self._spend_any_power(actor, any_power)
+
+    def _begin_ability_resolution(
+        self, payment: "PendingAbilityPayment", source: str | None, costs: tuple[str, ...]
+    ) -> None:
+        """Charge the fixed costs, then either resolve the ability immediately or
+        — when an "N Power of any type" cost leaves a real choice of which domain
+        to drain (pool spans >1 domain with surplus) — open a
+        ``PendingAbilityPayment`` so the player picks. Otherwise the forced spend
+        happens automatically and the continuation runs at once."""
+        any_power = self._charge_fixed_costs(payment.actor, source, costs)
+        if any_power <= 0:
+            self._resume_ability_payment(payment)
+            return
+        pool = self.player_power(payment.actor)
+        domains_with_power = [d for d, v in pool.items() if v > 0]
+        total = sum(pool.values())
+        if len(domains_with_power) <= 1 or total <= any_power:
+            # No real choice (one domain, or every Power must be spent).
+            self._spend_any_power(payment.actor, any_power)
+            self._resume_ability_payment(payment)
+            return
+        payment.remaining = any_power
+        self._game_state.pending_ability_payment = payment
+
+    def _resume_ability_payment(self, payment: "PendingAbilityPayment") -> None:
+        """Run an ability's effect once its cost is fully paid — push the
+        triggered effect to the chain, or resume the activated ability."""
+        if payment.kind == "triggered":
+            self._push_effect_to_chain(
+                TriggeredEffect(
+                    controller=payment.actor.value,
+                    source=payment.source,
+                    trigger=payment.trigger,
+                    event_kind=payment.event_kind,
+                    effects=tuple(payment.effects),
+                    conditions=tuple(payment.conditions),
+                    costs=(),  # already paid — don't re-gate
+                    label=payment.label,
+                    context_card=payment.context_card,
+                )
+            )
+        elif payment.kind == "activate":
+            self._resume_activation(
+                payment.actor, payment.source, tuple(payment.effects), payment.requirement
+            )
+
+    def _resume_activation(
+        self, actor: RequiredTo, source: str | None, effects: tuple[str, ...], requirement: str
+    ) -> None:
+        """After an activated ability's cost is paid, either open the target pick
+        (reusing the spell-choice flow) or push the effect straight to the chain."""
+        if requirement:
+            self._game_state.pending_spell_choice = PendingSpellChoice(
+                actor=actor,
+                card=self._card_name_for_ref(source) or "",
+                requirement=requirement,
+                activation_source=source,
+                activation_effects=tuple(effects),
+            )
+        else:
+            self._push_activated_effect(actor, source, tuple(effects), [], [], "")
 
     def _push_effect_to_chain(self, te: TriggeredEffect) -> None:
         """Place a triggered ability on top of the chain, handing priority to
@@ -2987,6 +3195,27 @@ class GameEngine:
         for letter in ("a", "b", "c", "d"):
             self._apply_abcd_letter(letter, actor)
 
+    def _mulligan_options(self, who: RequiredTo) -> list[str]:
+        """Full ``mulligan_resolve:player_N:<csv>`` actions for ``who``: keep
+        all (empty payload), bottom any single card, or bottom any pair (the
+        rules cap the bottom at two). One option = one complete resolution, so
+        a single-click client can pick directly."""
+        import itertools
+
+        hand = (
+            self._game_state.player_1_mulligan_hand
+            if who == RequiredTo.PLAYER_1
+            else self._game_state.player_2_mulligan_hand
+        ) or []
+        n = len(hand)
+        prefix = f"mulligan_resolve:{who.value}:"
+        opts = [prefix]  # keep all
+        for i in range(n):
+            opts.append(prefix + str(i))
+        for a, b in itertools.combinations(range(n), 2):
+            opts.append(prefix + f"{a},{b}")
+        return opts
+
     def _deck_selection_output(self) -> EngineOutput | None:
         available_decks = list(list_deck_ids())
         if self._game_state.player_1_deck is None:
@@ -3012,33 +3241,65 @@ class GameEngine:
             if self._game_state.first_turn_choice is None:
                 self._game_state.first_turn_choice = self._resolve_first_turn_choice()
             if self._game_state.first_turn is None:
+                # The chooser picks who takes the first turn. Surface the two
+                # picks as options ("player_1" / "player_2") so a generic
+                # client (the Branch view) has something to click — the board
+                # UI hard-codes its own buttons, but bare options also feed the
+                # setup-option normalization in apply_action.
+                chooser = self._game_state.first_turn_choice or RequiredTo.PLAYER_1
+                ft_opts = ["player_1", "player_2"]
                 return EngineOutput(
                     game_state=self.game_state,
+                    player_1_options=ft_opts if chooser == RequiredTo.PLAYER_1 else [],
+                    player_2_options=ft_opts if chooser == RequiredTo.PLAYER_2 else [],
                     required_action=_required_action(
-                        self._game_state.first_turn_choice or RequiredTo.PLAYER_1,
+                        chooser,
                         RequiredStep.CHOOSE_FIRST_TURN,
                     ),
                 )
-            if self._game_state.battlefield_1 is None or self._game_state.battlefield_2 is None:
+            if self._game_state.battlefield_1 is None:
+                # Sequential (like deck selection): player_1 picks from THEIR
+                # deck's battlefields first, then player_2. Each only ever sees
+                # their own options, so a single-actor client (Branch view)
+                # isn't handed both players' choices at once.
                 return EngineOutput(
                     game_state=self.game_state,
-                    player_1_options=(
-                        list(self._game_state.player_1_deck.battlefields) if self._game_state.battlefield_1 is None else []
+                    player_1_options=list(self._game_state.player_1_deck.battlefields),
+                    required_action=_required_action(
+                        RequiredTo.PLAYER_1, RequiredStep.CHOOSE_BATTLEFIELDS
                     ),
-                    player_2_options=(
-                        list(self._game_state.player_2_deck.battlefields) if self._game_state.battlefield_2 is None else []
+                )
+            if self._game_state.battlefield_2 is None:
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_2_options=list(self._game_state.player_2_deck.battlefields),
+                    required_action=_required_action(
+                        RequiredTo.PLAYER_2, RequiredStep.CHOOSE_BATTLEFIELDS
                     ),
-                    required_action=_required_action(RequiredTo.BOTH, RequiredStep.CHOOSE_BATTLEFIELDS),
                 )
             if not self._game_state.is_mulligan_done:
                 self._prepare_mulligan_draws()
                 if not (
                     self._game_state.mulligan_player_1_resolved and self._game_state.mulligan_player_2_resolved
                 ):
+                    # Surface the mulligan as full ``mulligan_resolve:player_N:<idx>``
+                    # action options (keep-all, plus each way to bottom up to two
+                    # cards) so a generic client like the Branch view can pick one
+                    # in a single click. The board has its own card-picker UI and
+                    # reads ``player_X_mulligan_hand`` from state directly, so it's
+                    # unaffected by what we list here.
                     return EngineOutput(
                         game_state=self.game_state,
-                        player_1_options=list(self._game_state.player_1_mulligan_hand or []),
-                        player_2_options=list(self._game_state.player_2_mulligan_hand or []),
+                        player_1_options=(
+                            self._mulligan_options(RequiredTo.PLAYER_1)
+                            if not self._game_state.mulligan_player_1_resolved
+                            else []
+                        ),
+                        player_2_options=(
+                            self._mulligan_options(RequiredTo.PLAYER_2)
+                            if not self._game_state.mulligan_player_2_resolved
+                            else []
+                        ),
                         required_action=_required_action(RequiredTo.BOTH, RequiredStep.CHOOSE_MULLIGAN),
                     )
                 self._finalize_setup_after_mulligan()
@@ -3182,6 +3443,25 @@ class GameEngine:
                 # is to DECLINE; everyone else is suppressed.
                 chooser = repeat.actor
                 opts = ["play:choose_repeat:no"]
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=opts if chooser == RequiredTo.PLAYER_1 else [],
+                    player_2_options=opts if chooser == RequiredTo.PLAYER_2 else [],
+                    required_action=_required_action(chooser, RequiredStep.ACTION_TURN),
+                )
+
+            pay = self._game_state.pending_ability_payment
+            if pay is not None:
+                # An ability's "N Power of any type" cost is being paid — the
+                # controller picks WHICH domain to spend, one Power at a time,
+                # until the cost is met. One option per domain holding Power.
+                chooser = pay.actor
+                pool = self.player_power(chooser)
+                opts = [
+                    f"play:pay_ability_power:{d}"
+                    for d in sorted(pool)
+                    if pool.get(d, 0) > 0
+                ]
                 return EngineOutput(
                     game_state=self.game_state,
                     player_1_options=opts if chooser == RequiredTo.PLAYER_1 else [],
@@ -3354,6 +3634,8 @@ class GameEngine:
                         continue
                     if self._derive_activation_requirement(tuple(_ab.active_effects)) == "ANY UNIT (1)" and not _have_unit:
                         continue
+                    if not self._can_pay_ability_cost(active, _ref, tuple(_ab.costs)):
+                        continue
                     options.append(f"play:activate:{_ref}")
                 for _gi, _g in enumerate(_av_gears):
                     if _g.exhausted:
@@ -3363,6 +3645,8 @@ class GameEngine:
                     if _ab is None:
                         continue
                     if self._derive_activation_requirement(tuple(_ab.active_effects)) == "ANY UNIT (1)" and not _have_unit:
+                        continue
+                    if not self._can_pay_ability_cost(active, _ref, tuple(_ab.costs)):
                         continue
                     options.append(f"play:activate:{_ref}")
 
@@ -3525,6 +3809,37 @@ class GameEngine:
     def _apply_action_impl(self, action: str, actor: RequiredTo) -> EngineOutput:
         if not action:
             raise ValueError("action must not be empty")
+
+        # Setup-option normalization. During the SETUP steps the engine lists
+        # bare option values (a deck id, a battlefield name, "player_1") rather
+        # than full action strings, and historically only fake-fill turned them
+        # into ``choose_deck:<id>`` etc. So a generic client (e.g. the Branch
+        # view with fake-fill OFF) that posts the option verbatim would hit
+        # "unknown action". When a setup step is pending and the action carries
+        # no recognized verb prefix, prepend the right one so any client's raw
+        # pick just works. (Mulligan needs index payloads, so it's left alone.)
+        gs = self._game_state
+        _known_prefixes = (
+            "play:",
+            apply_prefix(ApplyVerb.CHOOSE_DECK),
+            apply_prefix(ApplyVerb.CHOOSE_FIRST_TURN),
+            apply_prefix(ApplyVerb.CHOOSE_BATTLEFIELD_1),
+            apply_prefix(ApplyVerb.CHOOSE_BATTLEFIELD_2),
+            "mulligan_resolve:",
+        )
+        if not action.startswith(_known_prefixes):
+            if gs.player_1_deck is None or gs.player_2_deck is None:
+                action = apply_prefix(ApplyVerb.CHOOSE_DECK) + action
+            elif not gs.started and gs.first_turn is None:
+                action = apply_prefix(ApplyVerb.CHOOSE_FIRST_TURN) + action
+            elif not gs.started and (gs.battlefield_1 is None or gs.battlefield_2 is None):
+                verb = (
+                    ApplyVerb.CHOOSE_BATTLEFIELD_1
+                    if actor == RequiredTo.PLAYER_1
+                    else ApplyVerb.CHOOSE_BATTLEFIELD_2
+                )
+                action = apply_prefix(verb) + action
+
         # Ensure every unit already in play carries a stable uid before this
         # action runs (so e.g. capturing a spell's targets records real ids).
         self._backfill_unit_uids()

@@ -1,0 +1,44 @@
+# Body / Order Sett — by [OC] Mallo
+# Pulled from riftdecks.com (deck-sett-the-boss-180618).
+
+Legend:
+1 Sett, The Boss
+
+Champion:
+1 Sett, Kingpin
+
+MainDeck:
+2 Cithria of Cloudfield
+3 Irresistible Faefolk
+3 Pit Rookie
+3 First Mate
+3 Fiora, Victorious
+1 Kinkou Monk
+2 Rengar, Trophy Hunter
+1 Vi, Peacekeeper
+1 Fae Dragon
+3 Arena Bar
+3 Punch First
+1 Repulse
+3 Sabotage
+3 Showstopper
+2 Challenge
+2 Hidden Blade
+3 Call to Glory
+
+Battlefields:
+1 Grove of the God-Willow
+1 Monastery of Hirana
+1 Valley of Idols
+
+Runes:
+7 Body Rune
+5 Order Rune
+
+Sideboard:
+1 Repulse
+2 Unyielding Spirit
+1 Hidden Blade
+2 Akshan, Mischievous
+1 Ashe, Focused
+1 Vi, Peacekeeper

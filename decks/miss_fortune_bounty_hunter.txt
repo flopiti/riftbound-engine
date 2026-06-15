@@ -1,0 +1,44 @@
+# Body / Chaos Miss Fortune — "mf" by 187CrackerDealer
+# Pulled from riftdecks.com (deck-mf-180105).
+
+Legend:
+1 Miss Fortune, Bounty Hunter
+
+Champion:
+1 Miss Fortune, Captain
+
+MainDeck:
+1 Mindsplitter
+3 Elder Dragon
+3 Scryer's Bloom
+2 Last Rites
+3 Dazzling Aurora
+2 Bullet Time
+3 Flurry of Blades
+3 Gust
+3 Sabotage
+3 Stacked Deck
+1 Abandon
+1 Challenge
+1 Heedless Resurrection
+3 Mobilize
+1 Invert Timelines
+3 Lunar Boon
+3 Catalyst of Aeons
+
+Battlefields:
+1 Aspirant's Climb
+1 Sigil of the Storm
+1 Vilemaw's Lair
+
+Runes:
+6 Body Rune
+6 Chaos Rune
+
+Sideboard:
+2 Repulse
+1 Abandon
+2 Akshan, Mischievous
+1 Fading Memories
+1 Mindsplitter
+1 Baron Nashor

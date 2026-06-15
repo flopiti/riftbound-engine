@@ -1,0 +1,41 @@
+# Mind / Order Leblanc — "Leblancket" by Aiden Münch
+# Pulled from riftdecks.com (deck 180964).
+
+Legend:
+1 Leblanc, Deceiver
+
+Champion:
+1 LeBlanc, Fragmented
+
+MainDeck:
+2 Honest Broker
+3 Soaring Scout
+3 Watchful Sentry
+3 Karthus, Eternal
+3 Glasc Mixologist
+2 Vi, Peacekeeper
+2 Ruined Rex
+2 Thousand-Tailed Watcher
+2 Rift Herald
+3 Sacrifice
+3 Cull the Weak
+2 Deathgrip
+3 Hidden Blade
+2 Shadow's Call
+1 Tactical Retreat
+3 Mirror Image
+
+Battlefields:
+1 Dusk Rose Lab
+1 Star Spring
+1 Windswept Hillock
+
+Runes:
+4 Mind Rune
+8 Order Rune
+
+Sideboard:
+3 Sprite Fountain
+2 Turn to Dust
+2 Deadly Flourish
+1 Atakhan

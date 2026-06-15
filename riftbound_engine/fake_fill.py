@@ -8,9 +8,11 @@ API. The original constant names are still exposed for backward compatibility wi
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -19,6 +21,11 @@ from .engine import RequiredTo
 
 _DEFAULT_FALLBACK_BATTLEFIELD = "Altar to Unity"
 _DEFAULT_ADVANCED_SEED = 42
+
+#: Where the runtime fake-fill config is persisted (sibling of the engine
+#: package, next to saved_games.json) so toggles like enabled/mode survive a
+#: server restart, mirroring the saved-games store.
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "fake_fill_config.json"
 
 
 class FakeFillMode(StrEnum):
@@ -99,16 +106,6 @@ def _initial_config() -> FakeFillConfig:
     )
 
 
-_lock = Lock()
-_config: FakeFillConfig = _initial_config()
-
-
-def get_config() -> FakeFillConfig:
-    """Return a snapshot of the current config (callers may not mutate it)."""
-    with _lock:
-        return replace(_config)
-
-
 _ALLOWED_FIELDS = {
     "enabled",
     "player_1_deck",
@@ -122,39 +119,101 @@ _ALLOWED_FIELDS = {
 }
 
 
+def _coerce_and_apply(cfg: FakeFillConfig, updates: dict[str, Any]) -> None:
+    """Validate + apply a partial update onto ``cfg`` in place. Unknown keys
+    and un-coercible values are skipped. Does NOT persist (callers decide)."""
+    for key, value in updates.items():
+        if key not in _ALLOWED_FIELDS or value is None:
+            continue
+        if key == "first_turn":
+            if not isinstance(value, RequiredTo):
+                try:
+                    value = RequiredTo(value)
+                except ValueError:
+                    continue
+            if value not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+                continue
+        elif key == "enabled":
+            value = bool(value)
+        elif key == "mulligan_bottom":
+            value = str(value)
+        elif key == "mode":
+            if not isinstance(value, FakeFillMode):
+                try:
+                    value = FakeFillMode(value)
+                except ValueError:
+                    continue
+        elif key == "advanced_seed":
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                continue
+        else:
+            value = str(value)
+        setattr(cfg, key, value)
+
+
+def _serialize_config(cfg: FakeFillConfig) -> dict[str, Any]:
+    """JSON-safe dict of the persistable fields (enums → their string value)."""
+    return {
+        "enabled": cfg.enabled,
+        "player_1_deck": cfg.player_1_deck,
+        "player_2_deck": cfg.player_2_deck,
+        "player_1_battlefield": cfg.player_1_battlefield,
+        "player_2_battlefield": cfg.player_2_battlefield,
+        "first_turn": cfg.first_turn.value,
+        "mulligan_bottom": cfg.mulligan_bottom,
+        "mode": cfg.mode.value,
+        "advanced_seed": cfg.advanced_seed,
+    }
+
+
+def _load_persisted() -> dict[str, Any]:
+    """The persisted config dict, or ``{}`` if absent/unreadable."""
+    if not _CONFIG_PATH.is_file():
+        return {}
+    try:
+        data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _persist(cfg: FakeFillConfig) -> None:
+    try:
+        _CONFIG_PATH.write_text(
+            json.dumps(_serialize_config(cfg), indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass  # persistence is best-effort; never break a runtime update
+
+
+def _load_initial_config() -> FakeFillConfig:
+    """Defaults, then overlay whatever was persisted last (so enabled/mode/etc.
+    survive a restart). The FAKE_FILL env var only sets the DEFAULT for a fresh
+    machine; a persisted value wins once the user has toggled it."""
+    cfg = _initial_config()
+    _coerce_and_apply(cfg, _load_persisted())
+    return cfg
+
+
+_lock = Lock()
+_config: FakeFillConfig = _load_initial_config()
+
+
+def get_config() -> FakeFillConfig:
+    """Return a snapshot of the current config (callers may not mutate it)."""
+    with _lock:
+        return replace(_config)
+
+
 def update_config(updates: dict[str, Any]) -> FakeFillConfig:
-    """Apply a partial update. Unknown keys are ignored. Returns the new config."""
+    """Apply a partial update, persist it to disk, and return the new config.
+    Unknown keys are ignored."""
     global _config
     with _lock:
-        for key, value in updates.items():
-            if key not in _ALLOWED_FIELDS or value is None:
-                continue
-            if key == "first_turn":
-                if not isinstance(value, RequiredTo):
-                    try:
-                        value = RequiredTo(value)
-                    except ValueError:
-                        continue
-                if value not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
-                    continue
-            elif key == "enabled":
-                value = bool(value)
-            elif key == "mulligan_bottom":
-                value = str(value)
-            elif key == "mode":
-                if not isinstance(value, FakeFillMode):
-                    try:
-                        value = FakeFillMode(value)
-                    except ValueError:
-                        continue
-            elif key == "advanced_seed":
-                try:
-                    value = int(value)
-                except (TypeError, ValueError):
-                    continue
-            else:
-                value = str(value)
-            setattr(_config, key, value)
+        _coerce_and_apply(_config, updates)
+        _persist(_config)
         return replace(_config)
 
 

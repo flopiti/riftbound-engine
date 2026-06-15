@@ -517,6 +517,59 @@ def shield_amount_in_text(text: str) -> int:
     return int(m.group(1)) if (m and m.group(1)) else 1
 
 
+# Ability-cost codes the engine can charge out of the Energy + Power pools.
+#   PAY_<N>_ENERGY   → N Energy
+#   PAY_<N>P         → N Power of ANY domain (the card text's "N runes of any type")
+#   PAY_<N><LETTER>  → N Power of the CARD'S OWN domain (e.g. PAY_1R on a Fury card,
+#                      PAY_1Y on an Order card). The colour letter is redundant —
+#                      a colored-rune cost is always paid in the card's domain — so
+#                      we resolve it to the card's first domain and ignore the letter.
+_PAY_ENERGY_RE = re.compile(r"^PAY_(\d+)_ENERGY$")
+_PAY_ANY_POWER_RE = re.compile(r"^PAY_(\d+)P$")
+_PAY_DOMAIN_POWER_RE = re.compile(r"^PAY_(\d+)[A-Z]$")
+
+
+def parse_pay_cost(
+    codes: tuple[str, ...], domains: tuple[str, ...]
+) -> tuple[dict[str, object], tuple[str, ...]]:
+    """Split ability cost codes into a payable Energy/Power requirement and the
+    leftover unsupported codes.
+
+    Returns ``(requirement, unsupported)`` where ``requirement`` matches the
+    equip-cost shape consumed by ``can_afford_equip_cost`` /
+    ``_deduct_equip_cost``: ``{"energy": int, "power": {domain: int}, "any_power":
+    int}``. ``EXHAUST_THIS`` is paid separately (by exhausting the source) so it's
+    skipped here, not reported as unsupported. Any code we can't charge from the
+    pools (KILL_THIS, RECYCLE_1_RUNE, SPEND_BUFF, …) lands in ``unsupported`` so
+    callers can decline to gate on costs they don't honour."""
+    energy = 0
+    power: dict[str, int] = {}
+    any_power = 0
+    unsupported: list[str] = []
+    dom = next((d for d in domains if d and d != "Colorless"), None)
+    for code in codes:
+        if code == "EXHAUST_THIS":
+            continue
+        m = _PAY_ENERGY_RE.match(code)
+        if m:
+            energy += int(m.group(1))
+            continue
+        m = _PAY_ANY_POWER_RE.match(code)
+        if m:
+            any_power += int(m.group(1))
+            continue
+        m = _PAY_DOMAIN_POWER_RE.match(code)
+        if m:
+            n = int(m.group(1))
+            if dom:
+                power[dom] = power.get(dom, 0) + n
+            else:
+                any_power += n  # colorless/unknown domain → treat as any-type
+            continue
+        unsupported.append(code)
+    return {"energy": energy, "power": power, "any_power": any_power}, tuple(unsupported)
+
+
 def card_has_accelerate(name: str) -> bool:
     """Whether the card carries the ``[Accelerate]`` keyword — pay an extra
     cost as you play it to have it enter READY instead of exhausted."""

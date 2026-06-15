@@ -521,6 +521,10 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         # An [Accelerate] decision owns the clock — only the accelerate picker
         # (compute_accelerate_intents) and the decline option are valid.
         return []
+    if getattr(gs, "pending_ability_payment", None) is not None:
+        return []
+    if getattr(gs, "pending_ability_payment", None) is not None:
+        return []  # an any-type Power payment owns the clock
     if getattr(gs, "pending_ability_cost", None) is not None:
         return []  # a triggered ability's pay-cost decision owns the clock
     if getattr(gs, "pending_effect_choice", None) is not None:
@@ -923,6 +927,7 @@ def compute_equip_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInt
         or getattr(gs, "pending_spell_repeat", None) is not None
         or getattr(gs, "pending_accelerate", None) is not None
         or getattr(gs, "pending_ability_cost", None) is not None
+        or getattr(gs, "pending_ability_payment", None) is not None
         or getattr(gs, "pending_effect_choice", None) is not None
     ):
         return []
@@ -1051,6 +1056,7 @@ def compute_quick_draw_intents(engine: GameEngine, actor: RequiredTo) -> list[Pl
         or getattr(gs, "pending_spell_repeat", None) is not None
         or getattr(gs, "pending_accelerate", None) is not None
         or getattr(gs, "pending_ability_cost", None) is not None
+        or getattr(gs, "pending_ability_payment", None) is not None
         or getattr(gs, "pending_effect_choice", None) is not None
     ):
         return []
@@ -1151,6 +1157,7 @@ def compute_move_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         or getattr(gs, "pending_spell_repeat", None) is not None
         or getattr(gs, "pending_accelerate", None) is not None
         or getattr(gs, "pending_ability_cost", None) is not None
+        or getattr(gs, "pending_ability_payment", None) is not None
         or getattr(gs, "pending_effect_choice", None) is not None
     ):
         return []
@@ -1214,6 +1221,8 @@ def compute_shortcuts(engine: GameEngine, actor: RequiredTo) -> list[Shortcut]:
     if getattr(gs, "pending_spell_repeat", None) is not None:
         return []
     if getattr(gs, "pending_accelerate", None) is not None:
+        return []
+    if getattr(gs, "pending_ability_payment", None) is not None:
         return []
     if getattr(gs, "pending_ability_cost", None) is not None:
         return []

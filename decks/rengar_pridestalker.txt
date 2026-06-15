@@ -1,0 +1,42 @@
+# Body / Fury Rengar — "He Am in Bush" by IrithyllDrake
+# Pulled from riftdecks.com (deck-he-am-in-bush-180974).
+
+Legend:
+1 Rengar, Pridestalker
+
+Champion:
+1 Rengar, Trophy Hunter
+
+MainDeck:
+3 Inferna
+3 Irresistible Faefolk
+2 Pit Rookie
+2 First Mate
+3 Grim Apothecary
+3 Nidalee, Cat Form
+3 Noxus Hopeful
+2 Darius, Trifarian
+2 Rengar, Trophy Hunter
+2 Brynhir Thundersong
+2 Fresh Beans
+3 Punch First
+2 Sabotage
+2 Challenge
+2 Confront
+3 Thrill of the Hunt
+
+Battlefields:
+1 Emperor's Dais
+1 Star Spring
+1 The Arena's Greatest
+
+Runes:
+8 Body Rune
+4 Fury Rune
+
+Sideboard:
+1 Detonate
+2 Repulse
+1 Sabotage
+2 Falling Star
+2 Akshan, Mischievous

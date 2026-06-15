@@ -188,7 +188,8 @@ class GameEngineTests(unittest.TestCase):
 
         self.assertIsNotNone(fourth.required_action)
         self.assertEqual(fourth.required_action.name, RequiredStep.CHOOSE_BATTLEFIELDS)
-        self.assertEqual(fourth.required_action.actor, RequiredTo.BOTH)
+        # Battlefields are now chosen sequentially: player_1 picks first.
+        self.assertEqual(fourth.required_action.actor, RequiredTo.PLAYER_1)
         self.assertEqual(fourth.game_state.first_turn, RequiredTo.PLAYER_2)
         self.assertEqual(fourth.game_state.counter, 0)
         self.assertFalse(fourth.game_state.started)
@@ -201,13 +202,17 @@ class GameEngineTests(unittest.TestCase):
         third = engine.apply_action(action=f"choose_deck:{second.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
         fourth = engine.apply_action(action="choose_first_turn:player_1", actor=RequiredTo.PLAYER_1)
 
+        # Battlefields are chosen SEQUENTIALLY: player_1 first (only their
+        # deck's battlefields), then player_2.
         self.assertEqual(fourth.required_action.name, RequiredStep.CHOOSE_BATTLEFIELDS)
-        self.assertEqual(fourth.required_action.actor, RequiredTo.BOTH)
+        self.assertEqual(fourth.required_action.actor, RequiredTo.PLAYER_1)
         self.assertEqual(len(fourth.player_1_options), 3)
-        self.assertEqual(len(fourth.player_2_options), 3)
+        self.assertEqual(len(fourth.player_2_options), 0)
 
         fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
         self.assertEqual(fifth.required_action.name, RequiredStep.CHOOSE_BATTLEFIELDS)
+        self.assertEqual(fifth.required_action.actor, RequiredTo.PLAYER_2)
+        self.assertEqual(len(fifth.player_2_options), 3)
         self.assertEqual(fifth.game_state.battlefield_1, fourth.player_1_options[0])
         self.assertEqual(fifth.game_state.player_1_base, fourth.player_1_options[0])
         self.assertIsNone(fifth.game_state.battlefield_2)
@@ -216,8 +221,14 @@ class GameEngineTests(unittest.TestCase):
         sixth = engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
         self.assertEqual(sixth.required_action.name, RequiredStep.CHOOSE_MULLIGAN)
         self.assertEqual(sixth.required_action.actor, RequiredTo.BOTH)
-        self.assertEqual(len(sixth.player_1_options), 4)
-        self.assertEqual(len(sixth.player_2_options), 4)
+        # Mulligan options are full `mulligan_resolve:player_N:<csv>` actions:
+        # keep-all + bottom-each-single + bottom-each-pair = 1 + 4 + C(4,2) = 11.
+        self.assertEqual(len(sixth.player_1_options), 11)
+        self.assertEqual(len(sixth.player_2_options), 11)
+        self.assertTrue(
+            all(o.startswith("mulligan_resolve:player_1:") for o in sixth.player_1_options)
+        )
+        self.assertIn("mulligan_resolve:player_1:", sixth.player_1_options)  # keep-all
         self.assertEqual(sixth.game_state.battlefield_2, fifth.player_2_options[0])
         self.assertEqual(sixth.game_state.player_2_base, fifth.player_2_options[0])
         self.assertFalse(sixth.game_state.is_mulligan_done)
@@ -494,8 +505,17 @@ class GameEngineTests(unittest.TestCase):
                 continue
             seen.add(card)
             spell_opts.append(f"play:play_spell:{i}")
+        # Gears are offered after spells (same cost gates, no requirement).
+        gear_opts: list[str] = []
+        for i, card in enumerate(hand_after_pop):
+            if card in seen:
+                continue
+            if card_type_of(card) != "Gear":
+                continue
+            seen.add(card)
+            gear_opts.append(f"play:play_gear:{i}")
         # Champion still available + affordable (resources flooded) → offered.
-        expected = unit_opts + spell_opts + ["play:play_champion", "play:end_turn"]
+        expected = unit_opts + spell_opts + gear_opts + ["play:play_champion", "play:end_turn"]
         self.assertEqual(settled.player_1_options, expected)
 
     def test_play_unit_rejects_bad_indices_and_inactive_player(self) -> None:

@@ -1,0 +1,45 @@
+# Fury / Mind Jhin — by Finallo
+# Pulled from riftdecks.com (deck-jhin-virtuoso-180614).
+
+Legend:
+1 Jhin, Virtuoso
+
+Champion:
+1 Jhin, Meticulous Killer
+
+MainDeck:
+2 Inferna
+3 Plundering Poro
+1 Vi, Destructive
+2 Watchful Sentry
+1 Jhin, Meticulous Killer
+2 Noxus Hopeful
+2 Ekko, Recurrent
+2 Brynhir Thundersong
+2 Thousand-Tailed Watcher
+3 Downstage Dramatics
+1 Frigid Touch
+2 Piercing Light
+1 Blind Fury
+3 Curtain Call
+3 Deadly Flourish
+1 Rocket Barrage
+3 Sprite Burst
+3 Progress Day
+1 Unchecked Power
+1 Time Warp
+
+Battlefields:
+1 Aspirant's Climb
+1 Frozen Fortress
+1 Sigil of the Storm
+
+Runes:
+5 Fury Rune
+7 Mind Rune
+
+Sideboard:
+1 Upstage Comedy
+2 Square Up
+3 Falling Comet
+2 Thermo Beam

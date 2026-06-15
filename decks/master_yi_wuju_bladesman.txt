@@ -1,0 +1,43 @@
+# Body / Calm Master Yi — Brook irl, Top 4 @ Nightcup du Lundi Le Lab Rift (2026-06-08)
+# Pulled from riftdecks.com (deck 180573).
+
+Legend:
+1 Master Yi, Wuju Bladesman
+
+Champion:
+1 Master Yi, Tempered
+
+MainDeck:
+3 Lonely Poro
+3 Pit Rookie
+3 Scuttle Crab
+3 First Mate
+2 Akshan, Mischievous
+3 Rengar, Trophy Hunter
+2 Ruin Runner
+2 Zhonya's Hourglass
+3 Charm
+3 Defy
+2 En Garde
+3 Punch First
+1 Sabotage
+1 Challenge
+3 Discipline
+1 Grim Resolve
+1 Primal Strength
+
+Battlefields:
+1 Emperor's Dais
+1 Seat of Power
+1 Star Spring
+
+Runes:
+7 Body Rune
+5 Calm Rune
+
+Sideboard:
+2 Sabotage
+1 Unyielding Spirit
+1 Disposal Order
+1 Alpha Strike
+3 Disarming Rake

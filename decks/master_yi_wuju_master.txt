@@ -1,0 +1,42 @@
+# Body / Calm Master Yi (Wuju Master) — by Douctourmax
+# Pulled from riftdecks.com (deck-master-yi-wuju-master-180604).
+
+Legend:
+1 Master Yi, Wuju Master
+
+Champion:
+1 Master Yi, Tempered
+
+MainDeck:
+3 Gemhand Hunter
+2 Scuttle Crab
+3 Wuju Apprentice
+2 Master Yi, Tempered
+3 Voracious Gromp
+3 Master Yi, Unstoppable
+3 Zhonya's Hourglass
+3 Defy
+2 Punch First
+3 Discipline
+1 Emperor's Divide
+3 Grim Resolve
+2 Skyward Strike
+1 Alpha Strike
+3 Back Off
+2 Concentrate
+
+Battlefields:
+1 Amateur Recital
+1 Gardens of Becoming
+1 Reckoner's Arena
+
+Runes:
+6 Body Rune
+6 Calm Rune
+
+Sideboard:
+2 Sabotage
+2 Unyielding Spirit
+1 Skyward Strike
+1 Alpha Strike
+2 Irelia, Fervent

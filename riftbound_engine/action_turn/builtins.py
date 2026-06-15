@@ -1210,8 +1210,8 @@ def _choose_ability_cost(ctx: ActionTurnContext) -> None:
     effect on the chain; ``:no`` declines and the effect never happens. Only the
     ability's controller may answer. If the source became unpayable (exhausted /
     left play) in the meantime, paying simply does nothing."""
+    from ..engine import PendingAbilityPayment
     from ..engine import RequiredTo as RT
-    from ..triggers import TriggeredEffect
 
     gs = ctx.engine._game_state
     pend = gs.pending_ability_cost
@@ -1228,24 +1228,58 @@ def _choose_ability_cost(ctx: ActionTurnContext) -> None:
     gs.pending_ability_cost = None
 
     if choice == "yes":
-        src = ctx.engine._resolve_exhaustable_source(pend.source)
-        if src is not None and not src.exhausted:
-            src.exhausted = True  # pay the [exhaust this] cost
-            # Effect reaches the chain ONLY because the cost was paid.
-            ctx.engine._push_effect_to_chain(
-                TriggeredEffect(
-                    controller=pend.actor.value,
+        costs = tuple(pend.costs)
+        # Re-check affordability at pay time (state could have shifted); if the
+        # cost can no longer be met, the effect simply doesn't happen.
+        if ctx.engine._can_pay_ability_cost(pend.actor, pend.source, costs):
+            # Charge the cost, then resolve — opening the any-type Power picker
+            # if that cost leaves a real choice (else the effect is pushed now).
+            ctx.engine._begin_ability_resolution(
+                PendingAbilityPayment(
+                    actor=pend.actor,
+                    kind="triggered",
                     source=pend.source,
+                    effects=tuple(pend.effects),
+                    remaining=0,
                     trigger=pend.trigger,
                     event_kind=pend.event_kind,
-                    effects=tuple(pend.effects),
                     conditions=tuple(pend.conditions),
-                    costs=(),  # already paid — don't re-gate
-                    label=pend.label,
                     context_card=pend.context_card,
-                )
+                    label=pend.label,
+                ),
+                pend.source,
+                costs,
             )
     # 'no' (or unpayable) → the effect is not put on the chain.
+
+
+@register_turn_action("pay_ability_power")
+def _pay_ability_power(ctx: ActionTurnContext) -> None:
+    """Pay one Power toward an ability's "N Power of any type" cost, choosing
+    WHICH domain to spend. Wire: ``play:pay_ability_power:<Domain>``. Repeats
+    one Power at a time until the cost is met, then the ability resolves (the
+    triggered effect is pushed, or the activated ability's target pick opens)."""
+    gs = ctx.engine._game_state
+    pend = gs.pending_ability_payment
+    if pend is None:
+        raise ValueError("no ability payment is pending")
+    if ctx.actor != pend.actor:
+        raise ValueError(
+            f"the payment belongs to {pend.actor.value}, not {ctx.actor.value}"
+        )
+    domain = ctx.payload.strip()
+    if not domain:
+        raise ValueError(
+            "play:pay_ability_power requires a domain (e.g. play:pay_ability_power:Fury)"
+        )
+    pool = ctx.engine.player_power(ctx.actor)
+    if pool.get(domain, 0) <= 0:
+        raise ValueError(f"no {domain} Power available to spend")
+    ctx.engine.add_power(ctx.actor, domain, -1)
+    pend.remaining -= 1
+    if pend.remaining <= 0:
+        gs.pending_ability_payment = None
+        ctx.engine._resume_ability_payment(pend)
 
 
 @register_turn_action("activate")
@@ -1267,6 +1301,7 @@ def _activate(ctx: ActionTurnContext) -> None:
         gs.pending_play, gs.pending_spell_choice, gs.pending_chain, gs.pending_showdown,
         gs.pending_combat, getattr(gs, "pending_spell_repeat", None),
         getattr(gs, "pending_accelerate", None), getattr(gs, "pending_ability_cost", None),
+        getattr(gs, "pending_ability_payment", None),
         getattr(gs, "pending_effect_choice", None),
     )
     if any(b is not None for b in blockers):
@@ -1291,23 +1326,32 @@ def _activate(ctx: ActionTurnContext) -> None:
     if perm.exhausted:
         raise ValueError("source is already exhausted — its cost can't be paid")
 
+    costs = tuple(ability.costs)
+    if not ctx.engine._can_pay_ability_cost(ctx.actor, src, costs):
+        raise ValueError("can't pay this ability's cost (not enough Energy/Power)")
+
     effects = tuple(ability.active_effects)
     req = ctx.engine._derive_activation_requirement(effects)
     if req == "ANY UNIT (1)" and not (gs.player_1_units or gs.player_2_units):
         raise ValueError("no valid target for this ability")
 
-    # Pay the cost: exhaust the source.
-    perm.exhausted = True
-    if req:
-        gs.pending_spell_choice = PendingSpellChoice(
+    # Pay the cost (exhaust + Energy/specific-domain Power), then resolve. If the
+    # cost includes "N Power of any type" with a real choice of domain, this opens
+    # the any-power picker first and resumes the activation once it's paid.
+    from ..engine import PendingAbilityPayment
+
+    ctx.engine._begin_ability_resolution(
+        PendingAbilityPayment(
             actor=ctx.actor,
-            card=ctx.engine._card_name_for_ref(src) or "",
+            kind="activate",
+            source=src,
+            effects=effects,
+            remaining=0,
             requirement=req,
-            activation_source=src,
-            activation_effects=effects,
-        )
-    else:
-        ctx.engine._push_activated_effect(ctx.actor, src, effects, [], [], "")
+        ),
+        src,
+        costs,
+    )
 
 
 @register_turn_action("pass_priority")

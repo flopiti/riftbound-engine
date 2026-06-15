@@ -1,0 +1,49 @@
+# Calm / Mind Ahri — "lilili" by LineKa·Dioniya
+# Pulled from riftdecks.com (deck-lilili-179397).
+
+Legend:
+1 Ahri, Nine-Tailed Fox
+
+Champion:
+1 Ahri, Alluring
+
+MainDeck:
+3 Mutated Mouser
+1 Stalwart Poro
+1 Chakram Dancer
+3 Sunlit Guardian
+2 Trevor Snoozebottom
+3 Blue Sentinel
+1 Blitzcrank, Impassive
+1 Ruined Rex
+1 Thousand-Tailed Watcher
+2 Vilemaw
+1 Cloth Armor
+2 Zhonya's Hourglass
+1 Heart of Dark Ice
+1 Charm
+3 Defy
+3 Desert's Call
+3 Discipline
+2 Emperor's Divide
+1 Turn to Dust
+2 Back Off
+1 Singularity
+1 Time Warp
+
+Battlefields:
+1 Grove of the God-Willow
+1 Power Nexus
+1 Trifarian War Camp
+
+Runes:
+6 Calm Rune
+6 Mind Rune
+
+Sideboard:
+1 Charm
+1 Not So Fast
+2 Allay, Eager Admirer
+2 Disarming Rake
+1 Yuumi, Magical Cat
+1 Singularity

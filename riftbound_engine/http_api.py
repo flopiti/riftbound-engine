@@ -1117,7 +1117,16 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 "actor": gs.pending_ability_cost.actor.value,
                 "card": gs.pending_ability_cost.source_card,
                 "label": gs.pending_ability_cost.label,
-                "cost": "EXHAUST_THIS",
+                "costs": list(gs.pending_ability_cost.costs),
+            }
+        ),
+        "pending_ability_payment": (
+            None
+            if getattr(gs, "pending_ability_payment", None) is None
+            else {
+                "actor": gs.pending_ability_payment.actor.value,
+                "remaining": gs.pending_ability_payment.remaining,
+                "label": gs.pending_ability_payment.label,
             }
         ),
         "pending_chain": (

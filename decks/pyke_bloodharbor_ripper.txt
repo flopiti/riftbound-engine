@@ -1,0 +1,47 @@
+# Chaos / Fury Pyke — by alan
+# Pulled from riftdecks.com (deck-pyke-bloodharbor-ripper-180584).
+
+Legend:
+1 Pyke, Bloodharbor Ripper
+
+Champion:
+1 Pyke, Dockside Butcher
+
+MainDeck:
+2 Inferna
+2 Tideturner
+3 Treasure Hunter
+3 Bewitching Spirit
+1 Fizz, Trickster
+1 Pyke, Dockside Butcher
+1 Sharkling
+3 Noxus Hopeful
+1 Vex, Apathetic
+2 Darius, Trifarian
+1 Baron Nashor
+1 Blighted Battleaxe
+1 Gust
+3 Stacked Deck
+3 Falling Star
+3 Hard Bargain
+3 Switcheroo
+3 Star-Crossed
+1 Void Seeker
+1 Death from Below
+
+Battlefields:
+1 Forbidding Waste
+1 Ripper's Bay
+1 The Arena's Greatest
+
+Runes:
+6 Chaos Rune
+6 Fury Rune
+
+Sideboard:
+2 Acceptable Losses
+2 Abandon
+1 Against the Odds
+1 Death from Below
+1 Thermo Beam
+1 Mindsplitter
