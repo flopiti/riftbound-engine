@@ -1352,3 +1352,9 @@ def _deal_1_to_3_units_same_loc(ctx: EffectContext) -> None:
     """Bellows Breath: "Deal 1 to up to three units at the same location."
     (The SAME_LOC requirement enforces the shared location at target choice.)"""
     _deal_to_targets(ctx, 1)
+
+
+# Data-driven, hot-reloadable effects authored by the Implementation-tab agent
+# (generated_effects.json). Imported LAST so the registry above is fully defined
+# before any generated spec registers against it.
+from . import generated_effects as _generated_effects  # noqa: E402,F401

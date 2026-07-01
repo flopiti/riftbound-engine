@@ -2321,6 +2321,392 @@
         }
       ],
       "updated_at": 1781094360.4384818
+    },
+    {
+      "id": "ahri-test",
+      "name": "Ahri test",
+      "description": "",
+      "created_at": 1782236671.782899,
+      "setup": {
+        "player_1_deck": "test_ahri_inquisitive",
+        "player_2_deck": "master_yi_wuju_bladesman",
+        "player_1_battlefield": "Grove of the God-Willow",
+        "player_2_battlefield": "Emperor's Dais",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 867159698
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Ahri, Inquisitive",
+          "label": "Ahri, Inquisitive",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_and_recycle_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:11"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Place Ahri, Inquisitive on Base",
+          "label": "Place Ahri, Inquisitive on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Move Ahri, Inquisitive from Base \u2192 Grove of the God-Willow",
+          "label": "Move Ahri, Inquisitive from Base \u2192 Grove of the God-Willow",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:play_unit:1:Calm\u00d72#Mind\u00d71",
+          "label": "Play Chakram Dancer (2 Calm, 1 Mind)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Chakram Dancer on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:5:Body\u00d72#Calm\u00d72",
+          "label": "Play Akshan, Mischievous (2 Body, 2 Calm)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:6"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:5"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Akshan, Mischievous on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Grove of the God-Willow",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        }
+      ]
     }
   ]
 }

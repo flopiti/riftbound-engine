@@ -1051,6 +1051,26 @@ def _choose_effect_target(ctx: ActionTurnContext) -> None:
             f"{' or pass' if choice.optional else ''})"
         )
 
+    # PLACEMENT pick: lock the chosen target onto the triggered ability and
+    # push it to the chain now (the effect runs against that target later, at
+    # resolution) — rather than mutating immediately like a resolution choice.
+    if choice.place_te is not None:
+        import dataclasses
+
+        gs.pending_effect_choice = None
+        te = choice.place_te
+        if token != "pass":
+            side = "player_1" if token.startswith("p1") else "player_2"
+            idx = int(token.split("-", 1)[1])
+            units = gs.player_1_units if side == "player_1" else gs.player_2_units
+            uid = units[idx].uid if 0 <= idx < len(units) else None
+            te2 = dataclasses.replace(te, targets=(f"{side}:{idx}",))
+            ctx.engine._push_effect_to_chain(te2, target_uids=[uid], requirement="")
+        else:
+            ctx.engine._log_event("trigger", f"{choice.label}: declined")
+        ctx.engine._drain_triggers()  # resume any triggers queued behind this one
+        return
+
     gs.pending_effect_choice = None
     if token == "pass":
         ctx.engine._log_event("effect", f"{choice.label}: declined")

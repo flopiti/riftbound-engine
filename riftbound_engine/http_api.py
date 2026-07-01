@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .action_label import label_for_action
-from .abilities import attached_might_bonus
+from .abilities import attached_might_bonus, reset_caches as _reset_ability_caches
 from .csv_data import card_domains_of, card_energy_of, card_might_of, card_power_of
 from .deck_files import DECKS_DIR, deck_file_path, list_deck_ids, load_deck_file
 from .engine import VICTORY_SCORE, Deck, EngineOutput, GameEngine, GameState, RequiredTo
@@ -772,6 +772,10 @@ def reset_engine(
     """
     global _engine, _last_output, _initial_state, _branch_states, _last_shuffle_seed
     global _branch_path, _branch_visited, _branch_nodes_visited, _step_recorder, _post_setup_state
+    # Re-read the card taxonomy on every reset so newly-tagged triggers/effects
+    # take effect just by setting up a fresh game — no engine restart needed
+    # (the taxonomy is otherwise memoized for the life of the process).
+    _reset_ability_caches()
     cfg = get_fake_fill_config()
     if seed_override is not None:
         seed = seed_override
@@ -1551,6 +1555,27 @@ class DeckSaveBody(BaseModel):
     text: str = Field(..., min_length=1)
 
 
+class ImplementEffectBody(BaseModel):
+    """A data-driven effect spec the Implementation agent authors. Written to
+    generated_effects.json and registered LIVE (no restart). Currently the
+    ``might_delta`` kind: add/subtract Might from matching units with a floor."""
+
+    code: str = Field(..., min_length=1, max_length=80)
+    kind: str = Field("might_delta")
+    amount: int | None = Field(None)  # required for might_delta/deal_damage/draw
+    min_might: int | None = Field(None)
+    target: str = Field("any")  # enemy | friendly | any
+    location: str = Field("any")  # here | any
+    select: str = Field("all")  # all | one
+    # return_from_trash family
+    filter: str | None = Field(None)  # champion | unit | spell | gear | any
+    destination: str | None = Field(None)  # hand | champion_zone
+    optional: bool | None = Field(None)  # "may" effect
+    condition: str | None = Field(None)  # champion_zone_empty | null
+    card: str | None = Field(None)
+    note: str | None = Field(None)
+
+
 _DECK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]*$")
 
 
@@ -1597,6 +1622,16 @@ def create_app() -> FastAPI:
             _last_output = reset_engine()
             return _serialize_output(_last_output)
 
+    @app.get("/implemented-surface")
+    def implemented_surface_get() -> dict[str, Any]:
+        """The engine's LIVE implemented surface (effects/triggers/conditions/
+        costs/passives + pattern families). The web Implementation tracker reads
+        this instead of the generated engineImplemented.ts, so it can never go
+        stale — a newly-registered effect shows up immediately."""
+        from .implemented_surface import surface_data
+
+        return surface_data()
+
     @app.post("/reroll-until")
     def reroll_until(body: BranchSearchBody) -> dict[str, Any]:
         """Re-DEAL the opening (reset with a fresh shuffle) until ``predicate``
@@ -1630,6 +1665,74 @@ def create_app() -> FastAPI:
     @app.get("/decks")
     def decks_list() -> dict[str, Any]:
         return {"decks": _serialize_decks()}
+
+    @app.post("/create-test-deck")
+    def create_test_deck_route(body: dict) -> dict[str, Any]:
+        """A playable deck that RUNS a given card (to test it on the board).
+        Reuses a real deck that already includes the card; only builds a NEW
+        throwaway deck when none does. Never edits an existing deck."""
+        from .deck_files import deck_for_card
+
+        card = str(body.get("card") or "").strip()
+        if not card:
+            raise HTTPException(status_code=400, detail="card is required")
+        try:
+            deck_id, source = deck_for_card(card)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "deck_id": deck_id, "source": source, "card": card}
+
+    @app.post("/implement-effect")
+    def implement_effect(body: ImplementEffectBody) -> dict[str, Any]:
+        """Author/replace a data-driven effect handler and register it LIVE.
+        Lets the Implementation agent actually make an effect run (currently the
+        ``might_delta`` family) without a developer or a restart."""
+        from . import generated_effects
+
+        if body.kind not in (
+            "might_delta",
+            "deal_damage",
+            "draw",
+            "opponent_discard",
+            "return_from_trash",
+            "spend_buff_draw",
+        ):
+            raise HTTPException(status_code=400, detail=f"unsupported kind {body.kind!r}")
+        if body.kind in ("might_delta", "deal_damage", "draw", "spend_buff_draw") and body.amount is None:
+            raise HTTPException(status_code=400, detail=f"amount is required for kind {body.kind!r}")
+        if body.kind in ("might_delta", "deal_damage"):
+            if body.target not in ("enemy", "friendly", "any"):
+                raise HTTPException(status_code=400, detail="target must be enemy|friendly|any")
+            if body.location not in ("here", "any"):
+                raise HTTPException(status_code=400, detail="location must be here|any")
+            if body.select not in ("all", "one"):
+                raise HTTPException(status_code=400, detail="select must be all|one")
+        if body.kind == "return_from_trash":
+            if (body.destination or "hand") not in ("hand", "champion_zone"):
+                raise HTTPException(
+                    status_code=400, detail="destination must be hand|champion_zone"
+                )
+            if (body.filter or "any") not in ("any", "champion", "unit", "spell", "gear"):
+                raise HTTPException(
+                    status_code=400, detail="filter must be any|champion|unit|spell|gear"
+                )
+        spec = {
+            k: v
+            for k, v in body.model_dump().items()
+            if v is not None
+        }
+        try:
+            registered = generated_effects.upsert_spec(spec)
+        except Exception as exc:  # bad spec — surface it, don't 500 silently
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        from . import effects as _effects
+
+        return {
+            "ok": True,
+            "code": body.code,
+            "implemented": _effects.is_implemented(body.code),
+            "generated_codes": registered,
+        }
 
     @app.get("/decks/{deck_id}/text")
     def decks_text(deck_id: str) -> dict[str, Any]:

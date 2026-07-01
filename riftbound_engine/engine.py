@@ -371,6 +371,11 @@ class PendingEffectChoice:
     #: Targets carried into the continuation's effect codes (e.g. a spell's
     #: chosen units), so codes after the choice still see them.
     continuation_targets: tuple[str, ...] = ()
+    #: PLACEMENT-time pick: when set, this choice is picking the target for a
+    #: triggered ability BEFORE it goes on the chain (rule 402.1). On answer the
+    #: handler locks the chosen unit onto ``place_te`` and pushes it to the
+    #: chain (vs the default resolution-time choice, which mutates immediately).
+    place_te: "TriggeredEffect | None" = None
 
 
 @dataclass
@@ -1143,6 +1148,7 @@ class GameEngine:
                     continuation_targets=tuple(
                         self._game_state.pending_effect_choice.continuation_targets
                     ),
+                    place_te=self._game_state.pending_effect_choice.place_te,
                 )
             ),
             pending_chain=(
@@ -2842,6 +2848,17 @@ class GameEngine:
             ]
             if not matched:
                 continue
+            # Ability-level CONDITIONS ("if I died alone", "…with 1+ Mighty
+            # units", "while I'm at a battlefield"). Unlike _trigger_state_ok
+            # (which gates on the trigger CODE), these gate on the whole
+            # ability. An ability whose condition isn't met right now simply
+            # doesn't fire; an UNKNOWN condition fails closed (we never fire an
+            # ability whose gate we can't verify), mirroring the continuous-gear
+            # rule in abilities._gear_conditions_met.
+            if not self._ability_conditions_met(
+                ability, event, effect_controller, location, ref
+            ):
+                continue
             for t in matched:
                 self._record_trigger_fired(t, event, effect_controller, location)
             # The unit the event was ABOUT (moved / returned / chosen / readied),
@@ -2916,6 +2933,81 @@ class GameEngine:
             self._game_state.first_choose_friendly_fired_this_turn.add(
                 f"{owner_location}:{effect_controller}"
             )
+
+    def _ability_conditions_met(
+        self,
+        ability,
+        event: GameEvent,
+        effect_controller: str,
+        owner_location: str | None,
+        owner_ref: str,
+    ) -> bool:
+        """Whether EVERY condition on a triggered ``ability`` currently holds.
+        An ability with no conditions always passes. An unknown condition fails
+        closed (returns False) so we never fire an ability whose gate we can't
+        verify — same policy as continuous-equipment gates
+        (abilities._gear_conditions_met)."""
+        return all(
+            self._condition_met(cond, event, effect_controller, owner_location, owner_ref)
+            for cond in ability.conditions
+        )
+
+    def _condition_met(
+        self,
+        cond: str,
+        event: GameEvent,
+        effect_controller: str,
+        owner_location: str | None,
+        owner_ref: str,
+    ) -> bool:
+        """Evaluate a single ability condition against the firing event.
+
+        Implemented:
+          * ``WHILE_AT_BATTLEFIELD`` — the source is at a battlefield (Vex,
+            Apathetic: "when an opponent plays a unit WHILE I'M AT A
+            BATTLEFIELD").
+          * ``IF_DIED_ALONE`` — no OTHER friendly unit shares the dying unit's
+            location (Lonely Poro: "I'm alone if there are no other friendly
+            units here"). Evaluated at ON_DEATH emit, while the dying unit is
+            still in the list, so we exclude it by ref.
+          * ``IF_1+_UNIT_MIGHTY`` — the conquering player has ≥1 unit at this
+            battlefield with 5+ Might (Sunken Temple: "when you conquer here
+            with one or more [Mighty] units"). Mighty = 5+ Might (rule).
+        """
+        gs = self._game_state
+
+        if cond == "WHILE_AT_BATTLEFIELD":
+            return owner_location in ("battlefield_1", "battlefield_2")
+
+        if cond == "IF_DIED_ALONE":
+            units = (
+                gs.player_1_units
+                if effect_controller == RequiredTo.PLAYER_1.value
+                else gs.player_2_units
+            )
+            for idx, unit in enumerate(units):
+                if f"{effect_controller}:{idx}" == owner_ref:
+                    continue  # the dying unit itself
+                if unit.location == owner_location:
+                    return False  # another friendly unit shares its location
+            return True
+
+        if cond == "IF_1+_UNIT_MIGHTY":
+            bf = owner_location if owner_location else event.battlefield
+            conqueror = event.controller or effect_controller
+            if conqueror is None or bf not in ("battlefield_1", "battlefield_2"):
+                return False
+            units = (
+                gs.player_1_units
+                if conqueror == RequiredTo.PLAYER_1.value
+                else gs.player_2_units
+            )
+            return any(
+                unit.location == bf and self.effective_unit_might(conqueror, idx) >= 5
+                for idx, unit in enumerate(units)
+            )
+
+        return False  # unknown condition → fail closed
 
     def _chosen_friendly_battlefields(self, item: "ChainItem") -> set[str]:
         """Battlefields where the spell ``item`` chose a unit controlled by its
@@ -3279,6 +3371,37 @@ class GameEngine:
             # at resolution has nothing legal to do, so it is simply dropped.
             if not self._triggered_ability_has_legal_action(te):
                 continue
+            # Placement-time target pick (rule 402.1): an effect that locks its
+            # chosen target BEFORE the trigger becomes a chain item. Pause for
+            # the pick; the handler then pushes the trigger WITH the target
+            # locked. No eligible target ⇒ drop (rule 402.3).
+            from . import generated_effects as _gen
+
+            placement_code = next(
+                (c for c in te.effects if _gen.is_placement_targeted(c)), None
+            )
+            if placement_code and not te.targets:
+                opts = _gen.placement_options(placement_code, self, te.controller, te.source)
+                if not opts:
+                    continue
+                try:
+                    p_actor = RequiredTo(te.controller)
+                except ValueError:
+                    continue
+                self._game_state.pending_effect_choice = PendingEffectChoice(
+                    actor=p_actor,
+                    code=placement_code,
+                    source=te.source,
+                    source_card=self._card_name_for_ref(te.source),
+                    options=opts,
+                    label=te.label,
+                    trigger=te.trigger,
+                    event_kind=te.event_kind,
+                    optional=False,
+                    place_te=te,
+                )
+                self._trigger_queue = queue[i + 1 :]  # resume after the pick
+                return
             if te.costs and self._cost_is_chargeable(te.costs):
                 try:
                     actor = RequiredTo(te.controller)
@@ -3446,15 +3569,27 @@ class GameEngine:
         else:
             self._push_activated_effect(actor, source, tuple(effects), [], [], "")
 
-    def _push_effect_to_chain(self, te: TriggeredEffect) -> None:
+    def _push_effect_to_chain(
+        self,
+        te: TriggeredEffect,
+        *,
+        target_uids: list | None = None,
+        requirement: str = "",
+    ) -> None:
         """Place a triggered ability on top of the chain, handing priority to
-        its controller (the same window spells use to respond)."""
+        its controller (the same window spells use to respond).
+
+        ``target_uids`` / ``requirement`` carry a PLACEMENT-chosen target so it
+        survives to resolution: the unit is re-located by uid (``requirement``
+        left empty means the locked target passes through without re-validation
+        — it was already a legal pick when chosen)."""
         try:
             actor = RequiredTo(te.controller)
         except ValueError:
             return
         item = ChainItem(
             actor=actor, card=None, targets=list(te.targets), effect=te, label=te.label,
+            target_uids=list(target_uids or []), requirement=requirement,
             cid=self._take_chain_cid(),
         )
         chain = self._game_state.pending_chain

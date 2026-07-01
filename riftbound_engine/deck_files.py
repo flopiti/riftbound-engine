@@ -102,6 +102,17 @@ def resolve_card_name(raw: str, *, allowed_types: frozenset[str] | None = None) 
         hit = lower.get(starter.lower())
         if hit:
             return hit
+    # Punctuation-insensitive fallback: match ignoring commas/spaces/case, so
+    # "Ahri Inquisitive" resolves to "Ahri, Inquisitive". Cheap and forgiving of
+    # an agent (or user) dropping the comma.
+    def _squash(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+    squashed = _squash(name)
+    if squashed:
+        for real in exact.values():
+            if _squash(real) == squashed:
+                return real
     allowed = f" (types: {', '.join(sorted(allowed_types))})" if allowed_types else ""
     raise ValueError(f"unknown card name '{raw}'{allowed}")
 
@@ -215,6 +226,138 @@ def load_deck_file(deck_id: str) -> ParsedDeckFile:
     path = deck_file_path(deck_id)
     text = path.read_text(encoding="utf-8")
     return parse_deck_text(text, deck_id=deck_id)
+
+
+def _swap_card_into_maindeck(text: str, card: str) -> str:
+    """Add 1 copy of ``card`` to the MainDeck and remove 1 copy of some OTHER
+    main-deck card, so the count stays valid. Returns the new deck text."""
+    lines = text.splitlines()
+    out: list[str] = []
+    in_main = False
+    removed = False
+    for line in lines:
+        s = line.strip()
+        is_header = s.endswith(":")
+        if is_header:
+            in_main = _normalize_section(s[:-1]) == "main_deck"
+            out.append(line)
+            if in_main:
+                out.append(f"1 {card}")  # the card under test, at the top
+            continue
+        if in_main and s and not removed:
+            m = re.match(r"^(\d+)\s+(.+)$", s)
+            if m and m.group(2).strip().lower() != card.lower():
+                n = int(m.group(1))
+                if n > 1:
+                    out.append(f"{n - 1} {m.group(2).strip()}")
+                removed = True  # if n == 1, drop the line entirely
+                continue
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def _swap_card_into_battlefields(text: str, card: str) -> str:
+    """Put ``card`` into the BATTLEFIELDS section, replacing ONE existing
+    battlefield so the count stays at DECK_BATTLEFIELD_COUNT. If the card is
+    already a battlefield in this deck, the text is returned unchanged. Returns
+    the new deck text."""
+    lines = text.splitlines()
+    out: list[str] = []
+    in_bf = False
+    already = any(
+        re.match(r"^\d+\s+(.+)$", ln.strip())
+        and re.match(r"^\d+\s+(.+)$", ln.strip()).group(1).strip().lower() == card.lower()
+        for ln in lines
+    )
+    replaced = False
+    for line in lines:
+        s = line.strip()
+        if s.endswith(":"):
+            in_bf = _normalize_section(s[:-1]) == "battlefields"
+            out.append(line)
+            if in_bf and not already:
+                out.append(f"1 {card}")  # the battlefield under test, listed first
+            continue
+        if in_bf and s and not already and not replaced:
+            m = re.match(r"^(\d+)\s+(.+)$", s)
+            if m and m.group(2).strip().lower() != card.lower():
+                # drop one existing battlefield to keep the 3-battlefield count
+                replaced = True
+                continue
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def deck_for_card(card_name: str) -> tuple[str, str]:
+    """A playable deck id that RUNS ``card_name``, plus how it was obtained:
+    ``("<id>", "existing")`` when a real deck already includes the card (reused
+    as-is), or ``("test_<slug>", "created")`` when none does and a throwaway
+    test deck had to be built. NEVER modifies an existing deck."""
+    card = resolve_card_name(card_name)
+    # Prefer a real deck that already runs the card (main deck or champion) —
+    # no point building a throwaway when one exists.
+    for did in list_deck_ids():
+        if did.startswith("test_"):
+            continue
+        try:
+            pf = load_deck_file(did)
+        except Exception:
+            continue
+        champ = pf.champion[0] if isinstance(pf.champion, list) else pf.champion
+        # A Battlefield card "runs" in a deck when it's one of that deck's
+        # battlefields (placed at setup — it is NEVER played from the main
+        # deck); a unit/spell/gear runs when it's in the main deck or champion.
+        if card in pf.main_deck or card == champ or card in pf.battlefields:
+            return did, "existing"
+    return create_test_deck(card), "created"
+
+
+def create_test_deck(card_name: str) -> str:
+    """Build a NEW throwaway deck (``decks/test_<slug>.txt``) that runs
+    ``card_name``, derived from a domain-compatible existing deck by swapping the
+    card in. NEVER modifies an existing deck. Returns the new deck id."""
+    from .csv_data import card_domains_of
+
+    card = resolve_card_name(card_name)
+    doms = {d for d in card_domains_of(card) if d and d != "Colorless"}
+
+    base_id = None
+    for did in list_deck_ids():
+        if did.startswith("test_"):
+            continue
+        try:
+            pf = load_deck_file(did)
+        except Exception:
+            continue
+        legend = pf.legend[0] if isinstance(pf.legend, list) else pf.legend
+        legend_doms = set(card_domains_of(str(legend)))
+        if not doms or doms <= legend_doms:
+            base_id = did
+            break
+    if base_id is None:
+        non_test = [d for d in list_deck_ids() if not d.startswith("test_")]
+        if not non_test:
+            raise ValueError("no base deck available to derive a test deck from")
+        base_id = non_test[0]
+
+    from .csv_data import card_type_of
+
+    text = deck_file_path(base_id).read_text(encoding="utf-8")
+    # A Battlefield card belongs in the BATTLEFIELDS section (placed at setup),
+    # not the main deck — putting it in the main deck would never let it appear
+    # on the board. Route by card type.
+    if (card_type_of(card) or "").lower() == "battlefield":
+        new_text = _swap_card_into_battlefields(text, card)
+    else:
+        new_text = _swap_card_into_maindeck(text, card)
+    slug = re.sub(r"[^a-z0-9]+", "_", card.lower()).strip("_") or "card"
+    test_id = f"test_{slug}"
+    header = (
+        f"# TEST DECK (throwaway) — {card} added for implementation testing.\n"
+        f"# Derived from {base_id}. NOT a real/persistent deck; safe to delete.\n"
+    )
+    (DECKS_DIR / f"{test_id}.txt").write_text(header + new_text, encoding="utf-8")
+    return test_id
 
 
 def runes_to_engine_list(runes: list[tuple[str, int]]) -> list[dict[str, str]]:

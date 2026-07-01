@@ -98,6 +98,19 @@ IMPLEMENTED_CONDITIONS: dict[str, str] = {
         "gates a continuous equipment passive to the turn the gear was attached "
         "(Brutalizer); checked in attached_might_bonus"
     ),
+    "IF_DIED_ALONE": (
+        "Lonely Poro's Deathknell: fires only when no other friendly unit shares "
+        "the dying unit's location; evaluated in engine._condition_met at ON_DEATH"
+    ),
+    "IF_1+_UNIT_MIGHTY": (
+        "Sunken Temple: fires only when the conquering player has a 5+-Might "
+        "(Mighty) unit at this battlefield; evaluated in engine._condition_met "
+        "at ON_CONQUER"
+    ),
+    "WHILE_AT_BATTLEFIELD": (
+        "Vex, Apathetic: gates its on-opponent-play trigger to while the source "
+        "is at a battlefield; evaluated in engine._condition_met"
+    ),
 }
 
 #: Continuous/passive effect codes with real engine support (exact). The keyword
@@ -152,6 +165,23 @@ def mapped_triggers() -> set[str]:
     plus the faithful non-mapped includes."""
     derived = set(_triggers.TRIGGER_EVENT_MAP)
     return (derived - set(TRIGGER_EXCLUDES)) | set(TRIGGER_INCLUDES)
+
+
+def surface_data() -> dict:
+    """The implemented surface as JSON-serializable data — the SAME content the
+    generated ``engineImplemented.ts`` holds, but served LIVE so the web
+    Implementation tracker never goes stale (no ``gen:implemented`` step needed).
+    Mirrors the sets/patterns ``render_typescript`` emits."""
+    return {
+        "triggers": sorted(mapped_triggers()),
+        "effects": sorted(implemented_effects()),
+        "effectPatterns": effect_patterns(),
+        "costs": sorted(IMPLEMENTED_COSTS),
+        "costPatterns": [p for p, _ in COST_PATTERNS],
+        "conditions": sorted(IMPLEMENTED_CONDITIONS),
+        "passives": sorted(IMPLEMENTED_PASSIVES),
+        "passivePatterns": [p for p, _ in PASSIVE_PATTERNS],
+    }
 
 
 # --------------------------------------------------------------------------- #

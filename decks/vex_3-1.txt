@@ -1,0 +1,43 @@
+Legend:
+1 Vex, Gloomist
+
+Champion:
+1 Vex, Apathetic
+
+MainDeck:
+1 Abandon
+2 Allay, Eager Admirer
+3 Back Off
+1 Blitzcrank, Impassive
+3 Defy
+2 Discipline
+1 Eclipse Herald
+2 Emperor's Divide
+2 Evelynn, Entrancing
+1 Existential Dread
+2 Feral Strength
+3 Gust
+1 Hard Bargain
+3 Mutated Mouser
+2 Seal of Focus
+3 Sona, Harmonious
+3 Stalwart Poro
+2 Star-Crossed
+2 Vex, Mocking
+
+Battlefields:
+1 Abandoned Hall
+1 Bandle Tree
+1 Startipped Peak
+
+Runes:
+7 Calm Rune
+5 Chaos Rune
+
+Sideboard:
+1 Allay, Eager Admirer
+1 Boots of Swiftness
+2 Disarming Rake
+2 Leona, Zealot
+1 Monch
+1 Not So Fast
