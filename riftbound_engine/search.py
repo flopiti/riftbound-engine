@@ -83,6 +83,7 @@ def state_view(gs: GameState) -> dict:
                 "card": u.card,
                 "location": u.location,
                 "exhausted": bool(u.exhausted),
+                "stunned": bool(getattr(u, "stunned", False)),
                 "bonus_might": getattr(u, "bonus_might", 0),
             }
             for u in (arr or [])
@@ -244,6 +245,7 @@ def _match_units(view: dict, spec: dict) -> bool:
         allowed_at = None
     name = spec.get("name")
     exhausted = spec.get("exhausted")
+    stunned = spec.get("stunned")
     count = 0
     for pool in pools:
         for u in pool:
@@ -252,6 +254,8 @@ def _match_units(view: dict, spec: dict) -> bool:
             if name is not None and _norm_name(name) not in _norm_name(u.get("card", "")):
                 continue
             if exhausted is not None and bool(u.get("exhausted")) != bool(exhausted):
+                continue
+            if stunned is not None and bool(u.get("stunned")) != bool(stunned):
                 continue
             count += 1
     lo = spec.get("min", 1)

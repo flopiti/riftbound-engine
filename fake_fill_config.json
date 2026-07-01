@@ -1,8 +1,8 @@
 {
   "enabled": true,
-  "player_1_deck": "vex_3-1",
+  "player_1_deck": "vex_gloomist",
   "player_2_deck": "irelia_blade_dancer",
-  "player_1_battlefield": "Abandoned Hall",
+  "player_1_battlefield": "Bandle Tree",
   "player_2_battlefield": "Abandoned Hall",
   "first_turn": "player_1",
   "mulligan_bottom": "",

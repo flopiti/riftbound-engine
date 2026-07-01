@@ -68,22 +68,30 @@ class RepeatChainSplitTests(unittest.TestCase):
             self.assertEqual(items[1].label, "Bellows Breath (repeat)")
 
     def test_repeat_without_effect_codes_stays_single_item(self) -> None:
-        # No implemented effect (hermetic default) → legacy single-item behavior.
-        eng = _drive_to_action_turn()
-        eng.start()
-        gs = eng._game_state
-        gs.player_1_hand = ["Bellows Breath"]
-        eng.add_energy(RequiredTo.PLAYER_1, 10)
-        gs.player_1_power = {"Mind": 9}
-        gs.player_1_units = [PlayedUnit(card="Ravenbloom Student", location="base", exhausted=False)]
-        eng.apply_action("play:play_spell:0", RequiredTo.PLAYER_1)
-        eng.apply_action("play:choose_spell_targets:p1-0", RequiredTo.PLAYER_1)
-        eng.apply_action("play:choose_repeat:yes", RequiredTo.PLAYER_1)
-        eng.apply_action("play:choose_spell_targets:p1-0", RequiredTo.PLAYER_1)
-        items = gs.pending_chain.items
-        self.assertEqual(len(items), 1)  # folded into the single spell item
-        self.assertEqual(items[0].card, "Bellows Breath")
-        self.assertEqual(len(items[0].repeat_targets), 1)
+        # No implemented effect → legacy single-item behavior. Bellows Breath IS
+        # implemented in the real taxonomy now, so force the hermetic no-ability
+        # case (matching test_repeat_lands_as_separate_chain_item's approach).
+        with patch(
+            "riftbound_engine.abilities.triggered_abilities_for",
+            side_effect=lambda name: (),
+        ):
+            eng = _drive_to_action_turn()
+            eng.start()
+            gs = eng._game_state
+            gs.player_1_hand = ["Bellows Breath"]
+            eng.add_energy(RequiredTo.PLAYER_1, 10)
+            gs.player_1_power = {"Mind": 9}
+            gs.player_1_units = [
+                PlayedUnit(card="Ravenbloom Student", location="base", exhausted=False)
+            ]
+            eng.apply_action("play:play_spell:0", RequiredTo.PLAYER_1)
+            eng.apply_action("play:choose_spell_targets:p1-0", RequiredTo.PLAYER_1)
+            eng.apply_action("play:choose_repeat:yes", RequiredTo.PLAYER_1)
+            eng.apply_action("play:choose_spell_targets:p1-0", RequiredTo.PLAYER_1)
+            items = gs.pending_chain.items
+            self.assertEqual(len(items), 1)  # folded into the single spell item
+            self.assertEqual(items[0].card, "Bellows Breath")
+            self.assertEqual(len(items[0].repeat_targets), 1)
 
 
 if __name__ == "__main__":

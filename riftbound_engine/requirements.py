@@ -260,13 +260,32 @@ class TrashRequirement:
 
 
 @dataclass
-class SpellRequirement:
-    """A parsed ``... SPELL ...`` phrase — pick a spell on the chain (the
-    priority stack), e.g. for a counterspell.
+class ChainItemInfo:
+    """A chain item, as far as a SPELL/ABILITY requirement needs to see it.
 
-    ``side`` scopes relative to the caster (enemy = opponent's spell, None =
-    any). ``energy_max`` / ``power_max`` come from a ``(<= NE AND <= NP)``
-    filter on the TARGET spell's printed cost.
+    ``card`` is the spell's name, or ``None`` for a triggered-ability item.
+    ``is_ability`` distinguishes the two (a bare ``card is None`` also implies
+    it). ``chosen_sides`` is the set of controller sides whose unit or gear the
+    item targets — used by ``[CHOOSE_FRIENDLY]`` (Not So Fast: "chooses a
+    friendly unit or gear")."""
+
+    actor: str
+    card: str | None = None
+    is_ability: bool = False
+    chosen_sides: frozenset[str] = frozenset()
+
+
+@dataclass
+class SpellRequirement:
+    """A parsed ``... SPELL ...`` / ``... ABILITY ...`` phrase — pick a spell or
+    triggered ability on the chain (the priority stack), e.g. for a counterspell.
+
+    ``side`` scopes relative to the caster (enemy = opponent's, None = any).
+    ``energy_max`` / ``power_max`` come from a ``(<= NE AND <= NP)`` filter on
+    the TARGET spell's printed cost. ``allow_spell`` / ``allow_ability`` say
+    which chain-item kinds are legal targets (a plain SPELL phrase allows only
+    spells; Not So Fast allows both). ``choose_friendly`` requires the target to
+    choose a unit or gear the caster controls.
     """
 
     min_count: int = 1
@@ -274,20 +293,31 @@ class SpellRequirement:
     side: str | None = None
     energy_max: int | None = None
     power_max: int | None = None
+    allow_spell: bool = True
+    allow_ability: bool = False
+    choose_friendly: bool = False
 
-    def matches(self, item_actor: str, item_card: str, caster: str | None) -> bool:
-        if self.side == "enemy" and (caster is None or item_actor == caster):
+    def matches(self, info: "ChainItemInfo", caster: str | None) -> bool:
+        is_ability = info.is_ability or info.card is None
+        if is_ability and not self.allow_ability:
             return False
-        if self.side == "friendly" and (caster is None or item_actor != caster):
+        if not is_ability and not self.allow_spell:
             return False
-        if self.energy_max is not None:
-            e = card_energy_of(item_card)
+        if self.side == "enemy" and (caster is None or info.actor == caster):
+            return False
+        if self.side == "friendly" and (caster is None or info.actor != caster):
+            return False
+        # Cost caps only apply to cast spells (an ability has no card cost).
+        if not is_ability and self.energy_max is not None:
+            e = card_energy_of(info.card)
             if e is None or e > self.energy_max:
                 return False
-        if self.power_max is not None:
-            p = card_power_of(item_card) or 0
+        if not is_ability and self.power_max is not None:
+            p = card_power_of(info.card) or 0
             if p > self.power_max:
                 return False
+        if self.choose_friendly and (caster is None or caster not in info.chosen_sides):
+            return False
         return True
 
 
@@ -457,10 +487,13 @@ def parse_phrase(raw: str) -> Phrase:
         lo, hi = _parse_count(cm.group(1))
         return Phrase(raw=text, gear=GearRequirement(min_count=lo, max_count=hi))
 
-    # SPELL: pick a spell on the chain (counterspell-style). ABILITY isn't
-    # modelled (no ability stack), so a phrase mentioning ABILITY stays
-    # deferred. Cost filters "(<= NE AND <= NP)" cap the TARGET spell's cost.
-    if "SPELL" in body_upper and "ABILITY" not in body_upper:
+    # SPELL / ABILITY: pick a spell (and/or triggered ability) on the chain
+    # (counterspell-style). A phrase mentioning SPELL targets cast spells; one
+    # mentioning ABILITY targets triggered-ability chain items; a plain SPELL
+    # phrase without ABILITY targets only spells (unchanged). Cost filters
+    # "(<= NE AND <= NP)" cap the TARGET spell's cost. ``[CHOOSE_FRIENDLY]``
+    # limits to items that choose a unit/gear the caster controls (Not So Fast).
+    if "SPELL" in body_upper or "ABILITY" in body_upper:
         if body_upper.startswith("FRIENDLY"):
             s_side: str | None = "friendly"
         elif body_upper.startswith("ENEMY"):
@@ -477,6 +510,9 @@ def parse_phrase(raw: str) -> Phrase:
                 side=s_side,
                 energy_max=int(e_le.group(1)) if e_le else None,
                 power_max=int(p_le.group(1)) if p_le else None,
+                allow_spell="SPELL" in body_upper,
+                allow_ability="ABILITY" in body_upper,
+                choose_friendly="CHOOSE_FRIENDLY" in body_upper,
             ),
         )
 
@@ -660,17 +696,41 @@ def matching_trash_refs(
     return out
 
 
+def chosen_owner_sides(targets: "Iterable[str]") -> frozenset[str]:
+    """The controller sides whose UNIT or GEAR a chain item targets, read from
+    its target tokens: ``player_1:0`` (a unit) → ``player_1``; ``gear:g1-0`` /
+    ``gear:g2-0`` → ``player_1`` / ``player_2``. Other tokens (move_dest, bf,
+    spell_cid, …) carry no owner. Used for ``[CHOOSE_FRIENDLY]``."""
+    sides: set[str] = set()
+    for tok in targets or ():
+        if tok.startswith(("player_1:", "player_2:")):
+            sides.add(tok.split(":", 1)[0])
+        elif tok.startswith("gear:g1-"):
+            sides.add("player_1")
+        elif tok.startswith("gear:g2-"):
+            sides.add("player_2")
+    return frozenset(sides)
+
+
 def matching_spell_refs(
     req: SpellRequirement,
-    chain_items: list[tuple[str, str]],
+    chain_items: "list[ChainItemInfo | tuple[str, str]]",
     caster: str | None = None,
 ) -> list[int]:
-    """Indices of chain spells (``chain_items`` = (actor, card) pairs, index 0 =
-    top of chain) that match ``req`` for ``caster``. Shared by satisfiability
-    and the engine's option enumeration."""
-    return [
-        i for i, (actor, card) in enumerate(chain_items) if req.matches(actor, card, caster)
-    ]
+    """Indices of chain items (index 0 = top of chain) that match ``req`` for
+    ``caster``. Items may be :class:`ChainItemInfo` (full info, incl. ability /
+    chosen-side data) or legacy ``(actor, card)`` tuples (normalized below, with
+    no chosen-side info). Shared by satisfiability and option enumeration."""
+    out: list[int] = []
+    for i, item in enumerate(chain_items):
+        info = (
+            item
+            if isinstance(item, ChainItemInfo)
+            else ChainItemInfo(actor=item[0], card=item[1], is_ability=item[1] is None)
+        )
+        if req.matches(info, caster):
+            out.append(i)
+    return out
 
 
 def _phrase_satisfiable(
@@ -781,7 +841,15 @@ def requirement_satisfiable(
     trash_p2 = list(getattr(state, "player_2_trash", None) or [])
     chain = getattr(state, "pending_chain", None)
     chain_items = (
-        [(getattr(it.actor, "value", it.actor), it.card) for it in chain.items]
+        [
+            ChainItemInfo(
+                actor=getattr(it.actor, "value", it.actor),
+                card=it.card,
+                is_ability=it.card is None,
+                chosen_sides=chosen_owner_sides(getattr(it, "targets", ()) or ()),
+            )
+            for it in chain.items
+        ]
         if chain is not None
         else []
     )
@@ -1087,11 +1155,34 @@ def trash_picks(raw: str | None) -> list[TrashRequirement]:
     return out
 
 
-def spell_picks(raw: str | None) -> list[SpellRequirement]:
-    """Ordered SPELL requirements a spell forces the caster to pick (min >= 1).
+def _merge_spell_reqs(reqs: list[SpellRequirement]) -> SpellRequirement:
+    """Fold an OR of SPELL/ABILITY phrases into ONE pick that may hit any of
+    them (Not So Fast: "counter an enemy SPELL or ABILITY that chooses a friendly
+    …"). Kinds and choose_friendly union; side is shared only if every branch
+    agrees; cost caps take the loosest (max) bound present."""
+    e_caps = [r.energy_max for r in reqs if r.energy_max is not None]
+    p_caps = [r.power_max for r in reqs if r.power_max is not None]
+    sides = {r.side for r in reqs}
+    return SpellRequirement(
+        min_count=1,
+        max_count=1,
+        side=next(iter(sides)) if len(sides) == 1 else None,
+        energy_max=max(e_caps) if e_caps else None,
+        power_max=max(p_caps) if p_caps else None,
+        allow_spell=any(r.allow_spell for r in reqs),
+        allow_ability=any(r.allow_ability for r in reqs),
+        choose_friendly=any(r.choose_friendly for r in reqs),
+    )
 
-    OR'd requirements force no pick (the caster would choose a branch, which the
-    choice system doesn't model), mirroring the other pick helpers.
+
+def spell_picks(raw: str | None) -> list[SpellRequirement]:
+    """Ordered SPELL/ABILITY requirements a spell forces the caster to pick
+    (min >= 1).
+
+    An OR *group* made up entirely of spell/ability phrases is ONE pick that may
+    hit any branch (Not So Fast). Any other OR (mixed with non-spell phrases, or
+    OR between groups) forces no pick — the caster would choose a branch, which
+    the choice system doesn't model — mirroring the other pick helpers.
     """
     if not raw or not raw.strip():
         return []
@@ -1100,11 +1191,17 @@ def spell_picks(raw: str | None) -> list[SpellRequirement]:
         return []
     out: list[SpellRequirement] = []
     for group in tree.groups:
-        if any(c == "OR" for c in group.connectors):
+        group_has_or = any(c == "OR" for c in group.connectors)
+        spell_phrases = [p.spell for p in group.phrases if p.spell is not None]
+        if group_has_or:
+            # Merge only a pure spell/ability OR group; a mixed OR is unmodelled.
+            if spell_phrases and len(spell_phrases) == len(group.phrases):
+                out.append(_merge_spell_reqs(spell_phrases))
+                continue
             return []
-        for phrase in group.phrases:
-            if phrase.spell is not None and phrase.spell.min_count >= 1:
-                out.append(phrase.spell)
+        for req in spell_phrases:
+            if req.min_count >= 1:
+                out.append(req)
     return out
 
 

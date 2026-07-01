@@ -2707,6 +2707,150 @@
           ]
         }
       ]
+    },
+    {
+      "id": "vex-3-1-vs-irelia",
+      "name": "Vex 3-1 vs. Irelia",
+      "description": "",
+      "created_at": 1782935682.987187,
+      "setup": {
+        "player_1_deck": "vex_3-1",
+        "player_2_deck": "irelia_blade_dancer",
+        "player_1_battlefield": "Bandle Tree",
+        "player_2_battlefield": "Abandoned Hall",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 239049061
+      },
+      "moves": [],
+      "updated_at": 1782936222.6765928
+    },
+    {
+      "id": "autosave",
+      "name": "Autosave",
+      "description": "Automatically saved after each move.",
+      "created_at": 1782936231.7232,
+      "setup": {
+        "player_1_deck": "vex_gloomist",
+        "player_2_deck": "irelia_blade_dancer",
+        "player_1_battlefield": "Bandle Tree",
+        "player_2_battlefield": "Abandoned Hall",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 3813786240
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:1",
+          "label": "Play Guardian Angel (1 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_gear:1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_gear:3:Calm\u00d72",
+          "label": "Play Guardian Angel (2 Calm)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_gear:3"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:play_unit:1:Calm\u00d71#Chaos\u00d71",
+          "label": "Play Teemo, Scout (1 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Teemo, Scout on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "intent:equip:0",
+          "label": "To Teemo, Scout (1 Calm)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:recycle_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:equip:0:player_1:0"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1782936558.789696
     }
   ]
 }

@@ -21,8 +21,27 @@ _EVENT_UNIT_TARGET_TRIGGERS = frozenset(
     {
         "WHEN_UNIT_MOVE_FROM_HERE",  # "give IT +1 might"
         "WHEN_YOU_MOVE_ENEMY_UNIT",  # "[Stun] IT"
+        # "When you stun an enemy unit … move me to that battlefield" (Vex):
+        # the stunned unit rides along so the effect can read its location.
+        "WHEN_YOU_STUN_ENEMY_UNIT",
+        # "When an opponent plays a unit … [Stun] IT. They can't move it"
+        # (Vex, Apathetic): the just-played enemy unit is the target.
+        "WHEN_OPPONENT_PLAYS_UNIT",
+        # "When you choose a friendly unit, … ready IT" (Blade Dancer): the
+        # chosen unit rides along as the ability's target.
+        "WHEN_YOU_CHOOSE_FRIENDLY_UNIT",
     }
 )
+
+#: PASSIVE-effect codes that a triggered ability APPLIES as a lasting status
+#: (not a chain effect). Unlike the ability's ``active_effects`` (which go on
+#: the chain and can be responded to), these are applied off-chain to the
+#: event's unit the moment the ability fires — e.g. Vex, Apathetic's "…, [Stun]
+#: it. They can't move it this turn.": STUN_IT resolves on the chain, but
+#: CANT_MOVE is a passive this-turn restriction, so it's set here directly. The
+#: status itself is enforced continuously (move-option builders) and cleared at
+#: end of turn, exactly like other this-turn flags.
+_TRIGGER_APPLIED_PASSIVE_STATUSES = frozenset({"CANT_MOVE"})
 
 
 DECK_BATTLEFIELD_COUNT = 3
@@ -150,6 +169,16 @@ class PlayedUnit:
     #: This-TURN "can't move" status (Vex's "they can't move it"). While set, the
     #: unit is not offered any move option; cleared at end of turn like buffs.
     cant_move: bool = False
+    #: STUNNED status (Riftbound stun). A stunned unit does NOT deal combat damage
+    #: (excluded from the battlefield damage budget in ``might_at_battlefield``)
+    #: and, unlike ``cant_move``/``bonus_*`` this-turn flags, PERSISTS across turns:
+    #: it is cleared the next time its controller would ready that unit (Awake
+    #: step), and the unit skips readying that once (see ``_ready_all_units``).
+    #: Other cards read it as a queryable status ("if it is stunned", "a stunned
+    #: enemy unit"). It does NOT reduce ``effective_unit_might`` — the unit keeps
+    #: its Might for targeting/lethal thresholds; only combat-damage DEALING is
+    #: suppressed.
+    stunned: bool = False
     #: Stable per-game identity, assigned when the unit enters play and never
     #: reused. Positional refs ("player_1:0") shift when other units leave
     #: play, so a target chosen at cast time is captured BY UID and re-located
@@ -475,6 +504,9 @@ class PendingAbilityCost:
     #: The ability's cost codes (EXHAUST_THIS and/or PAY_* energy/power) — needed
     #: so the pay handler knows what to charge, not just whether to exhaust.
     costs: tuple[str, ...] = ()
+    #: Event-derived targets (e.g. Blade Dancer's chosen unit for "ready IT"),
+    #: carried through the pay decision so the effect still has them on resolve.
+    targets: tuple[str, ...] = ()
     context_card: str | None = None
     label: str = ""
 
@@ -504,6 +536,8 @@ class PendingAbilityPayment:
     trigger: str = ""
     event_kind: str = ""
     conditions: tuple[str, ...] = ()
+    #: Event-derived targets carried through the any-Power pick (Blade Dancer).
+    targets: tuple[str, ...] = ()
     context_card: str | None = None
     label: str = ""
     requirement: str = ""
@@ -708,6 +742,21 @@ class ActionLogEntry:
 
 
 @dataclass
+class HiddenCard:
+    """A card placed face-down at a battlefield via the [Hidden] keyword.
+
+    The owner paid 1 Power to hide it there; it can be revealed and played for
+    FREE on any turn AFTER ``hidden_on_turn``. It is bound to ``battlefield`` —
+    if the owner loses control of that battlefield before revealing it, the
+    hidden card is lost (swept to trash). See _sweep_lost_hidden / the ``hide``
+    and ``play_hidden`` action handlers."""
+
+    card: str
+    battlefield: str  # "battlefield_1" | "battlefield_2"
+    hidden_on_turn: int  # total_turn_number when it was hidden
+
+
+@dataclass
 class GameState:
     counter: int = 0
     #: Next stable unit uid to hand out (see PlayedUnit.uid). Monotonic for the
@@ -766,6 +815,12 @@ class GameState:
     #: ``resolve_combat``.
     player_1_trash: list[str] = field(default_factory=list)
     player_2_trash: list[str] = field(default_factory=list)
+    #: Cards each player has placed face-down at a battlefield via [Hidden]
+    #: (paid 1 Power). Revealable for free on a turn after they were hidden;
+    #: lost to trash if the owner loses control of their battlefield. See
+    #: HiddenCard and the hide / play_hidden action handlers.
+    player_1_hidden: list[HiddenCard] = field(default_factory=list)
+    player_2_hidden: list[HiddenCard] = field(default_factory=list)
     #: Set while a `play:play_unit:*` is waiting for `play:choose_location:*`.
     pending_play: PendingPlay | None = None
     #: Set while a `play:play_spell:*` whose requirement forces a target pick
@@ -774,6 +829,12 @@ class GameState:
     #: Set while a resolving triggered ability waits for its controller to
     #: pick an effect target (or pass). See PendingEffectChoice.
     pending_effect_choice: "PendingEffectChoice | None" = None
+    #: FIFO queue of "counter unless controller pays" decisions still to resolve
+    #: (Hard Bargain, incl. one per [Repeat] round). Each entry is
+    #: ``{"caster": str, "cid": int, "amount": int}``; processed one at a time by
+    #: GameEngine._start_next_counter_decision, each opening a pay-or-be-countered
+    #: choice owned by the TARGET spell's controller.
+    pending_counters: list = field(default_factory=list)
     #: Set while a just-played [Repeat] spell waits for the caster to decide
     #: whether to pay the additional cost and repeat. See PendingSpellRepeat.
     pending_spell_repeat: "PendingSpellRepeat | None" = None
@@ -822,6 +883,17 @@ class GameState:
     #: ends (it does NOT persist across turns).
     player_1_energy: int = 0
     player_2_energy: int = 0
+    #: Experience each player has banked (from "gain N XP" effects). A persistent
+    #: resource across turns; spending it (the ``3XP`` cost / champion leveling)
+    #: isn't modelled yet, but the GAIN is tracked so those effects run for real.
+    player_1_xp: int = 0
+    player_2_xp: int = 0
+    #: The ``total_turn_number`` on which this player's hand was last REVEALED to
+    #: the opponent (Scuttle Crab's Deathknell) — the opponent may look at their
+    #: hand + facedown cards for that turn. -1 = never. Informational (the engine
+    #: is full-information internally); a UI uses it to expose the reveal.
+    player_1_hand_revealed_turn: int = -1
+    player_2_hand_revealed_turn: int = -1
     #: Power a player has produced this turn by recycling runes — keyed by
     #: rune ``domain`` (e.g. {"Mind": 1, "Fury": 2}). Each ``play:recycle_rune:*``
     #: (already-exhausted rune) and ``play:exhaust_and_recycle_rune:*`` (ready
@@ -922,6 +994,33 @@ class EngineOutput:
     required_action: RequiredAction | None = None
 
 
+class _LegendHandle:
+    """A thin adapter presenting a legend as an exhaustable ``source`` (an object
+    with a mutable ``exhausted`` attribute), so the shared EXHAUST_THIS cost
+    machinery can pay "you may exhaust me" on a legend even though a legend is
+    modelled only as a boolean flag (``player_X_legend_exhausted``), not a
+    PlayedUnit/PlayedGear."""
+
+    __slots__ = ("_engine", "_actor")
+
+    def __init__(self, engine: "GameEngine", actor: "RequiredTo") -> None:
+        self._engine = engine
+        self._actor = actor
+
+    @property
+    def exhausted(self) -> bool:
+        gs = self._engine._game_state
+        return (
+            gs.player_1_legend_exhausted
+            if self._actor == RequiredTo.PLAYER_1
+            else gs.player_2_legend_exhausted
+        )
+
+    @exhausted.setter
+    def exhausted(self, value: bool) -> None:
+        self._engine.set_legend_exhausted(self._actor, value)
+
+
 class GameEngine:
     def __init__(
         self,
@@ -973,11 +1072,11 @@ class GameEngine:
             player_1_hand=list(self._game_state.player_1_hand) if self._game_state.player_1_hand is not None else None,
             player_2_hand=list(self._game_state.player_2_hand) if self._game_state.player_2_hand is not None else None,
             player_1_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, bonus_deflect=u.bonus_deflect, cant_move=u.cant_move, uid=u.uid, token=u.token, buffed=u.buffed, damage=u.damage)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, bonus_deflect=u.bonus_deflect, cant_move=u.cant_move, stunned=u.stunned, uid=u.uid, token=u.token, buffed=u.buffed, damage=u.damage)
                 for u in self._game_state.player_1_units
             ],
             player_2_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, bonus_deflect=u.bonus_deflect, cant_move=u.cant_move, uid=u.uid, token=u.token, buffed=u.buffed, damage=u.damage)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, bonus_deflect=u.bonus_deflect, cant_move=u.cant_move, stunned=u.stunned, uid=u.uid, token=u.token, buffed=u.buffed, damage=u.damage)
                 for u in self._game_state.player_2_units
             ],
             player_1_spells=[
@@ -1024,6 +1123,14 @@ class GameEngine:
             ],
             player_1_trash=list(self._game_state.player_1_trash),
             player_2_trash=list(self._game_state.player_2_trash),
+            player_1_hidden=[
+                HiddenCard(card=h.card, battlefield=h.battlefield, hidden_on_turn=h.hidden_on_turn)
+                for h in self._game_state.player_1_hidden
+            ],
+            player_2_hidden=[
+                HiddenCard(card=h.card, battlefield=h.battlefield, hidden_on_turn=h.hidden_on_turn)
+                for h in self._game_state.player_2_hidden
+            ],
             pending_play=(
                 None
                 if self._game_state.pending_play is None
@@ -1110,6 +1217,7 @@ class GameEngine:
                     effects=tuple(self._game_state.pending_ability_cost.effects),
                     conditions=tuple(self._game_state.pending_ability_cost.conditions),
                     costs=tuple(self._game_state.pending_ability_cost.costs),
+                    targets=tuple(self._game_state.pending_ability_cost.targets),
                     context_card=self._game_state.pending_ability_cost.context_card,
                     label=self._game_state.pending_ability_cost.label,
                 )
@@ -1126,6 +1234,7 @@ class GameEngine:
                     trigger=self._game_state.pending_ability_payment.trigger,
                     event_kind=self._game_state.pending_ability_payment.event_kind,
                     conditions=tuple(self._game_state.pending_ability_payment.conditions),
+                    targets=tuple(self._game_state.pending_ability_payment.targets),
                     context_card=self._game_state.pending_ability_payment.context_card,
                     label=self._game_state.pending_ability_payment.label,
                     requirement=self._game_state.pending_ability_payment.requirement,
@@ -1221,6 +1330,10 @@ class GameEngine:
             player_2_runes=[Rune(domain=r.domain, exhausted=r.exhausted) for r in self._game_state.player_2_runes],
             player_1_energy=self._game_state.player_1_energy,
             player_2_energy=self._game_state.player_2_energy,
+            player_1_xp=self._game_state.player_1_xp,
+            player_2_xp=self._game_state.player_2_xp,
+            player_1_hand_revealed_turn=self._game_state.player_1_hand_revealed_turn,
+            player_2_hand_revealed_turn=self._game_state.player_2_hand_revealed_turn,
             player_1_power=dict(self._game_state.player_1_power),
             player_2_power=dict(self._game_state.player_2_power),
             player_1_score=self._game_state.player_1_score,
@@ -1519,6 +1632,23 @@ class GameEngine:
     def exhausted_rune_count(self, actor: RequiredTo) -> int:
         """How many of ``actor``'s runes are currently exhausted (tapped)."""
         return sum(1 for r in self.runes_for(actor) if r.exhausted)
+
+    def player_xp(self, actor: RequiredTo) -> int:
+        """Experience ``actor`` has banked."""
+        if actor == RequiredTo.PLAYER_1:
+            return self._game_state.player_1_xp
+        if actor == RequiredTo.PLAYER_2:
+            return self._game_state.player_2_xp
+        raise ValueError("player_xp requires player_1 or player_2")
+
+    def gain_xp(self, actor: RequiredTo, amount: int) -> None:
+        """Add ``amount`` XP to ``actor``'s banked total (never negative)."""
+        if actor == RequiredTo.PLAYER_1:
+            self._game_state.player_1_xp = max(0, self._game_state.player_1_xp + amount)
+        elif actor == RequiredTo.PLAYER_2:
+            self._game_state.player_2_xp = max(0, self._game_state.player_2_xp + amount)
+        else:
+            raise ValueError("gain_xp requires player_1 or player_2")
 
     def player_energy(self, actor: RequiredTo) -> int:
         """Energy ``actor`` has produced this turn (cleared on turn change)."""
@@ -1826,11 +1956,21 @@ class GameEngine:
                 out.append(f"play:choose_spell_trash:{tok}")
         return out
 
-    def _chain_items_for_match(self) -> list[tuple[str, str]]:
+    def _chain_items_for_match(self) -> "list":
+        from .requirements import ChainItemInfo, chosen_owner_sides
+
         chain = self._game_state.pending_chain
         if chain is None:
             return []
-        return [(it.actor.value, it.card) for it in chain.items]
+        return [
+            ChainItemInfo(
+                actor=it.actor.value,
+                card=it.card,
+                is_ability=it.card is None,
+                chosen_sides=chosen_owner_sides(it.targets or ()),
+            )
+            for it in chain.items
+        ]
 
     def _spell_chain_options(self, choice: "PendingSpellChoice") -> list[str]:
         """``play:choose_spell_chain:c-<i>`` options for the next SPELL phrase a
@@ -2183,6 +2323,11 @@ class GameEngine:
                 else:
                     gs.player_2_trash.append(item.card)
                 self._log_event("event", f"{item.card} resolved → trash")
+                # A "counter unless controller pays" spell (Hard Bargain) queues
+                # one decision per resolved round; open the first now (the rest
+                # resume as each is answered).
+                if self._game_state.pending_counters:
+                    self._start_next_counter_decision()
                 self._emit(
                     GameEvent(
                         kind="ON_PLAY_SPELL",
@@ -2227,6 +2372,11 @@ class GameEngine:
             codes=list(eff.effects),
             targets=targets,
         )
+        # A [Repeat] round of a "counter unless controller pays" spell resolves
+        # as its own effect item; open its queued decision now (twin of the hook
+        # in the cast-spell branch of _execute_chain_item).
+        if self._game_state.pending_counters:
+            self._start_next_counter_decision()
 
     def _run_spell_effects(self, item: "ChainItem") -> None:
         """Resolve a cast spell's tagged effects against the units it targeted.
@@ -2407,6 +2557,10 @@ class GameEngine:
             return gs.battlefield_1
         if ref == "battlefield_2":
             return gs.battlefield_2
+        if ref and ref.startswith("legend:"):
+            side = ref.split(":", 1)[1]
+            deck = gs.player_1_deck if side == "player_1" else gs.player_2_deck
+            return deck.legend if deck is not None else None
         if ref and ref.startswith("gear:"):
             parts = ref.split(":")
             if len(parts) == 3 and parts[2].isdigit():
@@ -2470,6 +2624,21 @@ class GameEngine:
                     if not ability.triggers or not ability.active_effects:
                         continue
                     yield (f"{side.value}:{idx}", side.value, unit.location, unit.card, ability)
+        # Legends. A legend isn't a unit and has no location, but it CAN carry
+        # triggered abilities ("when you hold, …"). Its ref is
+        # ``legend:<controller>`` (an exhaustable source — see
+        # _resolve_exhaustable_source) and controller is its owner, so
+        # FRIENDLY-scoped triggers fire when that player causes the event.
+        for side, deck in (
+            (RequiredTo.PLAYER_1, gs.player_1_deck),
+            (RequiredTo.PLAYER_2, gs.player_2_deck),
+        ):
+            if deck is None or not deck.legend:
+                continue
+            for ability in _abilities.triggered_abilities_for(deck.legend):
+                if not ability.triggers or not ability.active_effects:
+                    continue
+                yield (f"legend:{side.value}", side.value, None, deck.legend, ability)
         # Battlefield cards. They aren't owned by either player, so their
         # "controller" is the battlefield's current holder when there is one
         # (None otherwise) — ANY-scoped triggers don't care, FRIENDLY-scoped
@@ -2869,6 +3038,11 @@ class GameEngine:
                 unit_ref = event.data.get("unit") or event.source
                 if unit_ref:
                     ev_targets = (unit_ref,)
+            # PASSIVE effects the ability applies as a lasting status (Vex,
+            # Apathetic's CANT_MOVE): applied OFF the chain, right now, to the
+            # event's unit — never queued as a chain effect. The active effects
+            # (STUN_IT) still go on the chain below.
+            self._apply_trigger_passives(ability, effect_controller, ev_targets)
             matched_effects.append(
                 TriggeredEffect(
                     controller=effect_controller,
@@ -2886,6 +3060,67 @@ class GameEngine:
                 )
             )
         self._trigger_queue.extend(matched_effects)
+        # "When you discard ME" (Flame Chompers): the discarded card is NOT in
+        # play, so the in-play scan above never sees it. Fire its own SELF
+        # discard trigger from a dedicated path keyed off the discarded card.
+        if event.kind == "ON_DISCARD":
+            self._queue_discard_me_trigger(event)
+
+    def _apply_trigger_passives(
+        self, ability, effect_controller: str, targets: tuple[str, ...]
+    ) -> None:
+        """Apply an ability's PASSIVE status effects (e.g. CANT_MOVE) off the
+        chain, to the event's unit, the moment the ability fires. These are not
+        chain effects: they don't open a reaction window and aren't sequenced
+        with the active effects — they're lasting this-turn statuses set now and
+        enforced continuously (see ``PlayedUnit.cant_move`` handling)."""
+        if not targets:
+            return
+        try:
+            controller = RequiredTo(effect_controller)
+        except ValueError:
+            return
+        for code in ability.passive_effects:
+            if code not in _TRIGGER_APPLIED_PASSIVE_STATUSES:
+                continue  # a continuous aura (might/shield/…), read live — not applied here
+            ctx = _effects.EffectContext(
+                engine=self,
+                controller=controller,
+                source=None,
+                code=code,
+                targets=targets,
+            )
+            _effects.execute_effect(ctx)
+
+    def _queue_discard_me_trigger(self, event: GameEvent) -> None:
+        """Queue a ``WHEN_YOU_DISCARD_ME`` ability for the just-discarded card.
+
+        The card sits in ``controller``'s trash now; the effect's ``source`` is a
+        ``trash:<controller>:<card>`` handle its play-from-trash effect resolves.
+        """
+        from .abilities import triggered_abilities_for
+
+        card = event.data.get("card")
+        owner = event.controller
+        if not card or not owner:
+            return
+        for ability in triggered_abilities_for(card):
+            if "WHEN_YOU_DISCARD_ME" not in ability.triggers:
+                continue
+            self._record_trigger_fired("WHEN_YOU_DISCARD_ME", event, owner, None)
+            self._trigger_queue.append(
+                TriggeredEffect(
+                    controller=owner,
+                    source=f"trash:{owner}:{card}",
+                    trigger="WHEN_YOU_DISCARD_ME",
+                    event_kind=event.kind,
+                    effects=tuple(ability.active_effects),
+                    conditions=tuple(ability.conditions),
+                    costs=tuple(ability.costs),
+                    label=f"{card} — WHEN_YOU_DISCARD_ME",
+                    context_card=card,
+                )
+            )
 
     def _trigger_state_ok(
         self,
@@ -2917,6 +3152,15 @@ class GameEngine:
                 return False
             key = f"{owner_location}:{effect_controller}"
             return key not in gs.first_choose_friendly_fired_this_turn
+
+        if trigger_code == "WHEN_YOU_CHOOSE_FRIENDLY_UNIT":
+            # Only when the CHOSEN unit (the event's source) is one the ability's
+            # owner controls — FRIENDLY scope already ensured the owner did the
+            # choosing, but the chosen unit could be an enemy (e.g. a removal
+            # spell), which this trigger must not fire on.
+            src = event.source or ""
+            side = src.split(":", 1)[0] if ":" in src else ""
+            return side == effect_controller
 
         return True
 
@@ -2992,6 +3236,18 @@ class GameEngine:
                     return False  # another friendly unit shares its location
             return True
 
+        if cond == "IF_ENEMY_UNIT_ALONE_HERE":
+            # Kha'Zix: "if an enemy unit is alone here" — the opponent has exactly
+            # one unit at the source's battlefield (a lone enemy). ``here`` is the
+            # source's location.
+            if owner_location not in ("battlefield_1", "battlefield_2"):
+                return False
+            opp = "player_2" if effect_controller == RequiredTo.PLAYER_1.value else "player_1"
+            enemies_here = sum(
+                1 for u in self._units_for(opp) if u.location == owner_location
+            )
+            return enemies_here == 1
+
         if cond == "IF_1+_UNIT_MIGHTY":
             bf = owner_location if owner_location else event.battlefield
             conqueror = event.controller or effect_controller
@@ -3035,11 +3291,17 @@ class GameEngine:
     def _resolve_exhaustable_source(self, ref: str | None):
         """The in-play unit or gear behind an ability's ``source`` ref, if it has
         an exhaust state — used to pay an ``EXHAUST_THIS`` cost. Handles unit
-        refs (``"player_1:0"``) and standalone-gear refs (``"gear:player_1:0"``).
-        Battlefields (no exhaust state) and missing sources return None."""
+        refs (``"player_1:0"``), standalone-gear refs (``"gear:player_1:0"``),
+        and legends (``"legend:player_1"`` — a handle onto the legend's exhausted
+        flag). Battlefields (no exhaust state) and missing sources return None."""
         if not ref or ref in ("battlefield_1", "battlefield_2"):
             return None
         gs = self._game_state
+        if ref.startswith("legend:"):
+            side = ref.split(":", 1)[1]
+            if side in ("player_1", "player_2"):
+                return _LegendHandle(self, RequiredTo(side))
+            return None
         if ref.startswith("gear:"):
             parts = ref.split(":")
             if len(parts) == 3 and parts[2].isdigit():
@@ -3421,6 +3683,7 @@ class GameEngine:
                     effects=tuple(te.effects),
                     conditions=tuple(te.conditions),
                     costs=tuple(te.costs),
+                    targets=tuple(te.targets),
                     context_card=te.context_card,
                     label=te.label,
                 )
@@ -3544,6 +3807,7 @@ class GameEngine:
                     effects=tuple(payment.effects),
                     conditions=tuple(payment.conditions),
                     costs=(),  # already paid — don't re-gate
+                    targets=tuple(payment.targets),
                     label=payment.label,
                     context_card=payment.context_card,
                 )
@@ -3624,6 +3888,227 @@ class GameEngine:
                     return i, it
         return -1, None
 
+    def _counter_target_cid(self, cid: int) -> None:
+        """Remove the chain item ``cid`` before it resolves — a cast spell goes to
+        its caster's trash, a triggered ability is just dropped. No-op if the
+        target already left the chain."""
+        gs = self._game_state
+        idx, item = self._chain_item_by_cid(cid)
+        if item is None or gs.pending_chain is None:
+            return
+        del gs.pending_chain.items[idx]
+        if item.card is not None:
+            trash = (
+                gs.player_1_trash if item.actor == RequiredTo.PLAYER_1 else gs.player_2_trash
+            )
+            trash.append(item.card)
+            self._log_event("effect", f"{item.card} countered → trash")
+        else:
+            self._log_event("effect", f"{item.label or 'ability'} countered")
+
+    def _start_next_counter_decision(self) -> None:
+        """Process the ``pending_counters`` queue (Hard Bargain, one entry per
+        [Repeat] round). For each still-present target: if its controller can
+        afford the cost, open a pay-or-be-countered choice OWNED BY THAT
+        controller and return (its answer resumes the queue); if they can't pay,
+        counter it now and move on. Targets that already left the chain are
+        skipped."""
+        gs = self._game_state
+        while gs.pending_counters:
+            entry = gs.pending_counters.pop(0)
+            cid = entry["cid"]
+            amount = entry.get("amount", 2)
+            idx, item = self._chain_item_by_cid(cid)
+            if item is None or item.card is None or gs.pending_chain is None:
+                continue  # target already resolved / countered
+            controller = (
+                item.actor if isinstance(item.actor, RequiredTo) else RequiredTo(item.actor)
+            )
+            if self.player_energy(controller) >= amount:
+                opened = self._open_effect_choice(
+                    actor=controller,
+                    code="PAY_2E_OR_BE_COUNTERED",
+                    source=None,
+                    label=f"{item.card}: pay {amount} energy or be countered",
+                    trigger="",
+                    event_kind="",
+                    continuation_targets=(f"spell_cid:{cid}",),
+                )
+                if opened:
+                    return  # wait for the answer; its apply resumes the queue
+            # Can't pay (or nothing to ask) → counter now and continue.
+            self._counter_target_cid(cid)
+
+    # ----------------------------------------------------------------- #
+    # [Hidden] keyword: hide a card face-down at a battlefield you control
+    # (pay 1 Power), reveal-and-play it for FREE on a later turn.
+    # ----------------------------------------------------------------- #
+    def player_hidden(self, actor: RequiredTo) -> list["HiddenCard"]:
+        """Live list of ``actor``'s face-down [Hidden] cards."""
+        if actor == RequiredTo.PLAYER_1:
+            return self._game_state.player_1_hidden
+        if actor == RequiredTo.PLAYER_2:
+            return self._game_state.player_2_hidden
+        raise ValueError("player_hidden requires player_1 or player_2")
+
+    def _battlefield_controller(self, battlefield: str) -> RequiredTo | None:
+        if battlefield == "battlefield_1":
+            return self._game_state.battlefield_1_controller
+        if battlefield == "battlefield_2":
+            return self._game_state.battlefield_2_controller
+        return None
+
+    def _controlled_battlefields(self, actor: RequiredTo) -> list[str]:
+        out: list[str] = []
+        if self._game_state.battlefield_1_controller == actor:
+            out.append("battlefield_1")
+        if self._game_state.battlefield_2_controller == actor:
+            out.append("battlefield_2")
+        return out
+
+    def total_power(self, actor: RequiredTo) -> int:
+        """Total Power ``actor`` has across all domains."""
+        return sum(self.player_power(actor).values())
+
+    def _pay_1_power_any(self, actor: RequiredTo) -> bool:
+        """Spend 1 Power of any domain (the [Hidden] hide cost). Returns False
+        if the player has no Power to spend."""
+        pool = self.player_power(actor)
+        for domain in list(pool):
+            if pool[domain] > 0:
+                self.add_power(actor, domain, -1)
+                return True
+        return False
+
+    def _sweep_lost_hidden(self) -> None:
+        """Discard any [Hidden] card whose owner no longer controls the
+        battlefield it was hidden at (rule: lose the battlefield → lose the
+        hidden card). Swept cards go to their owner's trash."""
+        for actor in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+            hidden = self.player_hidden(actor)
+            if not hidden:
+                continue
+            trash = (
+                self._game_state.player_1_trash
+                if actor == RequiredTo.PLAYER_1
+                else self._game_state.player_2_trash
+            )
+            kept: list[HiddenCard] = []
+            for h in hidden:
+                if self._battlefield_controller(h.battlefield) == actor:
+                    kept.append(h)
+                else:
+                    trash.append(h.card)
+            hidden[:] = kept
+
+    def _hide_limit(self, battlefield: str) -> int:
+        """How many cards a player may have hidden at ``battlefield``: 1 by
+        default, +1 if the battlefield card grants an additional hide (Bandle
+        Tree's ``MAY_HIDE_ADDITIONAL_CARD_HERE``)."""
+        name = self._game_state.battlefield_1 if battlefield == "battlefield_1" else self._game_state.battlefield_2
+        limit = 1
+        if name and "MAY_HIDE_ADDITIONAL_CARD_HERE" in self._card_passives(name):
+            limit += 1
+        return limit
+
+    def _hidden_count_at(self, actor: RequiredTo, battlefield: str) -> int:
+        """How many cards ``actor`` already has hidden at ``battlefield``."""
+        return sum(1 for h in self.player_hidden(actor) if h.battlefield == battlefield)
+
+    def _hide_options(self, actor: RequiredTo) -> list[str]:
+        """``play:hide:<hand_idx>:<battlefield>`` for each [Hidden] card in
+        hand, for each battlefield ``actor`` controls that isn't already at its
+        hide limit, when they can pay the 1-Power hide cost. Duplicate card names
+        collapse to the leftmost copy."""
+        from .csv_data import card_is_hidden
+
+        hand = (
+            self._game_state.player_1_hand
+            if actor == RequiredTo.PLAYER_1
+            else self._game_state.player_2_hand
+        )
+        if not hand or self.total_power(actor) < 1:
+            return []
+        battlefields = [
+            bf
+            for bf in self._controlled_battlefields(actor)
+            if self._hidden_count_at(actor, bf) < self._hide_limit(bf)
+        ]
+        if not battlefields:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for i, card in enumerate(hand):
+            if card in seen or not card_is_hidden(card):
+                continue
+            seen.add(card)
+            for bf in battlefields:
+                out.append(f"play:hide:{i}:{bf}")
+        return out
+
+    def _hidden_reveal_options(
+        self, actor: RequiredTo, *, reaction_only: bool = False
+    ) -> list[str]:
+        """``play:play_hidden:<idx>`` for each face-down card that can be
+        revealed now: hidden on an EARLIER turn and still at a battlefield the
+        owner controls. Units and Gears can always be revealed as a reaction
+        (they enter play directly). In a reaction window (``reaction_only``) a
+        SPELL qualifies only if it's a [Reaction] — the engine's open chain
+        accepts nothing else."""
+        from .csv_data import card_is_reaction
+
+        hidden = self.player_hidden(actor)
+        turn = self._game_state.total_turn_number
+        out: list[str] = []
+        for idx, h in enumerate(hidden):
+            if h.hidden_on_turn >= turn:
+                continue  # only AFTER the turn it was hidden
+            if self._battlefield_controller(h.battlefield) != actor:
+                continue
+            if reaction_only and card_type_of(h.card) == "Spell" and not card_is_reaction(h.card):
+                continue
+            out.append(f"play:play_hidden:{idx}")
+        return out
+
+    def _ambush_options(self, actor: RequiredTo) -> list[str]:
+        """``play:ambush:<hand_idx>:<battlefield>`` for each [Ambush] UNIT in
+        ``actor``'s hand they can play right now (a reaction/showdown window):
+        affordable from current pools, and placed at a battlefield where they
+        already have a unit ("You may play me as a [Reaction] to a battlefield
+        where you have units"). Duplicate names collapse to the leftmost copy."""
+        from .csv_data import card_has_ambush
+
+        hand = (
+            self._game_state.player_1_hand
+            if actor == RequiredTo.PLAYER_1
+            else self._game_state.player_2_hand
+        )
+        if not hand:
+            return []
+        own_bfs = sorted(
+            {
+                u.location
+                for u in self._units_for(actor.value)
+                if u.location in ("battlefield_1", "battlefield_2")
+            }
+        )
+        if not own_bfs:
+            return []
+        energy = self.player_energy(actor)
+        out: list[str] = []
+        seen: set[str] = set()
+        for i, card in enumerate(hand):
+            if card in seen or card_type_of(card) != "Unit" or not card_has_ambush(card):
+                continue
+            if self.effective_card_energy_cost(card, actor) > energy:
+                continue
+            if not self.can_afford_power_cost(actor, card):
+                continue
+            seen.add(card)
+            for bf in own_bfs:
+                out.append(f"play:ambush:{i}:{bf}")
+        return out
+
     def _reaction_play_options(self, actor: RequiredTo) -> list[str]:
         """``play:play_spell:<i>`` for each Reaction spell ``actor`` could play
         in response on the chain: a Spell with the [Reaction] keyword that's
@@ -3656,6 +4141,53 @@ class GameEngine:
             seen.add(card)
             out.append(f"play:play_spell:{i}")
         return out
+
+    def _combat_tier(self, card: str) -> int:
+        """Combat damage-assignment priority for a defender's unit:
+        0 = [Tank] (must be assigned damage FIRST), 2 = [Backline] (LAST),
+        1 = normal. Attackers must assign lethal to lower-tier units before
+        higher-tier ones."""
+        from .csv_data import card_has_backline, card_has_tank
+
+        if card_has_tank(card):
+            return 0
+        if card_has_backline(card):
+            return 2
+        return 1
+
+    def _kill_set_ok(
+        self,
+        costs: dict[int, int],
+        tiers: dict[int, int],
+        chosen: set[int],
+        budget: int,
+    ) -> bool:
+        """Whether a candidate kill-set ``chosen`` (opponent-unit indices) is a
+        legal, MAXIMAL combat assignment given each unit's lethal ``costs`` and
+        [Tank]/[Backline] ``tiers``:
+
+          * within budget;
+          * ordering — you can't kill a unit while a HIGHER-priority (lower-tier)
+            enemy unit survives ([Tank] first, [Backline] last); and
+          * maximal — the leftover can't finish off any survivor that is
+            ELIGIBLE to be assigned next (i.e. has no surviving higher-priority
+            unit ahead of it)."""
+        spent = sum(costs[i] for i in chosen)
+        if spent > budget:
+            return False
+        for i in chosen:
+            if any(tiers[j] < tiers[i] and j not in chosen for j in costs):
+                return False  # killed a lower-priority unit past a survivor
+        leftover = budget - spent
+        eligible = [
+            cost
+            for j, cost in costs.items()
+            if j not in chosen
+            and all(k in chosen for k in costs if tiers[k] < tiers[j])
+        ]
+        if eligible and leftover >= min(eligible):
+            return False  # must have killed an eligible survivor too
+        return True
 
     def _assign_damage_options(self, actor: RequiredTo) -> list[str]:
         """Enumerate every valid ``play:assign_damage:<csv>`` a player can
@@ -3713,23 +4245,17 @@ class GameEngine:
             # floored at 1. Uses the same source of truth as the damage budget.
             targets.append((i, max(self.effective_unit_might(opp_controller, i), 1)))
 
+        costs = {i: m for i, m in targets}
+        tiers = {i: self._combat_tier(opponent_units[i].card) for i, _ in targets}
         options: list[str] = []
         for size in range(0, len(targets) + 1):
             for combo in itertools.combinations(targets, size):
-                spent = sum(m for _, m in combo)
-                if spent > budget:
-                    continue
-                leftover = budget - spent
                 chosen = {i for i, _ in combo}
-                survivors = [m for i, m in targets if i not in chosen]
-                # Maximal-kill rule: leftover must be unable to kill any
-                # surviving enemy unit, else the player was REQUIRED to
-                # assign lethal to one of them too.
-                if survivors and leftover >= min(survivors):
+                # Budget, maximal-kill, and [Tank]/[Backline] ordering rules.
+                if not self._kill_set_ok(costs, tiers, chosen, budget):
                     continue
-                indices = sorted(chosen)
                 options.append(
-                    "play:assign_damage:" + ",".join(str(i) for i in indices)
+                    "play:assign_damage:" + ",".join(str(i) for i in sorted(chosen))
                 )
         return options
 
@@ -3766,6 +4292,12 @@ class GameEngine:
             + attached_might_bonus(gears, unit.uid, turn)
             + self.aura_bonus("might", controller, index)  # "units here have +N M"
         )
+        # Leona, Zealot: "Stunned enemy units here have -8 Might, to a minimum of
+        # 1." A conditional (stunned-only) debuff aura with a floor — applied
+        # here so the "min 1" is honored against the unit's full Might.
+        debuff = self._stunned_might_debuff(controller, index)
+        if debuff:
+            might = max(1, might - debuff)
         # [Shield] adds Might ONLY while this unit is DEFENDING (printed keyword
         # + equipment SHIELD_N + this-turn granted bonus_shield + auras, stacking).
         if self._unit_is_defending(controller, unit.location):
@@ -3776,6 +4308,79 @@ class GameEngine:
                 + self.aura_bonus("shield", controller, index)
             )
         return might
+
+    def _card_passives(self, card: str) -> set[str]:
+        """Every continuous passive_effect code across a card's abilities."""
+        from .abilities import triggered_abilities_for
+
+        out: set[str] = set()
+        for a in triggered_abilities_for(card):
+            out.update(a.passive_effects)
+        return out
+
+    def _units_for(self, controller: str) -> list:
+        gs = self._game_state
+        return gs.player_1_units if controller == "player_1" else gs.player_2_units
+
+    def _stunned_might_debuff(self, controller: str, index: int) -> int:
+        """Total Might reduction on the (stunned) unit at (controller, index) from
+        enemy ``STUNNED_ENEMY_UNITS_HERE_-8M_MIN_1`` auras (Leona, Zealot) at its
+        battlefield — 8 per such enemy source here. 0 if the unit isn't stunned or
+        no such enemy source shares its battlefield. The caller applies the floor."""
+        units = self._units_for(controller)
+        if not (0 <= index < len(units)):
+            return 0
+        unit = units[index]
+        if not getattr(unit, "stunned", False):
+            return 0
+        loc = unit.location
+        if loc not in ("battlefield_1", "battlefield_2"):
+            return 0
+        opp = "player_2" if controller == "player_1" else "player_1"
+        total = 0
+        for su in self._units_for(opp):
+            if su.location != loc:
+                continue
+            if "STUNNED_ENEMY_UNITS_HERE_-8M_MIN_1" in self._card_passives(su.card):
+                total += 8
+        return total
+
+    def _opp_near_victory(self, controller: RequiredTo) -> bool:
+        """True if the opponent's score is within 3 of the Victory Score
+        (Leona, Zealot's enter-ready condition)."""
+        return self.player_score(self.opponent_of(controller)) >= VICTORY_SCORE - 3
+
+    def _opp_controls_stunned(self, controller: RequiredTo) -> bool:
+        """True if the opponent controls at least one stunned unit (Monch)."""
+        opp = self.opponent_of(controller).value
+        return any(getattr(u, "stunned", False) for u in self._units_for(opp))
+
+    def unit_enters_ready(self, card: str, controller: RequiredTo) -> bool:
+        """Whether ``card`` enters play READY (not summoning-sick) for
+        ``controller`` right now, per a conditional passive:
+          * Leona, Zealot — if the opponent is within 3 of the Victory Score;
+          * Monch — if the opponent controls a stunned unit."""
+        passives = self._card_passives(card)
+        if "ENTER_READY_IF_OPP_NEAR_VICTORY" in passives and self._opp_near_victory(controller):
+            return True
+        if (
+            "COST_2_LESS_AND_READY_IF_OPP_HAS_STUNNED" in passives
+            and self._opp_controls_stunned(controller)
+        ):
+            return True
+        return False
+
+    def effective_card_energy_cost(self, card: str, controller: RequiredTo) -> int:
+        """The Energy cost to play ``card`` for ``controller`` right now, after
+        conditional reductions (Monch: 2 less while the opponent controls a
+        stunned unit). Floors at 0. Falls back to the printed cost otherwise."""
+        base = self.card_energy_cost(card)
+        if (
+            "COST_2_LESS_AND_READY_IF_OPP_HAS_STUNNED" in self._card_passives(card)
+            and self._opp_controls_stunned(controller)
+        ):
+            return max(0, base - 2)
+        return base
 
     def aura_bonus(self, prop: str, controller: str, index: int) -> int:
         """Total of ``prop`` granted to the unit at (controller, index) by
@@ -3871,6 +4476,37 @@ class GameEngine:
             + self.aura_bonus("deflect", controller, index)  # e.g. Allay's aura
         )
 
+    def unit_has_ganking(self, controller: str, index: int) -> bool:
+        """Whether the unit at (controller, index) has [Ganking] — "I can move
+        from battlefield to battlefield." Sourced like other keywords: its
+        printed keyword, an EFFECT-TEXT equipment grant (Boots of Swiftness'
+        ``GANKING``), or a continuous aura grant (none in the data today, but
+        supported for parity)."""
+        from .abilities import attached_grants_ganking
+        from .csv_data import card_has_ganking
+
+        units = (
+            self._game_state.player_1_units
+            if controller == "player_1"
+            else self._game_state.player_2_units
+            if controller == "player_2"
+            else []
+        )
+        if index < 0 or index >= len(units):
+            return False
+        unit = units[index]
+        if card_has_ganking(unit.card):
+            return True
+        gears = (
+            self._game_state.player_1_gears
+            if controller == "player_1"
+            else self._game_state.player_2_gears
+        )
+        turn = self._game_state.total_turn_number
+        if attached_grants_ganking(gears, unit.uid, turn):
+            return True
+        return self.aura_bonus("ganking", controller, index) >= 1
+
     def _unit_is_defending(self, controller: str, location: str) -> bool:
         """True if ``controller``'s unit at ``location`` is currently DEFENDING:
         there's an active showdown (or its combat step) AT that battlefield and
@@ -3889,7 +4525,12 @@ class GameEngine:
         """Sum of CURRENT Might of all of ``actor``'s units sitting at
         ``battlefield`` (printed + buffs + attached-equipment grants). Used to
         compute each player's damage budget when a contested showdown enters
-        its combat phase."""
+        its combat phase.
+
+        STUNNED units are excluded: a stunned unit doesn't deal combat damage,
+        so it contributes 0 to the budget (a battlefield of only stunned units
+        yields 0 → that side assigns no kills). Stun does NOT change battlefield
+        control, which is decided by unit PRESENCE elsewhere, not by Might."""
         if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
             return 0
         units = (
@@ -3900,6 +4541,8 @@ class GameEngine:
         total = 0
         for i, unit in enumerate(units):
             if unit.location != battlefield:
+                continue
+            if unit.stunned:
                 continue
             total += self.effective_unit_might(actor.value, i)
         return total
@@ -4147,6 +4790,10 @@ class GameEngine:
         Units enter the battlefield exhausted (summoning sickness) and ready
         here on the owner's next turn. Effects that exhaust a unit later in
         a match are likewise cleared here.
+
+        STUN (Riftbound rule): a stunned unit does NOT ready at this step —
+        instead its stun is consumed here (so it readies normally on the
+        following turn). It stays exhausted this once and fires no ON_READY.
         """
         if actor == RequiredTo.PLAYER_1:
             units = self._game_state.player_1_units
@@ -4156,6 +4803,11 @@ class GameEngine:
             return
         readied = []
         for i, unit in enumerate(units):
+            if unit.stunned:
+                # Skip readying and clear the stun (consumes it); leave
+                # ``exhausted`` untouched so the unit misses this ready step.
+                unit.stunned = False
+                continue
             if unit.exhausted:
                 readied.append(i)
             unit.exhausted = False
@@ -4319,6 +4971,11 @@ class GameEngine:
         if deck_selection is not None:
             return deck_selection
 
+        # A [Hidden] card is bound to the battlefield it was hidden at: if its
+        # owner has since lost control of that battlefield, the card is lost.
+        # Sweep before computing options so the state is always consistent.
+        self._sweep_lost_hidden()
+
         if not self._game_state.started:
             if self._game_state.first_turn_choice is None:
                 self._game_state.first_turn_choice = self._resolve_first_turn_choice()
@@ -4466,6 +5123,10 @@ class GameEngine:
                         continue
                     seen_spell.add(c)
                     opts.append(f"play:play_spell:{hi}")
+
+                # [Ambush] units may be played into the showdown (to a battlefield
+                # where the focus holder has units — the contested BF qualifies).
+                opts += self._ambush_options(focus)
 
                 opts.append("play:pass_showdown")
                 return EngineOutput(
@@ -4640,7 +5301,12 @@ class GameEngine:
                 # else (units, moves, end turn, the opponent's menu) is
                 # suppressed until both players pass and the chain resolves.
                 holder = chain.priority
-                opts = self._reaction_play_options(holder) + ["play:pass_priority"]
+                opts = (
+                    self._reaction_play_options(holder)
+                    + self._ambush_options(holder)  # [Ambush] units at reaction timing
+                    + self._hidden_reveal_options(holder, reaction_only=True)
+                    + ["play:pass_priority"]
+                )
                 return EngineOutput(
                     game_state=self.game_state,
                     player_1_options=opts if holder == RequiredTo.PLAYER_1 else [],
@@ -4705,7 +5371,7 @@ class GameEngine:
                         continue
                     if card_type_of(card) != "Unit":
                         continue
-                    if self.card_energy_cost(card) > energy:
+                    if self.effective_card_energy_cost(card, active) > energy:
                         continue
                     if not self.can_afford_power_cost(active, card):
                         continue
@@ -4791,6 +5457,12 @@ class GameEngine:
                     seen_play_card.add(card)
                     options.append(f"play:play_gear:{i}")
 
+                # [Hidden]: hide a Hidden-keyword hand card at a battlefield you
+                # control (1 Power), and reveal-and-play previously-hidden cards
+                # for FREE (only on turns after they were hidden).
+                options.extend(self._hide_options(active))
+                options.extend(self._hidden_reveal_options(active))
+
                 # The chosen champion plays like a hand unit (action timing),
                 # surfaced as a flat option when it hasn't been played yet and
                 # is affordable from the CURRENT pools. (When it needs rune
@@ -4842,8 +5514,16 @@ class GameEngine:
                         for dest in ("battlefield_1", "battlefield_2"):
                             options.append(f"play:move_unit:{unit_idx}:{dest}")
                     else:
-                        # Battlefield → base only. (BF ↔ BF rejected.)
+                        # Battlefield → base always. [Ganking] units may ALSO
+                        # jump straight to the other battlefield.
                         options.append(f"play:move_unit:{unit_idx}:base")
+                        if self.unit_has_ganking(active.value, unit_idx):
+                            other = (
+                                "battlefield_2"
+                                if unit.location == "battlefield_1"
+                                else "battlefield_1"
+                            )
+                            options.append(f"play:move_unit:{unit_idx}:{other}")
 
                 # NOTE: equipping is surfaced via pre-costed picker chips
                 # (compute_equip_intents) rather than flat options — the chip's

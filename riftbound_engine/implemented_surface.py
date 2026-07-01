@@ -64,6 +64,11 @@ EFFECT_EXCLUDES: dict[str, str] = {
     "RETURN_UNIT_YOU_CONTROL_HERE_HAND_PLAY_SS_HERE": (
         "return half only; Sand Soldier token spawn pending a token card row"
     ),
+    "PAY_2E_OR_BE_COUNTERED": (
+        "internal helper opened by the engine for Hard Bargain's "
+        "COUNTER_SPELL_UNLESS_2E — not a card-tagged effect, so it must not "
+        "appear as its own implemented ability"
+    ),
 }
 
 #: Faithful triggers that are deliberately absent from TRIGGER_EVENT_MAP.
@@ -71,6 +76,10 @@ TRIGGER_INCLUDES: dict[str, str] = {
     # Replacement marker, not a chain trigger: consulted at the moment a unit
     # would die (engine._death_replacement_for) and substituted for the death.
     "IF_ID_DIE": "would-die replacement marker, consulted at death (not event-driven)",
+    # The discarded card is not in play, so the in-play trigger scan can't find
+    # it; engine._queue_discard_me_trigger fires it off the discarded card's own
+    # abilities (Flame Chompers).
+    "WHEN_YOU_DISCARD_ME": "fired for the discarded card via _queue_discard_me_trigger (not the in-play scan)",
 }
 
 #: Mapped to an event, but the engine fires them too broadly to match the card
@@ -111,6 +120,10 @@ IMPLEMENTED_CONDITIONS: dict[str, str] = {
         "Vex, Apathetic: gates its on-opponent-play trigger to while the source "
         "is at a battlefield; evaluated in engine._condition_met"
     ),
+    "IF_ENEMY_UNIT_ALONE_HERE": (
+        "Kha'Zix: fires only when the opponent has exactly one (lone) unit at the "
+        "source's battlefield; evaluated in engine._condition_met"
+    ),
 }
 
 #: Continuous/passive effect codes with real engine support (exact). The keyword
@@ -133,6 +146,22 @@ IMPLEMENTED_PASSIVES: dict[str, str] = {
     # each unit here." Resolved in engine._apply_beginning_phase_bf_damage
     # ahead of HOLD scoring.
     "DEAL_1_DAMAGE_TO_UNITS_HERE": "battlefield: deals 1 to each unit here at the start of each Beginning Phase (Frozen Fortress)",
+    # [Ganking] keyword: a unit's own (card text) AND equipment that grants it
+    # (Boots of Swiftness' bare GANKING). Lets it move battlefield→battlefield
+    # (engine.unit_has_ganking, checked in the move rule + option builder).
+    "GANKING": "keyword Ganking: own (card text) + equipment grant; allows battlefield→battlefield moves",
+    # Leona, Zealot: "If an opponent's score is within 3 of the Victory Score, I
+    # enter ready." Applied at unit-play via engine.unit_enters_ready.
+    "ENTER_READY_IF_OPP_NEAR_VICTORY": "enter-ready when the opponent is within 3 of the Victory Score (Leona)",
+    # Leona, Zealot: "Stunned enemy units here have -8 Might, min 1." A floored
+    # debuff aura applied in effective_unit_might (engine._stunned_might_debuff).
+    "STUNNED_ENEMY_UNITS_HERE_-8M_MIN_1": "aura: stunned enemy units at this battlefield get -8 Might (floor 1) (Leona)",
+    # Monch: "If an opponent controls a stunned unit, I cost 2 energy less and
+    # enter ready." Cost via effective_card_energy_cost; ready via unit_enters_ready.
+    "COST_2_LESS_AND_READY_IF_OPP_HAS_STUNNED": "cost 2 less + enter-ready while the opponent controls a stunned unit (Monch)",
+    # Bandle Tree (battlefield): "You may hide an additional card here." Raises
+    # the per-battlefield hide limit from 1 to 2 (engine._hide_limit).
+    "MAY_HIDE_ADDITIONAL_CARD_HERE": "raises this battlefield's hide limit by 1 (Bandle Tree)",
 }
 
 #: Passive FAMILIES the engine applies continuously.
@@ -140,6 +169,29 @@ PASSIVE_PATTERNS: list[tuple[str, str]] = [
     (r"UNIT_ATTACHED_[+-]\d+M", "equipment grants the attached unit ±N Might"),
     (r"SHIELD_\d+", "equipment [Shield N]: +N Might to the host while it defends"),
 ]
+
+#: Printed KEYWORDS the engine handles as-written (the card's "Keywords" column).
+#: A card carrying a keyword NOT in this set is not fully playable even if its
+#: tagged abilities all run. Numeric suffixes ("Shield 2", "Deflect 2",
+#: "Hunt 2") are stripped before the check, so only the base name is listed.
+#: Edit this set as more keywords gain engine support.
+IMPLEMENTED_KEYWORDS: dict[str, str] = {
+    "Deflect": "prevents the first damage each turn; taxed at target choice",
+    "Shield": "+N Might to the host while it defends (equipment/keyword)",
+    "Reaction": "may be played during an opponent's turn / on the chain (timing)",
+    "Action": "may be played at action timing on your turn (timing)",
+    "Accelerate": "may pay an extra cost to play at a faster timing",
+    "Equip": "gear can be attached to a unit (equipment)",
+    "Repeat": "a spell may be re-cast per its Repeat cost",
+    "Deathknell": "'when this dies' trigger timing is supported",
+    "Quick-Draw": "gear may be attached the turn it is played",
+    "Ganking": "unit may move battlefield→battlefield",
+    "Hidden": "hide from hand at a battlefield you control for 1 Power; reveal-and-play free on a later turn",
+    "Tank": "must be assigned combat damage first (engine._combat_tier / _kill_set_ok)",
+    "Backline": "must be assigned combat damage last (engine._combat_tier / _kill_set_ok)",
+    "Stun": "the [Stun] mechanic (stunned state + stun effects) is implemented",
+    "Ambush": "play the unit at reaction timing to a battlefield where you have units (play:ambush)",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +233,7 @@ def surface_data() -> dict:
         "conditions": sorted(IMPLEMENTED_CONDITIONS),
         "passives": sorted(IMPLEMENTED_PASSIVES),
         "passivePatterns": [p for p, _ in PASSIVE_PATTERNS],
+        "keywords": sorted(IMPLEMENTED_KEYWORDS),
     }
 
 
@@ -228,6 +281,16 @@ export function isConditionImplemented(code: string): boolean {
 /** True if the engine applies the continuous ``code`` as-written. */
 export function isPassiveImplemented(code: string): boolean {
   return IMPLEMENTED_PASSIVES.has(code) || IMPLEMENTED_PASSIVE_PATTERNS.some((re) => re.test(code))
+}
+
+/** True if the engine handles a printed KEYWORD as-written. A numeric suffix
+ *  (e.g. "Shield 2", "Deflect 2", "Hunt 2") is stripped before the check, so
+ *  only the base keyword name matters. Case-insensitive. */
+export function isKeywordImplemented(keyword: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+\d+$/, '').trim()
+  const base = norm(keyword)
+  for (const k of IMPLEMENTED_KEYWORDS) if (norm(k) === base) return true
+  return false
 }
 
 export type AbilityImplStatus = 'full' | 'partial' | 'none'
@@ -345,6 +408,13 @@ def render_typescript() -> str:
             "IMPLEMENTED_PASSIVE_PATTERNS",
             PASSIVE_PATTERNS,
             "Passive FAMILIES the engine applies continuously.",
+        ),
+        _ts_string_set(
+            "IMPLEMENTED_KEYWORDS",
+            IMPLEMENTED_KEYWORDS,
+            "Printed keywords the engine handles (base name; numeric suffixes "
+            "stripped at check time). A card with an unlisted keyword is not "
+            "fully playable even if its tagged abilities all run.",
         ),
         _LOGIC,
     ]

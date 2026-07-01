@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from riftbound_engine import (
     GameEngine,
@@ -424,6 +425,17 @@ class GameEngineTests(unittest.TestCase):
         raise unittest.SkipTest("dealt hand contains no Unit-type cards")
 
     def test_play_unit_parks_card_in_pending_then_choose_location_commits(self) -> None:
+        # This exercises the generic play→park→commit flow and the resulting
+        # option menu, not triggered abilities. Scuttle Crab (HAND_UNIT) now has
+        # an implemented "when you play me, draw 1" trigger that would put an
+        # item on the chain and collapse the options to pass_priority, so run
+        # this hermetically with no card abilities.
+        patcher = mock.patch(
+            "riftbound_engine.abilities.triggered_abilities_for",
+            side_effect=lambda name: (),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         engine, ready = self._drive_to_action_turn()
         # Pre-build Energy AND Power across every domain so the cost gate
         # (Energy + domain Power — covered separately in PlayUnitEnergyCostTests
@@ -1925,6 +1937,19 @@ class ShowdownTests(unittest.TestCase):
 class ScoringTests(unittest.TestCase):
     """Match score: +1 per battlefield gained via showdown, +1 per held BF
     at B (ABCD step B). Capped at 1 point per battlefield per turn."""
+
+    def setUp(self) -> None:
+        # These tests probe pure scoring mechanics. The setup's battlefield
+        # (Grove of the God-Willow) and other cards now carry implemented
+        # triggers (e.g. WHEN_HOLD_HERE → DRAW_1) that would open the chain at
+        # B-phase HOLD and block subsequent moves. Run hermetically with no card
+        # abilities so scoring is isolated from triggers.
+        patcher = mock.patch(
+            "riftbound_engine.abilities.triggered_abilities_for",
+            side_effect=lambda name: (),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _drive_to_action_turn(self) -> tuple["GameEngine", "EngineOutput"]:
         rolls = iter([6, 2])

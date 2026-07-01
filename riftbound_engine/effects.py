@@ -262,6 +262,35 @@ def _draw_1(ctx: EffectContext) -> None:
     _draw_n(ctx.engine, ctx.controller, 1)
 
 
+_GAIN_XP_RE = re.compile(r"GAIN_(\d+)_XP")
+
+
+@register_effect("REVEAL_HAND_FACEDOWN")
+def _reveal_hand_facedown(ctx: EffectContext) -> None:
+    """Scuttle Crab: "Choose an opponent. They reveal their hand. You can look at
+    their facedown cards this turn." In 2-player the opponent is fixed; we mark
+    their hand revealed for this turn (informational — the engine is
+    full-information internally, so this drives UI visibility, not a mechanic)."""
+    from .engine import RequiredTo
+
+    opp = ctx.engine.opponent_of(ctx.controller)
+    turn = ctx.engine._game_state.total_turn_number
+    if opp == RequiredTo.PLAYER_1:
+        ctx.engine._game_state.player_1_hand_revealed_turn = turn
+    else:
+        ctx.engine._game_state.player_2_hand_revealed_turn = turn
+    ctx.engine._log_event("effect", f"{opp.value} reveals their hand this turn")
+
+
+@register_effect_pattern(r"GAIN_\d+_XP")
+def _gain_xp(ctx: EffectContext) -> None:
+    """Gain N experience (Scuttle Crab GAIN_1_XP, Kha'Zix GAIN_2_XP, …). One
+    pattern covers every amount; XP banks on the controller."""
+    m = _GAIN_XP_RE.fullmatch(ctx.code)
+    if m:
+        ctx.engine.gain_xp(ctx.controller, int(m.group(1)))
+
+
 @register_effect("SCORE_1_POINT")
 def _score_1(ctx: EffectContext) -> None:
     ctx.engine.add_score(ctx.controller, 1)
@@ -487,6 +516,39 @@ def _give_friendly_plus_alone(ctx: EffectContext) -> None:
 def _give_me_delta(ctx: EffectContext) -> None:
     """GIVE_ME_+1 / +2M …: the source unit gets ±N Might."""
     _buff_source(ctx, _amount_from_code(ctx.code))
+
+
+@register_effect("READY_ME")
+def _ready_me(ctx: EffectContext) -> None:
+    """Ready the ability's OWN source (Eclipse Herald: "ready me"; Blade Dancer
+    legend: "ready me"). Clears the source's exhausted state — a unit's flag, or
+    a legend's ``player_X_legend_exhausted`` when the source is the legend. No-op
+    if the source isn't a readyable permanent. Does NOT emit ON_READY (that's for
+    the Awake refresh / effects that ready OTHER units)."""
+    from .engine import RequiredTo
+
+    src = ctx.source or ""
+    if src.startswith("legend:"):
+        side = src.split(":", 1)[1]
+        if side in ("player_1", "player_2"):
+            ctx.engine.set_legend_exhausted(RequiredTo(side), False)
+        return
+    _, _, unit = _resolve_unit(ctx.engine, ctx.source)
+    if unit is not None:
+        unit.exhausted = False
+
+
+@register_effect("READY_IT", targeted=True)
+def _ready_it(ctx: EffectContext) -> None:
+    """Blade Dancer: "ready IT" — ready the chosen unit (the friendly unit that
+    was just chosen, carried in ``ctx.targets``). Clears each target's exhausted
+    flag."""
+    for ref in ctx.targets:
+        if not ref.startswith(("player_1:", "player_2:")):
+            continue
+        _, _, unit = _resolve_unit(ctx.engine, ref)
+        if unit is not None:
+            unit.exhausted = False
 
 
 # --------------------------------------------------------------------------- #
@@ -806,6 +868,14 @@ def _discard_picked(ctx: EffectContext, token: str) -> str:
         raise ValueError(f"{token!r} does not point at a card in hand")
     card = hand.pop(i)
     trash.append(card)
+    # "When you discard …" (Jinx, Rebel). Fires for whoever discarded — this is
+    # the single choke point for self-discard (DISCARD_1 / DISCARD_1_DRAW_1) AND
+    # a forced discard (OPPONENT_DISCARD_1 routes here as the chosen player).
+    from .triggers import GameEvent
+
+    ctx.engine._emit(
+        GameEvent(kind="ON_DISCARD", controller=ctx.controller.value, data={"card": card})
+    )
     return f"discard {card}"
 
 
@@ -818,6 +888,123 @@ register_choice_effect(
     options=_own_hand_options,
     apply=_discard_picked,
     optional=False,
+)
+
+
+# --------------------------------------------------------------------------- #
+# Library-dig choice effects. Tokens are ``lib-<i>`` — an index into the cards
+# the effect let you LOOK AT (the top of your Main Deck). "Recycle" = put on the
+# BOTTOM of the Main Deck (the library draws from the front, so recycle = append).
+# --------------------------------------------------------------------------- #
+def _look_top_3_options(ctx: EffectContext) -> list[str]:
+    """One ``lib-<i>`` token per card among the top 3 (or fewer) of the
+    controller's Main Deck — the cards Stacked Deck lets them look at."""
+    library = _library(ctx.engine, ctx.controller) or []
+    return [f"lib-{i}" for i in range(min(3, len(library)))]
+
+
+def _look_top_3_pick(ctx: EffectContext, token: str) -> str:
+    """Stacked Deck: from the top 3 looked-at cards, put the chosen one into
+    hand and recycle the rest (to the bottom of the Main Deck, in their looked-at
+    order). Raises if the token doesn't point at a looked-at card."""
+    m = token.strip().lower()
+    if not m.startswith("lib-") or not m[4:].isdigit():
+        raise ValueError(f"{token!r} does not point at a looked-at card")
+    i = int(m[4:])
+    library = _library(ctx.engine, ctx.controller)
+    hand = _hand(ctx.engine, ctx.controller)
+    if library is None or hand is None:
+        raise ValueError("no Main Deck / hand to dig")
+    n = min(3, len(library))
+    if not (0 <= i < n):
+        raise ValueError(f"{token!r} is out of range of the {n} looked-at cards")
+    looked = library[:n]
+    del library[:n]  # remove the looked-at cards from the top
+    chosen = looked[i]
+    hand.append(chosen)
+    recycled = [c for j, c in enumerate(looked) if j != i]
+    library.extend(recycled)  # recycle the rest to the bottom
+    suffix = f", recycle {len(recycled)}" if recycled else ""
+    return f"look at top {n}: take {chosen} to hand{suffix}"
+
+
+# Stacked Deck: "Look at the top 3 cards of your Main Deck. Put 1 into your hand
+# and recycle the rest." A FORCED choice — you must take one (unless the deck is
+# empty, in which case there's nothing to look at and it fizzles).
+register_choice_effect(
+    "LOOK_TOP_3_1_HAND_RECYCLE",
+    options=_look_top_3_options,
+    apply=_look_top_3_pick,
+    optional=False,
+)
+
+
+def _play_spell_from_trash_le3_options(ctx: EffectContext) -> list[str]:
+    """Fizz, Trickster: spells in the controller's trash with Energy cost ≤ 3
+    whose Power cost they can currently afford (Energy is waived, Power is not).
+    Token ``ts-<i>`` = leftmost trash index of each qualifying distinct spell."""
+    from .csv_data import card_energy_of, card_type_of
+
+    trash = _trash(ctx.engine, ctx.controller)
+    out: list[str] = []
+    seen: set[str] = set()
+    for i, card in enumerate(trash):
+        if card in seen or card_type_of(card) != "Spell":
+            continue
+        if (card_energy_of(card) or 0) > 3:
+            continue
+        if not ctx.engine.can_afford_power_cost(ctx.controller, card):
+            continue
+        seen.add(card)
+        out.append(f"ts-{i}")
+    return out
+
+
+def _play_spell_from_trash_le3_apply(ctx: EffectContext, token: str) -> str:
+    """Play the chosen trash spell IGNORING its Energy cost (Power still paid):
+    move it to hand, grant exactly its Energy (so the normal deduction nets to
+    zero), then cast it through the standard play_spell path (targeting + chain,
+    Power deducted normally)."""
+    from .action_turn.context import ActionTurnContext
+    from .action_turn.registry import _REGISTRY
+
+    m = token.strip().lower()
+    if not m.startswith("ts-") or not m[3:].isdigit():
+        raise ValueError(f"{token!r} does not point at a trash spell")
+    i = int(m[3:])
+    trash = _trash(ctx.engine, ctx.controller)
+    hand = _hand(ctx.engine, ctx.controller)
+    if hand is None or not (0 <= i < len(trash)):
+        raise ValueError("no such trash spell")
+    card = trash[i]
+    energy_cost = ctx.engine.card_energy_cost(card)
+    trash.pop(i)
+    hand.append(card)
+    hi = len(hand) - 1
+    if energy_cost:
+        ctx.engine.add_energy(ctx.controller, energy_cost)  # grant → free Energy
+    try:
+        _REGISTRY["play_spell"](
+            ActionTurnContext(engine=ctx.engine, actor=ctx.controller, verb="play_spell", payload=str(hi))
+        )
+    except Exception:
+        # Roll back the grant + relocation if the cast couldn't happen.
+        if hand and hi < len(hand) and hand[hi] == card:
+            hand.pop(hi)
+            trash.insert(i, card)
+        if energy_cost:
+            ctx.engine.add_energy(ctx.controller, -energy_cost)
+        raise
+    return f"play {card} from trash (Energy free)"
+
+
+# Fizz, Trickster: "When you play me, you may play a spell from your trash with
+# Energy cost ≤ 3, ignoring its Energy cost." Optional; Power is still paid.
+register_choice_effect(
+    "PLAY_SPELL_FROM_TRASH_LE3",
+    options=_play_spell_from_trash_le3_options,
+    apply=_play_spell_from_trash_le3_apply,
+    optional=True,
 )
 
 
@@ -894,6 +1081,60 @@ register_choice_effect(
     options=_choose_a_player_options,
     apply=_chosen_player_discards,
     optional=False,
+)
+
+
+# --------------------------------------------------------------------------- #
+# Flame Chompers: "When you discard me, you may pay 1 fury rune to play me."
+# The discard-me trigger (engine._queue_discard_me_trigger) fires with the
+# source set to ``trash:<controller>:<card>``. This OPTIONAL choice offers the
+# "pay 1 Fury" option only when the controller can afford it; taking it spends
+# the Fury and plays the card from trash into base (exhausted, summoning
+# sickness). Location is base (always legal) rather than a per-play location
+# pick — same simplification the Recruit-token play uses. Playing this way does
+# not re-emit ON_PLAY_UNIT.
+# --------------------------------------------------------------------------- #
+def _discard_card_from_source(ctx: EffectContext) -> str | None:
+    """Recover the discarded card name from a ``trash:<controller>:<card>`` source."""
+    src = ctx.source or ""
+    if not src.startswith("trash:"):
+        return None
+    parts = src.split(":", 2)
+    return parts[2] if len(parts) == 3 else None
+
+
+def _pay_fury_play_from_trash_options(ctx: EffectContext) -> list[str]:
+    card = _discard_card_from_source(ctx)
+    if card is None:
+        return []
+    trash = _trash(ctx.engine, ctx.controller)
+    if not trash or card not in trash:
+        return []
+    if ctx.engine.player_power(ctx.controller).get("Fury", 0) < 1:
+        return []
+    return ["pay_fury"]
+
+
+def _pay_fury_play_from_trash_apply(ctx: EffectContext, token: str) -> str:
+    from .engine import PlayedUnit
+
+    card = _discard_card_from_source(ctx)
+    trash = _trash(ctx.engine, ctx.controller)
+    if card is None or not trash or card not in trash:
+        return "card no longer in trash"
+    ctx.engine.add_power(ctx.controller, "Fury", -1)  # pay 1 fury rune
+    trash.remove(card)
+    _units(ctx.engine, ctx.controller).append(
+        PlayedUnit(card=card, location="base", exhausted=True)
+    )
+    return f"pay 1 fury, play {card} from trash"
+
+
+register_choice_effect(
+    "MAY_PAY_1_FURY_PLAY_ME_FROM_TRASH",
+    options=_pay_fury_play_from_trash_options,
+    apply=_pay_fury_play_from_trash_apply,
+    optional=True,  # "you MAY pay …" — declinable
 )
 
 
@@ -1137,6 +1378,182 @@ def _cant_move(ctx: EffectContext) -> None:
             unit.cant_move = True
 
 
+def _apply_stun(ctx: EffectContext, ref: str, unit) -> None:
+    """Mark ``unit`` (at ``ref``) as stunned and, when it belongs to the
+    OPPONENT of the controller, emit ``ON_STUN`` so "when you stun an enemy
+    unit" abilities (Vex, Eclipse Herald, Radiant Dawn) fire. The event carries
+    the stunned unit's ref + battlefield so a "move me to that battlefield"
+    ability can read where it is. Stunning your OWN unit (Facebreaker) sets the
+    flag but fires nothing."""
+    from .triggers import GameEvent
+
+    unit.stunned = True
+    side = ref.split(":", 1)[0]
+    if side != ctx.controller.value:  # enemy of the controller
+        ctx.engine._emit(
+            GameEvent(
+                kind="ON_STUN",
+                controller=ctx.controller.value,
+                source=ref,
+                battlefield=(unit.location if unit.location != "base" else None),
+                data={"unit": ref},
+            )
+        )
+
+
+@register_effect("STUN_IT", targeted=True)
+@register_effect("STUN_UNIT", targeted=True)
+@register_effect("STUN_ENEMY_UNIT", targeted=True)
+def _stun_unit(ctx: EffectContext) -> None:
+    """Stun the chosen target unit(s): they don't deal combat damage and skip
+    their controller's next ready step (see PlayedUnit.stunned). Used by spells
+    whose Spell Choice Requirement captured the target up front (Rune Prison,
+    Thwonk!, Zenith Blade, …) and by "…, [Stun] IT" triggers that feed the
+    event's unit as the target (Blast Cone's "when you move an enemy unit, stun
+    it")."""
+    for ref in ctx.targets:
+        if not ref.startswith(("player_1:", "player_2:")):
+            continue
+        _, _, unit = _resolve_unit(ctx.engine, ref)
+        if unit is not None:
+            _apply_stun(ctx, ref, unit)
+
+
+def _token_to_ref(token: str) -> str | None:
+    """``p1-3`` / ``p2-0`` choice token → ``player_1:3`` / ``player_2:0`` ref."""
+    m = token.strip().lower()
+    side, _, idx = m.partition("-")
+    if side not in ("p1", "p2") or not idx.isdigit():
+        return None
+    return f"{'player_1' if side == 'p1' else 'player_2'}:{idx}"
+
+
+def _stun_picked(ctx: EffectContext, token: str) -> str:
+    """Apply-fn shared by the choice-based stun effects: stun the picked unit."""
+    ref = _token_to_ref(token)
+    unit = _resolve_wire_token(ctx.engine, token)
+    if ref is None or unit is None:
+        return "stun fizzled (target gone)"
+    _apply_stun(ctx, ref, unit)
+    return f"stun {unit.card}"
+
+
+def _all_units_anywhere_options(ctx: EffectContext) -> list[str]:
+    """Every unit in play, either side, any location ("stun a unit")."""
+    gs = ctx.engine._game_state
+    out: list[str] = []
+    for pv, units in (("player_1", gs.player_1_units), ("player_2", gs.player_2_units)):
+        out += [_wire_for(pv, i) for i in range(len(units))]
+    return out
+
+
+def _enemy_units_here_options(ctx: EffectContext) -> list[str]:
+    """Enemy units at the source's battlefield ("stun an enemy unit here")."""
+    here = _here_location(ctx)
+    opp = ctx.engine.opponent_of(ctx.controller)
+    units = _units(ctx.engine, opp)
+    return [_wire_for(opp.value, i) for i, u in enumerate(units) if u.location == here]
+
+
+# Triggered / played "stun a unit" (Solari Shieldbearer) picks its target at
+# resolution; forced (not a "may").
+register_choice_effect(
+    "STUN_A_UNIT", options=_all_units_anywhere_options, apply=_stun_picked, optional=False
+)
+# "Stun an enemy unit" (enemy, anywhere).
+register_choice_effect(
+    "STUN_AN_ENEMY_UNIT", options=_enemy_units_options, apply=_stun_picked, optional=False
+)
+# "…, stun an enemy unit HERE" (Leona Determined / Vi Peacekeeper, at the
+# source unit's battlefield).
+register_choice_effect(
+    "STUN_AN_ENEMY_UNIT_HERE", options=_enemy_units_here_options, apply=_stun_picked, optional=False
+)
+
+
+@register_effect("STUN_OR_RETURN_IF_STUNNED", targeted=True)
+def _stun_or_return_if_stunned(ctx: EffectContext) -> None:
+    """Existential Dread: "[Stun] an attacking enemy unit. If it's already
+    stunned, return it to its owner's hand instead." Per target: if it is
+    ALREADY stunned, bounce it to its owner's hand (reusing the RETURN_TO_HAND
+    path); otherwise stun it."""
+    from .engine import RequiredTo
+
+    from .triggers import GameEvent
+
+    for ref in ctx.targets:
+        if not ref.startswith(("player_1:", "player_2:")):
+            continue
+        units, _, unit = _resolve_unit(ctx.engine, ref)
+        if unit is None:
+            continue
+        if not unit.stunned:
+            _apply_stun(ctx, ref, unit)
+            continue
+        # Already stunned → return to owner's hand instead.
+        side = ref.split(":", 1)[0]
+        owner = RequiredTo.PLAYER_1 if side == RequiredTo.PLAYER_1.value else RequiredTo.PLAYER_2
+        origin = unit.location
+        if unit in units:
+            units.remove(unit)
+            is_token = getattr(unit, "token", False)
+            if not is_token:
+                hand = _hand(ctx.engine, owner)
+                if hand is not None:
+                    hand.append(unit.card)
+            ctx.engine._emit(
+                GameEvent(
+                    kind="ON_RETURN_TO_HAND",
+                    controller=owner.value,
+                    data={"origin": origin, "token": is_token},
+                )
+            )
+
+
+def _move_me_to_stunned_bf_options(ctx: EffectContext) -> list[str]:
+    """Vex, Mocking: "When you stun an enemy unit at a battlefield, you MAY move
+    me to that battlefield." The trigger feeds the stunned unit as ``targets``;
+    we offer its battlefield as the (single) pick. Empty ⇒ nothing to move to
+    (the stunned unit is at base or gone), so the ability fizzles with no prompt.
+    ``optional=True`` on registration adds the decline (pass) option."""
+    out: list[str] = []
+    # Vex herself must still be in play to move.
+    if not ctx.source or not ctx.source.startswith(("player_1:", "player_2:")):
+        return out
+    if _resolve_unit(ctx.engine, ctx.source)[2] is None:
+        return out
+    for ref in ctx.targets:
+        if not ref.startswith(("player_1:", "player_2:")):
+            continue
+        side, _, idx = ref.partition(":")
+        _, _, tgt = _resolve_unit(ctx.engine, ref)
+        if tgt is not None and tgt.location in ("battlefield_1", "battlefield_2"):
+            out.append(_wire_for(side, int(idx)))
+    return out
+
+
+def _move_me_to_stunned_bf_apply(ctx: EffectContext, token: str) -> str:
+    """Take the move: relocate Vex (the ability's SOURCE) to the picked stunned
+    unit's battlefield. Free relocation — does not exhaust."""
+    tgt = _resolve_wire_token(ctx.engine, token)
+    if tgt is None or tgt.location not in ("battlefield_1", "battlefield_2"):
+        return "move fizzled (target gone)"
+    dest = tgt.location
+    me = _resolve_unit(ctx.engine, ctx.source)[2] if ctx.source else None
+    if me is None:
+        return "move fizzled (source gone)"
+    me.location = dest
+    return f"move {me.card} to {dest}"
+
+
+register_choice_effect(
+    "MAY_MOVE_ME_TO_STUNNED_UNIT_BF",
+    options=_move_me_to_stunned_bf_options,
+    apply=_move_me_to_stunned_bf_apply,
+    optional=True,  # "you MAY move me" — the player can decline
+)
+
+
 @register_effect("READY_LEGEND")
 def _ready_legend(ctx: EffectContext) -> None:
     """Hall of Legends: "ready your legend." Clears the controller's legend's
@@ -1240,6 +1657,223 @@ def _counter_spell(ctx: EffectContext) -> None:
         )
         trash.append(item.card)
         ctx.engine._log_event("effect", f"{item.card} countered → trash")
+
+
+def _counter_chain_item(ctx: EffectContext, item, idx: int) -> None:
+    """Remove a chain item before it resolves. A cast SPELL goes to its caster's
+    trash WITHOUT running its effect or firing ON_PLAY_SPELL; a triggered
+    ABILITY item (no card) is simply dropped. Caller has already located the
+    item and confirmed the chain is open."""
+    from .engine import RequiredTo
+
+    gs = ctx.engine._game_state
+    del gs.pending_chain.items[idx]
+    if item.card is not None:
+        trash = (
+            gs.player_1_trash if item.actor == RequiredTo.PLAYER_1 else gs.player_2_trash
+        )
+        trash.append(item.card)
+        ctx.engine._log_event("effect", f"{item.card} countered → trash")
+    else:
+        ctx.engine._log_event("effect", f"{item.label or 'ability'} countered")
+
+
+@register_effect("COUNTER_SPELL_OR_ABILITY", targeted=True)
+def _counter_spell_or_ability(ctx: EffectContext) -> None:
+    """Not So Fast: counter the chosen enemy spell OR triggered ability on the
+    chain (one that chooses a friendly unit/gear — enforced by the targeting
+    layer). Re-located by stable ``cid`` like COUNTER_SPELL; a spell goes to its
+    caster's trash, an ability item is just removed. No-op if already gone."""
+    gs = ctx.engine._game_state
+    for token in ctx.targets:
+        if not token.startswith("spell_cid:"):
+            continue
+        rest = token.split(":", 1)[1]
+        if not rest.lstrip("-").isdigit():
+            continue
+        idx, item = ctx.engine._chain_item_by_cid(int(rest))
+        if item is None or gs.pending_chain is None:
+            continue
+        _counter_chain_item(ctx, item, idx)
+
+
+@register_effect("ADD_1_CALM_RUNE")
+def _add_1_calm_rune(ctx: EffectContext) -> None:
+    """Seal of Focus: "exhaust: [Reaction] — [Add] 1 calm rune." Adds a READY
+    Calm rune to the controller's pool (a temporary resource for the turn)."""
+    from .engine import Rune
+
+    _rune_pool(ctx.engine, ctx.controller).append(Rune(domain="Calm", exhausted=False))
+
+
+@register_effect("READY_UP_TO_4_RUNES")
+def _ready_up_to_4_runes(ctx: EffectContext) -> None:
+    """Sona, Harmonious: "At the end of your turn, if I'm at a battlefield, ready
+    up to 4 friendly runes." Flips up to 4 of the controller's exhausted runes
+    back to ready immediately (so they're available during the opponent's turn)."""
+    n = 0
+    for rune in _rune_pool(ctx.engine, ctx.controller):
+        if n >= 4:
+            break
+        if rune.exhausted:
+            rune.exhausted = False
+            n += 1
+
+
+def _friendly_units_elsewhere_options(ctx: EffectContext) -> list[str]:
+    """The controller's units at a location OTHER than the source's — the legal
+    swap partners for Tideturner ("a unit you control at another location")."""
+    _, _, src = _resolve_unit(ctx.engine, ctx.source)
+    if src is None:
+        return []
+    units = _units(ctx.engine, ctx.controller)
+    return [
+        _wire_for(ctx.controller.value, i)
+        for i, u in enumerate(units)
+        if u.location != src.location
+    ]
+
+
+def _swap_me_with_unit(ctx: EffectContext, token: str) -> str:
+    """Tideturner: swap the source unit's location with the chosen friendly
+    unit's (move me to its location and it to my original location)."""
+    _, _, src = _resolve_unit(ctx.engine, ctx.source)
+    other = _resolve_wire_token(ctx.engine, token)
+    if src is None or other is None:
+        raise ValueError(f"{token!r} does not point at a swappable friendly unit")
+    src.location, other.location = other.location, src.location
+    return f"swap {src.card} ↔ {other.card}"
+
+
+# Tideturner: "When you play me, you may choose a unit you control at another
+# location. Move me to its location and it to my original location." Optional.
+register_choice_effect(
+    "SWAP_ME_WITH_FRIENDLY_UNIT",
+    options=_friendly_units_elsewhere_options,
+    apply=_swap_me_with_unit,
+    optional=True,
+)
+
+
+@register_effect("COUNTER_SPELL_RETURN_HAND", targeted=True)
+def _counter_spell_return_hand(ctx: EffectContext) -> None:
+    """Abandon: counter the chosen spell, but return it to its owner's HAND
+    instead of the trash (and without running its effect / firing
+    ON_PLAY_SPELL). Re-located by stable ``cid`` like COUNTER_SPELL. Only cast
+    spells are valid targets; a target already gone is a clean no-op."""
+    from .engine import RequiredTo
+
+    gs = ctx.engine._game_state
+    for token in ctx.targets:
+        if not token.startswith("spell_cid:"):
+            continue
+        rest = token.split(":", 1)[1]
+        if not rest.lstrip("-").isdigit():
+            continue
+        idx, item = ctx.engine._chain_item_by_cid(int(rest))
+        if item is None or item.card is None or gs.pending_chain is None:
+            continue
+        del gs.pending_chain.items[idx]
+        hand = gs.player_1_hand if item.actor == RequiredTo.PLAYER_1 else gs.player_2_hand
+        if hand is not None:
+            hand.append(item.card)
+        ctx.engine._log_event("effect", f"{item.card} countered → owner's hand")
+
+
+@register_effect("RETURN_ME_TO_HAND")
+def _return_me_to_hand(ctx: EffectContext) -> None:
+    """Blitzcrank, Impassive: "When I hold, return me to my owner's hand." Pulls
+    the source unit out of play back to its owner's hand (a token just vanishes)."""
+    from .engine import RequiredTo
+
+    units, _, unit = _resolve_unit(ctx.engine, ctx.source)
+    if unit is None or units is None or unit not in units:
+        return
+    side = (ctx.source or "").split(":", 1)[0]
+    owner = RequiredTo.PLAYER_1 if side == RequiredTo.PLAYER_1.value else RequiredTo.PLAYER_2
+    units.remove(unit)
+    if not getattr(unit, "token", False):
+        hand = _hand(ctx.engine, owner)
+        if hand is not None:
+            hand.append(unit.card)
+    ctx.engine._log_event("effect", f"return {unit.card} to hand")
+
+
+@register_effect("MOVE_ANY_FRIENDLY_UNITS_BF_TO_BASE", targeted=True)
+def _move_any_friendly_units_bf_to_base(ctx: EffectContext) -> None:
+    """Emperor's Divide: "Move any number of friendly units at a battlefield to
+    their base." The spell's ``ANY UNIT (n)[BF]`` requirement already captured
+    which units (0+, all at battlefields), so here we just relocate each chosen
+    unit to base."""
+    for ref in ctx.targets:
+        if not ref.startswith(("player_1:", "player_2:")):
+            continue
+        _, _, unit = _resolve_unit(ctx.engine, ref)
+        if unit is not None and unit.location in ("battlefield_1", "battlefield_2"):
+            unit.location = "base"
+
+
+@register_effect("COUNTER_SPELL_UNLESS_2E", targeted=True)
+def _counter_spell_unless_2e(ctx: EffectContext) -> None:
+    """Hard Bargain: "Counter a spell UNLESS its controller pays 2 energy." The
+    decision belongs to the TARGET's controller, so we can't resolve it inline —
+    we QUEUE it (one entry per [Repeat] round) on ``pending_counters``. The
+    engine opens each pay-or-be-countered choice in turn once the spell finishes
+    resolving (see GameEngine._start_next_counter_decision). Only cast spells are
+    valid targets; a target already gone is skipped."""
+    gs = ctx.engine._game_state
+    for token in ctx.targets:
+        if not token.startswith("spell_cid:"):
+            continue
+        rest = token.split(":", 1)[1]
+        if not rest.lstrip("-").isdigit():
+            continue
+        cid = int(rest)
+        _, item = ctx.engine._chain_item_by_cid(cid)
+        if item is None or item.card is None or gs.pending_chain is None:
+            continue
+        gs.pending_counters.append({"caster": ctx.controller.value, "cid": cid, "amount": 2})
+
+
+def _target_cid_from_ctx(ctx: EffectContext) -> int | None:
+    """The single ``spell_cid`` carried in a counter decision's continuation."""
+    for t in ctx.targets:
+        if t.startswith("spell_cid:"):
+            rest = t.split(":", 1)[1]
+            if rest.lstrip("-").isdigit():
+                return int(rest)
+    return None
+
+
+def _pay_2e_options(ctx: EffectContext) -> list[str]:
+    """The target spell's controller (``ctx.controller``) may PAY 2 energy to
+    save it or DECLINE (let it be countered). Only offered when they can afford
+    the 2 — otherwise the engine counters without asking."""
+    return ["pay", "decline"] if ctx.engine.player_energy(ctx.controller) >= 2 else []
+
+
+def _pay_2e_apply(ctx: EffectContext, token: str) -> str:
+    cid = _target_cid_from_ctx(ctx)
+    if token == "pay":
+        ctx.engine.add_energy(ctx.controller, -2)
+        line = "paid 2 energy — not countered"
+    else:  # decline
+        if cid is not None:
+            ctx.engine._counter_target_cid(cid)
+        line = "declined — countered"
+    # Resume any further queued counters ([Repeat] rounds).
+    ctx.engine._start_next_counter_decision()
+    return line
+
+
+# Hard Bargain's opponent decision. Internal (opened by the engine, not tagged on
+# a card); excluded from the implemented-surface report in implemented_surface.py.
+register_choice_effect(
+    "PAY_2E_OR_BE_COUNTERED",
+    options=_pay_2e_options,
+    apply=_pay_2e_apply,
+    optional=False,
+)
 
 
 @register_effect("GIVE_ENEMY_UNITS_-3M_MIN_1")

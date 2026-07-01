@@ -481,6 +481,39 @@ def card_is_reaction(name: str) -> bool:
     return "[reaction]" in card_ability_of(name).lower()
 
 
+def card_is_hidden(name: str) -> bool:
+    """Whether the card carries the ``[Hidden]`` keyword ("Hide now for 1 power
+    to react with later for free."). Read straight from the ability text so it
+    doesn't depend on the derived Keywords column."""
+    return "[hidden]" in card_ability_of(name).lower()
+
+
+def card_has_ambush(name: str) -> bool:
+    """Whether the card has the printed ``[Ambush]`` keyword ("You may play me as
+    a [Reaction] to a battlefield where you have units")."""
+    return "[ambush]" in card_ability_of(name).lower()
+
+
+def card_has_tank(name: str) -> bool:
+    """Whether the card has the printed ``[Tank]`` keyword ("I must be assigned
+    combat damage first")."""
+    return "[tank]" in card_ability_of(name).lower()
+
+
+def card_has_backline(name: str) -> bool:
+    """Whether the card has the printed ``[Backline]`` keyword ("I must be
+    assigned combat damage last")."""
+    return "[backline]" in card_ability_of(name).lower()
+
+
+def card_has_ganking(name: str) -> bool:
+    """Whether the card has the printed ``[Ganking]`` keyword ("I can move from
+    battlefield to battlefield"). Read straight from the ability text so it
+    doesn't depend on the derived Keywords column. (Equipment that GRANTS
+    Ganking is handled separately, via the attached-equipment passive.)"""
+    return "[ganking]" in card_ability_of(name).lower()
+
+
 #: "[Accelerate] (You may pay 1 energy and 1 fury rune as an additional cost to
 #: have me enter ready.)" — capture the energy amount, the power amount, and the
 #: rune DOMAIN of the extra cost.

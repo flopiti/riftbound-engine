@@ -210,9 +210,25 @@ class TreeAndUnknownTests(unittest.TestCase):
         self.assertTrue(requirement_satisfiable(None, state()))
 
     def test_unknown_selector_defaults_to_satisfiable(self):
-        # Selectors we don't model yet (ABILITY, …) ⇒ don't block the card.
-        # (ANY SPELL / GEAR / BATTLEFIELD / TRASH are now handled.)
-        self.assertTrue(requirement_satisfiable("ENEMY ABILITY", state()))
+        # Selectors we don't model yet ⇒ don't block the card. (ANY SPELL /
+        # ABILITY / GEAR / BATTLEFIELD / TRASH are now handled, so use a
+        # genuinely unmodeled selector here.)
+        self.assertTrue(requirement_satisfiable("ENEMY CHAMPION", state()))
+
+    def test_ability_selector_is_now_modeled(self):
+        # ABILITY targets a triggered-ability chain item — needs one present.
+        from types import SimpleNamespace as NS
+
+        base = state()
+        self.assertFalse(  # no chain ⇒ nothing to counter
+            requirement_satisfiable("ENEMY ABILITY", base, caster="player_1")
+        )
+        base.pending_chain = NS(
+            items=[NS(actor=NS(value="player_2"), card=None, targets=[])]
+        )
+        self.assertTrue(
+            requirement_satisfiable("ENEMY ABILITY", base, caster="player_1")
+        )
 
     def test_and_within_group(self):
         # AND within a group forces a DISTINCT pick per phrase: a BF unit for
@@ -1124,13 +1140,17 @@ class FriendlyEnemySideTests(unittest.TestCase):
         self.assertEqual(parse_phrase("ANY SPELL (<=4E AND <=1P)").spell.energy_max, 4)
         self.assertEqual(parse_phrase("ANY SPELL (<=4E AND <=1P)").spell.power_max, 1)
 
-    def test_spell_picks_skips_or_and_ability(self):
+    def test_spell_picks_merges_spell_or_ability_group(self):
         self.assertEqual(len(spell_picks("ANY SPELL")), 1)
         self.assertEqual(len(spell_picks("FRIENDLY UNIT (1)|ANY SPELL")), 1)
-        # OR'd requirement (and the ABILITY half we don't model) forces no pick.
-        self.assertEqual(
-            len(spell_picks("ENEMY SPELL[CHOOSE_FRIENDLY]||ENEMY ABILITY[CHOOSE_FRIENDLY]")), 0
-        )
+        # A pure spell/ability OR group is ONE merged pick that may hit either
+        # kind (Not So Fast).
+        picks = spell_picks("ENEMY SPELL[CHOOSE_FRIENDLY]||ENEMY ABILITY[CHOOSE_FRIENDLY]")
+        self.assertEqual(len(picks), 1)
+        self.assertTrue(picks[0].allow_spell and picks[0].allow_ability)
+        self.assertTrue(picks[0].choose_friendly)
+        # A MIXED OR (spell OR non-spell) is still unmodeled → no forced pick.
+        self.assertEqual(len(spell_picks("ANY SPELL||FRIENDLY UNIT (1)")), 0)
 
     def test_location_phrase_is_handled_and_always_satisfiable(self):
         self.assertIsNotNone(parse_phrase("LOCATION").location)

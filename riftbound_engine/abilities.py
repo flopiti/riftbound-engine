@@ -258,6 +258,26 @@ def attached_deflect_bonus(gears, host_uid: int | None, current_turn: int | None
     return total
 
 
+def attached_grants_ganking(gears, host_uid: int | None, current_turn: int | None = None) -> bool:
+    """True if any EFFECT-TEXT equipment attached to ``host_uid`` grants it the
+    boolean [Ganking] keyword (bare passive code ``GANKING`` — Boots of
+    Swiftness). Mirrors :func:`attached_deflect_bonus` but for a keyword with no
+    amount. ``gears`` is the host controller's PlayedGear list."""
+    if not host_uid:
+        return False
+    for g in gears or []:
+        if getattr(g, "attached_uid", None) != host_uid:
+            continue
+        for ability in triggered_abilities_for(g.card):
+            if not ability.effect_text:
+                continue
+            if not _gear_conditions_met(ability, g, current_turn):
+                continue
+            if "GANKING" in ability.passive_effects:
+                return True
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # Continuous AURAS — a permanent granting a property to a SET of OTHER units
 # (e.g. "your other units here have [Deflect]", "units here have +1 Might").

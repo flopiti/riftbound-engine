@@ -29,6 +29,14 @@ from dataclasses import dataclass, field
 # --------------------------------------------------------------------------- #
 ON_PLAY_UNIT = "ON_PLAY_UNIT"
 ON_PLAY_SPELL = "ON_PLAY_SPELL"
+#: A GEAR is played (committed to base from hand). Emitted for the player who
+#: played it (``controller``); ``source`` is the gear's ref.
+ON_PLAY_GEAR = "ON_PLAY_GEAR"
+#: A card is DISCARDED (moved from a hand to that player's trash). Emitted for
+#: the player who discarded it (``controller``) — including a forced discard the
+#: opponent caused (it's still "you discard"); ``data["card"]`` is the card.
+#: Fires once per card discarded.
+ON_DISCARD = "ON_DISCARD"
 ON_DEATH = "ON_DEATH"
 #: A battlefield is CONQUERED — control of it changes hands (showdown win or an
 #: uncontested move-in). Distinct from holding it across turns.
@@ -72,11 +80,19 @@ ON_CHOOSE = "ON_CHOOSE"
 #: effect that readies it. Emitted per readied unit (SELF scope via ``source``);
 #: ``controller`` is its controller.
 ON_READY = "ON_READY"
+#: An ENEMY unit was STUNNED. Emitted for the player who stunned it
+#: (``controller`` = the stunner); ``source`` / ``data["unit"]`` is the stunned
+#: unit's ref and ``battlefield`` its location (so "at a battlefield" / move-to
+#: abilities can read where). Only emitted for enemy targets — stunning your own
+#: unit (Facebreaker) does not fire "when you stun an enemy unit".
+ON_STUN = "ON_STUN"
 
 EVENT_KINDS = frozenset(
     {
         ON_PLAY_UNIT,
         ON_PLAY_SPELL,
+        ON_PLAY_GEAR,
+        ON_DISCARD,
         ON_DEATH,
         ON_CONQUER,
         ON_HOLD,
@@ -92,6 +108,7 @@ EVENT_KINDS = frozenset(
         ON_RETURN_TO_HAND,
         ON_CHOOSE,
         ON_READY,
+        ON_STUN,
     }
 )
 
@@ -141,6 +158,14 @@ TRIGGER_EVENT_MAP: dict[str, TriggerSpec] = {
     # (ANY); GameEngine narrows it to a caster who chose one of their units at
     # THIS battlefield, capped once per player per turn (._trigger_state_ok).
     "FIRST_TIME_PLAYER_CHOOSE_FRIENDLY_WITH_SPELL_EACH_TURN": TriggerSpec(ON_PLAY_SPELL, ANY),
+    # --- a gear is played ---------------------------------------------------
+    # "When you play a gear, …" (Pit Crew: "ready me"). FRIENDLY: fires for the
+    # player who played the gear.
+    "WHEN_YOU_PLAY_GEAR": TriggerSpec(ON_PLAY_GEAR, FRIENDLY),
+    # --- you discard a card -------------------------------------------------
+    # "When you discard one or more cards, …" (Jinx, Rebel: "ready me and give
+    # me +1 might"). FRIENDLY: fires for the player who discarded.
+    "WHEN_YOU_DISCARD": TriggerSpec(ON_DISCARD, FRIENDLY),
     # --- a unit dies --------------------------------------------------------
     "DEATHKNELL": TriggerSpec(ON_DEATH, SELF),
     "WHEN_FRIENDLY_UNIT_DIES": TriggerSpec(ON_DEATH, FRIENDLY),
@@ -191,11 +216,27 @@ TRIGGER_EVENT_MAP: dict[str, TriggerSpec] = {
     # "When I hold" — this unit holds the battlefield it is on (Ahri, Alluring).
     # HERE scope: the unit sits at the battlefield that held a point.
     "WHEN_I_HOLD": TriggerSpec(ON_HOLD, HERE),
+    # "When you (or an ally) hold" — a player-level hold (Gloomist legend).
+    # FRIENDLY scope: fires when the ability's owner holds, wherever the source
+    # sits (legends have no location).
+    "WHEN_YOU_HOLD": TriggerSpec(ON_HOLD, FRIENDLY),
     # "When I attack or defend" — this unit is in a showdown at its battlefield
     # (Ahri, Inquisitive). HERE scope: it sits at the contested battlefield.
     "WHEN_I_ATTACK_OR_DEFEND": TriggerSpec(ON_SHOWDOWN_BEGIN, HERE),
     # "When you choose OR ready me" (Irelia, Fervent). Either event, SELF scope.
     "WHEN_YOU_CHOOSE_OR_READY_ME": TriggerSpec((ON_CHOOSE, ON_READY), SELF),
+    # "When you choose a friendly unit" (Blade Dancer legend): fires when the
+    # owner targets one of THEIR units. FRIENDLY scope catches "owner did it";
+    # a state gate further restricts to a friendly CHOSEN unit (engine
+    # ._trigger_state_ok), and the chosen unit rides along as the effect target.
+    "WHEN_YOU_CHOOSE_FRIENDLY_UNIT": TriggerSpec(ON_CHOOSE, FRIENDLY),
+    # --- you stun an enemy unit ---------------------------------------------
+    # "When you stun an enemy unit …" (Eclipse Herald, Radiant Dawn, Vex
+    # Mocking). FRIENDLY: fires for the player who did the stunning. The event
+    # carries the stunned unit's ref + battlefield, so a "move me to that
+    # battlefield" ability (Vex) reads it via the fed target.
+    "WHEN_YOU_STUN_ENEMY_UNIT": TriggerSpec(ON_STUN, FRIENDLY),
+    "WHEN_YOU_STUN_ONE_OR_MORE_ENEMY_UNITS": TriggerSpec(ON_STUN, FRIENDLY),
     # --- end of your turn ---------------------------------------------------
     # Dazzling Aurora: "At the end of your turn, reveal … until a unit … play
     # it …". The reveal/play behaviour rides on the bundled effect code; the

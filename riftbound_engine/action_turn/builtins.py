@@ -96,7 +96,9 @@ def _play_unit(ctx: ActionTurnContext) -> None:
             f"(CSV Card Type: {card_type or 'unknown'}; only 'Unit' is allowed)"
         )
 
-    energy_cost = ctx.engine.card_energy_cost(card)
+    # Effective cost applies conditional reductions (Monch: 2 less while the
+    # opponent controls a stunned unit).
+    energy_cost = ctx.engine.effective_card_energy_cost(card, ctx.actor)
     energy = ctx.engine.player_energy(ctx.actor)
     if energy_cost > energy:
         raise ValueError(
@@ -316,6 +318,268 @@ def _play_gear(ctx: ActionTurnContext) -> None:
         ctx.engine._deduct_power_cost(ctx.actor, card)
     hand.pop(index)
     gears.append(PlayedGear(card=card, location="base", exhausted=False))
+
+    # The gear has entered play — fire "when you play a gear" triggers (Pit
+    # Crew). Emitted for the player who played it. NOTE: covers the hand-play
+    # path; gear TOKENS created mid-effect ("play a Gold gear token") do not
+    # emit this yet.
+    from ..triggers import GameEvent
+
+    ctx.engine._emit(
+        GameEvent(
+            kind="ON_PLAY_GEAR",
+            controller=ctx.actor.value,
+            source=f"gear:{ctx.actor.value}:{len(gears) - 1}",
+        )
+    )
+
+
+@register_turn_action("hide")
+def _hide(ctx: ActionTurnContext) -> None:
+    """[Hidden]: place a Hidden-keyword card from hand FACE-DOWN at a battlefield
+    you control, paying 1 Power. It can be revealed and played for free on a
+    later turn (see ``play_hidden``); it's lost if you stop controlling that
+    battlefield.
+
+    Payload: ``<hand_index>:<battlefield>`` (battlefield_1 / battlefield_2).
+    """
+    from ..csv_data import card_is_hidden
+    from ..engine import HiddenCard
+    from ..engine import RequiredTo as RT
+
+    parts = ctx.payload.split(":")
+    if len(parts) != 2:
+        raise ValueError("play:hide requires <hand_index>:<battlefield>")
+    try:
+        index = int(parts[0])
+    except ValueError as e:
+        raise ValueError(f"play:hide index must be an integer, got {parts[0]!r}") from e
+    battlefield = parts[1].strip()
+    if battlefield not in ("battlefield_1", "battlefield_2"):
+        raise ValueError("play:hide battlefield must be battlefield_1 or battlefield_2")
+
+    gs = ctx.engine._game_state
+    if ctx.actor != gs.current_player:
+        raise ValueError("only the active player may hide a card")
+    if (
+        gs.pending_play is not None
+        or gs.pending_spell_choice is not None
+        or gs.pending_chain is not None
+        or gs.pending_showdown is not None
+        or gs.pending_combat is not None
+    ):
+        raise ValueError("cannot hide a card right now — resolve the pending action first")
+
+    if ctx.actor == RT.PLAYER_1:
+        hand = gs.player_1_hand
+    elif ctx.actor == RT.PLAYER_2:
+        hand = gs.player_2_hand
+    else:
+        raise ValueError("hide requires player_1 or player_2")
+    if hand is None:
+        raise ValueError("hand is not initialized")
+    if index < 0 or index >= len(hand):
+        raise ValueError(f"hide index out of range: {index} (hand size {len(hand)})")
+
+    card = hand[index]
+    if not card_is_hidden(card):
+        raise ValueError(f"'{card}' does not have the [Hidden] keyword")
+    if ctx.engine._battlefield_controller(battlefield) != ctx.actor:
+        raise ValueError(f"you must control {battlefield} to hide a card there")
+    limit = ctx.engine._hide_limit(battlefield)
+    if ctx.engine._hidden_count_at(ctx.actor, battlefield) >= limit:
+        raise ValueError(
+            f"you already have {limit} card(s) hidden at {battlefield} "
+            "(its hide limit) — can't hide another there"
+        )
+    if ctx.engine.total_power(ctx.actor) < 1:
+        raise ValueError("hiding a card costs 1 Power — produce Power first")
+
+    ctx.engine._pay_1_power_any(ctx.actor)
+    hand.pop(index)
+    ctx.engine.player_hidden(ctx.actor).append(
+        HiddenCard(card=card, battlefield=battlefield, hidden_on_turn=gs.total_turn_number)
+    )
+
+
+@register_turn_action("ambush")
+def _ambush(ctx: ActionTurnContext) -> None:
+    """[Ambush]: play a Unit from hand as a Reaction to a battlefield where you
+    already have a unit, paying its normal cost. Reaction timing only — during an
+    open chain (you hold priority) or a showdown (you hold focus). The unit enters
+    exhausted (unless a conditional "enter ready" applies) and joins any showdown
+    at that battlefield.
+
+    Payload: ``<hand_index>:<battlefield>``.
+    """
+    from ..csv_data import card_has_ambush, card_type_of
+    from ..engine import PlayedUnit
+    from ..engine import RequiredTo as RT
+    from ..triggers import GameEvent
+
+    parts = ctx.payload.split(":")
+    if len(parts) != 2:
+        raise ValueError("play:ambush requires <hand_index>:<battlefield>")
+    try:
+        index = int(parts[0])
+    except ValueError as e:
+        raise ValueError(f"play:ambush index must be an integer, got {parts[0]!r}") from e
+    bf = parts[1].strip()
+    if bf not in ("battlefield_1", "battlefield_2"):
+        raise ValueError("play:ambush battlefield must be battlefield_1 or battlefield_2")
+
+    gs = ctx.engine._game_state
+    # Reaction timing: an open chain (priority holder) OR a showdown (focus holder).
+    if gs.pending_chain is not None:
+        if ctx.actor != gs.pending_chain.priority:
+            raise ValueError("you don't hold priority to [Ambush] right now")
+    elif gs.pending_showdown is not None:
+        if ctx.actor != gs.pending_showdown.focus_holder:
+            raise ValueError("you don't hold focus to [Ambush] right now")
+    else:
+        raise ValueError(
+            "[Ambush] can only be played at reaction timing — an open chain or a showdown"
+        )
+
+    hand = gs.player_1_hand if ctx.actor == RT.PLAYER_1 else gs.player_2_hand
+    if hand is None or not (0 <= index < len(hand)):
+        raise ValueError(f"play:ambush index out of range: {index}")
+    card = hand[index]
+    if card_type_of(card) != "Unit" or not card_has_ambush(card):
+        raise ValueError(f"'{card}' does not have the [Ambush] keyword")
+    if not any(u.location == bf for u in ctx.engine._units_for(ctx.actor.value)):
+        raise ValueError(f"[Ambush] requires a unit you control at {bf}")
+
+    energy_cost = ctx.engine.effective_card_energy_cost(card, ctx.actor)
+    if energy_cost > ctx.engine.player_energy(ctx.actor):
+        raise ValueError(f"cannot [Ambush] '{card}': not enough Energy")
+    power_cost = ctx.engine.card_power_cost(card)
+    if power_cost > 0 and not ctx.engine.can_afford_power_cost(ctx.actor, card):
+        raise ValueError(f"cannot [Ambush] '{card}': not enough Power")
+    if energy_cost > 0:
+        ctx.engine.add_energy(ctx.actor, -energy_cost)
+    if power_cost > 0:
+        ctx.engine._deduct_power_cost(ctx.actor, card)
+
+    hand.pop(index)
+    units = ctx.engine._units_for(ctx.actor.value)
+    enters_ready = ctx.engine.unit_enters_ready(card, ctx.actor)
+    units.append(PlayedUnit(card=card, location=bf, exhausted=not enters_ready))
+    idx = len(units) - 1
+    # Playing during a window continues the fight: reset the relevant pass
+    # counter (and lock a showdown, like playing a spell does).
+    if gs.pending_chain is not None:
+        gs.pending_chain.consecutive_passes = 0
+    elif gs.pending_showdown is not None:
+        gs.pending_showdown.focus_passes = 0
+        gs.pending_showdown.locked = True
+    ctx.engine._emit(
+        GameEvent(kind="ON_PLAY_UNIT", controller=ctx.actor.value,
+                  source=f"{ctx.actor.value}:{idx}", battlefield=bf)
+    )
+    ctx.engine._drain_triggers()
+
+
+@register_turn_action("play_hidden")
+def _play_hidden(ctx: ActionTurnContext) -> None:
+    """Reveal a face-down [Hidden] card and play it for FREE — at ACTION timing
+    on your turn OR as a REACTION (during a chain you hold priority in). Only on
+    a turn AFTER it was hidden, and only while you still control its battlefield.
+
+    Payload: the 0-based index into your hidden list. How it enters play:
+      * Unit  → straight into play EXHAUSTED at the battlefield it was hidden at
+                (no location pick), firing its "when you play me" triggers.
+      * Gear  → straight to base, ready.
+      * Spell → routed through the normal spell path (onto the chain as a
+                reaction, or cast at action timing), granted its cost so the
+                normal deduction nets to zero (free).
+    """
+    from ..csv_data import card_type_of
+    from ..engine import PlayedGear, PlayedUnit
+    from ..engine import RequiredTo as RT
+    from ..triggers import GameEvent
+    from .registry import _REGISTRY
+
+    payload = ctx.payload.strip()
+    try:
+        idx = int(payload)
+    except ValueError as e:
+        raise ValueError(f"play:play_hidden requires an integer index, got {payload!r}") from e
+
+    gs = ctx.engine._game_state
+    hidden = ctx.engine.player_hidden(ctx.actor)
+    if idx < 0 or idx >= len(hidden):
+        raise ValueError(f"play_hidden index out of range: {idx} (have {len(hidden)})")
+    entry = hidden[idx]
+    if entry.hidden_on_turn >= gs.total_turn_number:
+        raise ValueError("a hidden card can only be revealed on a turn AFTER it was hidden")
+    if ctx.engine._battlefield_controller(entry.battlefield) != ctx.actor:
+        raise ValueError("you no longer control the battlefield this card is hidden at")
+
+    card = entry.card
+    ctype = card_type_of(card) or ""
+
+    if ctype == "Unit":
+        units = gs.player_1_units if ctx.actor == RT.PLAYER_1 else gs.player_2_units
+        hidden.pop(idx)
+        units.append(PlayedUnit(card=card, location=entry.battlefield, exhausted=True))
+        unit_index = len(units) - 1
+        ctx.engine._emit(
+            GameEvent(
+                kind="ON_PLAY_UNIT",
+                controller=ctx.actor.value,
+                source=f"{ctx.actor.value}:{unit_index}",
+                battlefield=entry.battlefield,
+            )
+        )
+        return
+
+    if ctype == "Gear":
+        gears = gs.player_1_gears if ctx.actor == RT.PLAYER_1 else gs.player_2_gears
+        hidden.pop(idx)
+        gears.append(PlayedGear(card=card, location="base", exhausted=False))
+        ctx.engine._emit(
+            GameEvent(
+                kind="ON_PLAY_GEAR",
+                controller=ctx.actor.value,
+                source=f"gear:{ctx.actor.value}:{len(gears) - 1}",
+            )
+        )
+        return
+
+    if ctype != "Spell":
+        raise ValueError(f"cannot reveal '{card}': unsupported card type for [Hidden]")
+
+    # Spell: route through the normal spell path (chain reaction / action cast),
+    # granting exactly its cost so the handler's deduction nets to zero (free).
+    hand = gs.player_1_hand if ctx.actor == RT.PLAYER_1 else gs.player_2_hand
+    if hand is None:
+        raise ValueError("hand is not initialized")
+    energy_cost = ctx.engine.card_energy_cost(card)
+    power_cost = ctx.engine.card_power_cost(card)
+    domains = ctx.engine.card_domains(card)
+    if power_cost > 0 and not domains:
+        raise ValueError(f"'{card}' has a Power cost but no domain — cannot reveal")
+    if energy_cost:
+        ctx.engine.add_energy(ctx.actor, energy_cost)
+    if power_cost:
+        ctx.engine.add_power(ctx.actor, domains[0], power_cost)
+    hidden.pop(idx)
+    hand.append(card)
+    hi = len(hand) - 1
+    try:
+        _REGISTRY["play_spell"](
+            ActionTurnContext(engine=ctx.engine, actor=ctx.actor, verb="play_spell", payload=str(hi))
+        )
+    except Exception:
+        if hand and hi < len(hand) and hand[hi] == card:
+            hand.pop(hi)
+        hidden.insert(idx, entry)
+        if energy_cost:
+            ctx.engine.add_energy(ctx.actor, -energy_cost)
+        if power_cost:
+            ctx.engine.add_power(ctx.actor, domains[0], -power_cost)
+        raise
 
 
 @register_turn_action("play_spell")
@@ -565,7 +829,10 @@ def _choose_location(ctx: ActionTurnContext) -> None:
     # enter ready, but that's a SEPARATE decision offered right after this
     # location choice (see below / choose_accelerate).
     card = pending.card
-    units.append(PlayedUnit(card=card, location=location, exhausted=True))
+    # Units normally enter EXHAUSTED (summoning sickness); a card with a
+    # conditional "enter ready" passive (Leona, Zealot / Monch) may enter ready.
+    enters_ready = ctx.engine.unit_enters_ready(card, ctx.actor)
+    units.append(PlayedUnit(card=card, location=location, exhausted=not enters_ready))
     gs.pending_play = None
 
     unit_index = len(units) - 1
@@ -1289,6 +1556,7 @@ def _choose_ability_cost(ctx: ActionTurnContext) -> None:
                     trigger=pend.trigger,
                     event_kind=pend.event_kind,
                     conditions=tuple(pend.conditions),
+                    targets=tuple(pend.targets),
                     context_card=pend.context_card,
                     label=pend.label,
                 ),
@@ -1758,12 +2026,14 @@ def _move_unit(ctx: ActionTurnContext) -> None:
             f"unit at index {index} ({unit.card!r}) is already at {destination!r}"
         )
 
-    # Base ↔ battlefield only; BF ↔ BF is disallowed.
+    # Base ↔ battlefield always; BF ↔ BF only for [Ganking] units ("I can move
+    # from battlefield to battlefield"), otherwise route through base.
     if unit.location != "base" and destination != "base":
-        raise ValueError(
-            f"cannot move {unit.card!r} from {unit.location!r} to {destination!r}: "
-            "battlefield-to-battlefield moves are not allowed; route through base"
-        )
+        if not ctx.engine.unit_has_ganking(ctx.actor.value, index):
+            raise ValueError(
+                f"cannot move {unit.card!r} from {unit.location!r} to {destination!r}: "
+                "battlefield-to-battlefield moves need [Ganking]; route through base"
+            )
 
     # Determine the current controller of the destination battlefield (if any).
     # Moves to a battlefield the active player already controls just
@@ -2301,17 +2571,20 @@ def _assign_damage(ctx: ActionTurnContext) -> None:
             f"available damage ({budget})"
         )
 
-    # Enforce the maximal-kill rule: leftover damage must be unable to
-    # finish off any surviving enemy unit (otherwise you were required to
-    # assign lethal to it too — no wasting damage that could kill).
-    leftover = budget - total_cost
+    # Enforce the maximal-kill rule AND [Tank]/[Backline] assignment ordering
+    # via the shared checker (same logic the option enumeration uses, so a
+    # committed set can't disagree with what was offered). [Tank] units must be
+    # assigned lethal before others; [Backline] units last.
     chosen = set(target_indices)
-    survivors = [m for i, m in bf_targets.items() if i not in chosen]
-    if survivors and leftover >= min(survivors):
+    tiers = {i: ctx.engine._combat_tier(opponent_units[i].card) for i in bf_targets}
+    if not ctx.engine._kill_set_ok(bf_targets, tiers, chosen, budget):
+        leftover = budget - total_cost
+        survivors = [m for i, m in bf_targets.items() if i not in chosen]
         raise ValueError(
-            f"play:assign_damage leaves {leftover} damage that must still be "
-            f"assigned as lethal to another enemy unit (cheapest survivor needs "
-            f"{min(survivors)}) — assign damage until no further unit can be killed"
+            "play:assign_damage is not a legal assignment — it must be maximal "
+            f"(leftover {leftover}; cheapest survivor "
+            f"{min(survivors) if survivors else 0}) and must respect [Tank] "
+            "(assign first) / [Backline] (assign last) ordering"
         )
 
     # Record this player's commit.

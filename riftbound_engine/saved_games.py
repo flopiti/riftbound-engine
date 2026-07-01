@@ -172,6 +172,38 @@ def update_saved_game(
     return None
 
 
+def upsert_saved_game(
+    game_id: str,
+    name: str,
+    description: str,
+    setup: dict[str, Any],
+    moves: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create-or-overwrite a game at an EXACT id (unlike add_saved_game, which
+    slugifies + de-dupes). Used for the reserved rolling "autosave" slot so every
+    move overwrites the same entry instead of piling up new ones."""
+    with _lock:
+        store = _read_store()
+        for g in store["games"]:
+            if g.get("id") == game_id:
+                g["setup"] = setup
+                g["moves"] = moves
+                g["updated_at"] = time.time()
+                _write_store(store)
+                return g
+        game = {
+            "id": game_id,
+            "name": name.strip() or game_id,
+            "description": description.strip(),
+            "created_at": time.time(),
+            "setup": setup,
+            "moves": moves,
+        }
+        store["games"].append(game)
+        _write_store(store)
+        return game
+
+
 def delete_saved_game(game_id: str) -> bool:
     with _lock:
         store = _read_store()

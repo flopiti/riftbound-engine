@@ -8,6 +8,7 @@ import os
 import queue as _queue
 import random
 import re
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -37,7 +38,11 @@ from .saved_games import (
     get_saved_game,
     list_saved_games,
     update_saved_game,
+    upsert_saved_game,
 )
+
+#: Reserved id for the rolling autosave slot updated after every branch move.
+AUTOSAVE_ID = "autosave"
 from .search import (
     SearchResult,
     apply_deck_changes,
@@ -653,6 +658,7 @@ def _serialize_decks() -> list[dict[str, Any]]:
             "battlefields": [],
             "runes_total": 0,
             "sideboard_count": 0,
+            "cards": [],
             "error": None,
         }
         try:
@@ -663,6 +669,22 @@ def _serialize_decks() -> list[dict[str, Any]]:
             summary["battlefields"] = list(parsed.battlefields)
             summary["runes_total"] = sum(count for _, count in parsed.runes)
             summary["sideboard_count"] = len(parsed.sideboard)
+            # Distinct card NAMES whose implementation matters — legend,
+            # champion, every main-deck card, and the battlefields. Runes are
+            # basic resources (excluded). Deduped so a 3-of counts once. Lets
+            # the Decks tab show a per-deck "% implemented" without re-fetching
+            # each deck's text.
+            def _flat(v: Any) -> list[str]:
+                if v is None:
+                    return []
+                return [str(x) for x in v] if isinstance(v, (list, tuple)) else [str(v)]
+
+            names: list[str] = []
+            names += _flat(parsed.legend)
+            names += _flat(parsed.champion)
+            names += list(parsed.main_deck)
+            names += list(parsed.battlefields)
+            summary["cards"] = sorted({n for n in names if n})
         except Exception as exc:  # pragma: no cover — surface as warning in UI
             summary["error"] = str(exc)
         out.append(summary)
@@ -727,6 +749,24 @@ def _capture_current_save() -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if not s.get("intent_only") and not s.get("setup")
     ]
     return setup, moves
+
+
+def _autosave() -> None:
+    """Persist the CURRENT branch (setup + visited path) to the rolling
+    ``autosave`` slot. Called after every branch move — forward OR back — so the
+    saved game always mirrors where the player is. Best-effort: a save failure
+    must never break a move. Caller must hold ``_engine_lock``."""
+    try:
+        setup, moves = _capture_current_save()
+        upsert_saved_game(
+            AUTOSAVE_ID,
+            name="Autosave",
+            description="Automatically saved after each move.",
+            setup=setup,
+            moves=moves,
+        )
+    except Exception as exc:  # never let autosave failure abort a move
+        print(f"[autosave] failed: {exc}", file=sys.stderr, flush=True)
 
 
 def _serialize_fake_fill(cfg: FakeFillConfig) -> dict[str, Any]:
@@ -1064,6 +1104,9 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 + (1 if u.buffed else 0)
                 + attached_might_bonus(gs.player_1_gears, f"player_1:{i}", gs.total_turn_number),
                 "token": u.token,
+                # STUNNED: doesn't deal combat damage; clears on its controller's
+                # next Awake. Surfaced so the UI and stun-matter cards can read it.
+                "stunned": u.stunned,
                 # Marked damage (rules 142/143.3); the unit dies at cleanup once
                 # this is ≥ its effective Might. Surfaced so the UI can show it.
                 "damage": u.damage,
@@ -1082,6 +1125,7 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 + (1 if u.buffed else 0)
                 + attached_might_bonus(gs.player_2_gears, f"player_2:{i}", gs.total_turn_number),
                 "token": u.token,
+                "stunned": u.stunned,
                 "damage": u.damage,
             }
             for i, u in enumerate(gs.player_2_units)
@@ -2011,6 +2055,7 @@ def create_app() -> FastAPI:
                 _branch_visited.add(_branch_path_key(_branch_path[:i]))
 
             _branch_nodes_visited += 1
+            _autosave()  # persist the branch after every forward move
             return _serialize_branch()
 
     @app.post("/branch/search")
@@ -2207,6 +2252,7 @@ def create_app() -> FastAPI:
             _restore_state(target_state)
             _branch_path = _branch_path[:new_len]
             _branch_states = _branch_states[:new_len]
+            _autosave()  # persist the branch after every rewind too
             return _serialize_branch()
 
     @app.post("/branch/reset")
