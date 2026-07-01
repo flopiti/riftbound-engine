@@ -12,7 +12,8 @@ Cards' triggered abilities (authored in the front-end taxonomy wizard,
 
 - `triggers.py` — `GameEvent` (an immutable "what just happened" record),
   the event-kind vocabulary (`ON_PLAY_UNIT`, `ON_PLAY_SPELL`, `ON_DEATH`,
-  `ON_CONQUER`, `TURN_START`, `ON_CHANNEL`, `ON_DRAW`), and
+  `ON_CONQUER`, `ON_HOLD`, `ON_SCORE`, `ON_DEFEND`, `ON_SHOWDOWN_BEGIN`,
+  `TURN_START`, `TURN_END`, `ON_CHANNEL`, `ON_DRAW`, `ON_MOVE`), and
   `TRIGGER_EVENT_MAP` mapping each wizard trigger code to an event + a scope
   (`SELF` / `FRIENDLY` / `ENEMY` / `ANY` / `HERE`). `trigger_matches` is the
   pure predicate deciding whether a card's trigger responds to an event.
@@ -24,7 +25,8 @@ Cards' triggered abilities (authored in the front-end taxonomy wizard,
   `CHANNEL_1_RUNE`, `CHANNEL_1_RUNE_EXHAUSTED`,
   `EACH_PLAYER_CHANNEL_1_RUNE_EXHAUSTED`,
   `PUT_TOP_2_CARDS_OF_MAIN_DECK_INTO_TRASH`, `OPPONENT_DISCARD_1`,
-  `DISCARD_1_DRAW_1`, `GIVE_ME_+1`, `GIVE_ME_+2M`, `ADDITIONAL_2M`.
+  `DISCARD_1_DRAW_<n>` (dynamic family — any N, e.g. `_DRAW_1`/`_DRAW_2`),
+  `GIVE_ME_+1`, `GIVE_ME_+2M`, `ADDITIONAL_2M`.
   Unregistered codes resolve as a recorded no-op (logged, never an error) so
   the chain always drains; the Implementation Planner tab tracks the rest.
 
@@ -219,12 +221,63 @@ battlefield. Rules:
       a *fresh* unit onto an opponent BF, moving a unit that's already
       in play across the line is allowed and forces the contest.
 
+Opening a showdown emits two location-scoped events the moment the unit
+walks in (queued, then drained on the next `start()` ahead of the
+muster/focus window):
+
+- `ON_DEFEND` — only when the battlefield had a prior controller (the
+  *defender*). Powers `WHEN_YOU_DEFEND_HERE`. An uncontrolled battlefield
+  has no defender, so it emits no `ON_DEFEND`.
+- `ON_SHOWDOWN_BEGIN` — always, regardless of who held the battlefield
+  (or no one). Powers `WHEN_SHOWDOWN_BEGINS_HERE`, a `HERE`-scoped trigger
+  that fires for cards on *either* side sitting at the contested
+  battlefield: the invaders that just moved in, the defender's units, and
+  the battlefield card itself. The event's `controller` is the initiator,
+  which only matters for a battlefield-card-sourced ability (`_emit`'s
+  fallback); `HERE`-scoped unit abilities resolve under their own
+  controller. Fires once, on the move that opens the showdown — muster /
+  reinforce moves into an already-open showdown do not re-fire it.
+
 While a showdown is pending, both players' option menus collapse to a
 single `play:pass_showdown` (initiator first, then opponent). When both
 have passed, the battlefield's controller is set to the initiator (the
 current minimal model — proper unit-vs-unit resolution is still a
 placeholder) and the initiator scores 1 point (capped at 1 per BF per
 turn via `award_bf_point`).
+
+## 3b. Damage, healing, and the cleanup sweep
+
+Damage is a **persistent, per-unit marked value** (`PlayedUnit.damage`),
+faithful to Riftbound rules 142/143 rather than an instant kill check.
+
+- **Deal** (rule 417) — `GameEngine.deal_damage(ref, amount)` marks
+  `amount` on the unit. Only valid damage (≥1) is dealt. It does NOT kill
+  on the spot; death is resolved by the cleanup sweep. Damage from
+  repeated hits **accumulates**.
+- **Bonus Damage** (rules 712–715) — `_bonus_damage_at(slot)` adds +1 per
+  battlefield carrying `SPELLS_ABILITIES_DEALING_DMG_DEAL_1_BONUS` (Void
+  Gate) when the target sits there. Applied per-target separately and only
+  because a Deal actually occurs.
+- **Cleanup lethal sweep** (rules 323.4/323.5) — `_lethal_sweep()` finds
+  every unit whose marked damage ≥ its effective Might, fires its
+  Deathknell/`ON_DEATH` (respecting would-die replacements like Guardian
+  Angel → recall, and tokens), then trashes it. It repeats until the board
+  is stable (322). Invoked after each chain item resolves (`_resolve_chain`)
+  and after the Beginning-Phase battlefield damage.
+- **Heal** (rule 418) — `_heal_all_damage()` clears all marked damage at
+  the end of each player's turn (143.3.b.1) and during Combat Cleanup
+  (143.3.b.2). Damage also clears when a unit leaves the board (rule 110).
+- **Combat** is unified onto this path: committed combat kills mark lethal
+  damage on the assigned units, which the sweep then resolves, and
+  survivors heal at Combat Cleanup. (Partial/non-lethal combat damage
+  distribution is not separately tracked — combat still computes maximal
+  lethal kill-sets.)
+
+Damage effects built on this: `DEAL_3_DAMAGE` (Wages of Pain),
+`DEAL_6_TO_2_UNITS` (Singularity, 6 to each target), and
+`DEAL_1_TO_3_UNITS_SAME_LOC` (Bellows Breath) are targeted spell effects;
+`DEAL_1_DAMAGE_TO_UNITS_HERE` (Frozen Fortress) deals 1 to each unit at its
+battlefield at the start of each Beginning Phase, before HOLD scoring.
 
 ## 4. Summoning sickness
 

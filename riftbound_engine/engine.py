@@ -14,6 +14,16 @@ from .deck_files import deck_data_for_id, list_deck_ids
 from .protocol import ApplyVerb, RequiredStep, apply_prefix
 from .triggers import EventLogEntry, GameEvent, TriggeredEffect, trigger_matches
 
+#: Triggers whose effect ACTS ON the unit the event was about (the moved /
+#: returned / chosen unit), so the engine feeds that unit as the ability's
+#: target instead of asking for a separate pick.
+_EVENT_UNIT_TARGET_TRIGGERS = frozenset(
+    {
+        "WHEN_UNIT_MOVE_FROM_HERE",  # "give IT +1 might"
+        "WHEN_YOU_MOVE_ENEMY_UNIT",  # "[Stun] IT"
+    }
+)
+
 
 DECK_BATTLEFIELD_COUNT = 3
 DECK_CHOSEN_CHAMPION_COUNT = 1
@@ -26,6 +36,11 @@ MULLIGAN_MAX_BOTTOM = 2
 CHANNEL_RUNES_FIRST_IN_GAME = 2
 CHANNEL_RUNES_SECOND_IN_GAME = 3
 CHANNEL_RUNES_AFTER = 2
+#: Victory Score — the point total a player must reach to win the game (rules
+#: §478.3). 8 is the standard 1v1 value (the rules' default competitive modes;
+#: team modes use 11). Kept as a single constant so a mode that wants a
+#: different threshold changes only this.
+VICTORY_SCORE = 8
 
 
 @dataclass
@@ -126,6 +141,15 @@ class PlayedUnit:
     #: Printed [Shield] and equipment [Shield] are NOT stored here — they're read
     #: live from the card / attached gear.
     bonus_shield: int = 0
+    #: This-TURN [Deflect] granted by effects ("give a unit [Deflect] this turn").
+    #: Like ``bonus_shield`` it resets at end of turn and STACKS with the unit's
+    #: printed [Deflect] and any equipment-granted DEFLECT_N (see
+    #: ``unit_deflect_count``). Deflect taxes an opponent 1 Power per stack to
+    #: choose this unit as an ability target.
+    bonus_deflect: int = 0
+    #: This-TURN "can't move" status (Vex's "they can't move it"). While set, the
+    #: unit is not offered any move option; cleared at end of turn like buffs.
+    cant_move: bool = False
     #: Stable per-game identity, assigned when the unit enters play and never
     #: reused. Positional refs ("player_1:0") shift when other units leave
     #: play, so a target chosen at cast time is captured BY UID and re-located
@@ -138,6 +162,23 @@ class PlayedUnit:
     #: or bounced/recalled to hand) they CEASE TO EXIST rather than going to
     #: their owner's trash or hand. Every leave-play path checks this flag.
     token: bool = False
+    #: Whether this unit carries a [Buff]. A buff is a DISTINCT, PERMANENT marker
+    #: (not a stat tweak): it grants +1 Might (folded into effective_unit_might)
+    #: and is the on/off state other buff-matter cares about ("while I'm buffed",
+    #: "spend a buff"). A unit can hold at most ONE buff — buffing an
+    #: already-buffed unit is a no-op, so additional buffs do NOT stack. Unlike
+    #: ``bonus_might`` (a this-turn modifier reset each end of turn), a buff
+    #: PERSISTS across turns until something explicitly spends/removes it.
+    buffed: bool = False
+    #: MARKED DAMAGE (Riftbound rules 142/143.3). A persistent, per-unit value
+    #: that ACCUMULATES as spells/abilities/combat Deal damage to the unit. A
+    #: unit is Killed when its marked damage is nonzero and ≥ its Might — but
+    #: that is resolved by the cleanup sweep (rules 323.4/323.5), not at the
+    #: instant the damage lands. Healing (rule 418) clears it: at the end of
+    #: each player's turn, during a Combat Cleanup, and whenever the unit leaves
+    #: the Board to a non-Board zone (rule 110). Unlike ``bonus_might`` this is
+    #: NOT a Might tweak — it's tracked separately and compared against Might.
+    damage: int = 0
 
 
 @dataclass
@@ -353,6 +394,35 @@ class PendingSpellRepeat:
     card: str
     cost: dict
     rounds: list[list[str]] = field(default_factory=list)
+
+
+@dataclass
+class PendingDeflect:
+    """A spell/ability that chose one or more OPPONENT units with [Deflect] is
+    paused before it lands on the chain: its controller (``actor``) decides, per
+    Deflect target, whether to pay the tax (1 Power of any domain per stack) to
+    keep that target or DECLINE/forgo it (the target is dropped; the rest of the
+    ability still resolves).
+
+    ``queue`` is the remaining decisions, each ``(target_ref, stacks, card)``;
+    ``dropped`` accumulates declined/unaffordable target refs. Once ``queue`` is
+    empty the deferred push runs with dropped targets pruned. The push payload is
+    captured by ``kind`` ("spell" → ``card``/``rounds``; "activated" →
+    ``source``/``effects``/``targets``/``target_uids``/``requirement``)."""
+
+    actor: RequiredTo
+    kind: str
+    queue: list[tuple[str, int, str]] = field(default_factory=list)
+    dropped: list[str] = field(default_factory=list)
+    # spell continuation
+    card: str | None = None
+    rounds: list[list[str]] = field(default_factory=list)
+    # activated-ability continuation
+    source: str | None = None
+    effects: tuple[str, ...] = ()
+    targets: list[str] = field(default_factory=list)
+    target_uids: list = field(default_factory=list)
+    requirement: str = ""
 
 
 @dataclass
@@ -662,6 +732,11 @@ class GameState:
     player_2_library: list[str] | None = None
     player_1_mulligan_hand: list[str] | None = None
     player_2_mulligan_hand: list[str] | None = None
+    #: Indices (into the 4-card mulligan hand) chosen to bottom SO FAR during the
+    #: one-card-at-a-time mulligan, before it's finalized. Capped at
+    #: MULLIGAN_MAX_BOTTOM; cleared when the player's mulligan resolves.
+    player_1_mulligan_bottomed: list[int] = field(default_factory=list)
+    player_2_mulligan_bottomed: list[int] = field(default_factory=list)
     mulligan_player_1_resolved: bool = False
     mulligan_player_2_resolved: bool = False
     player_1_hand: list[str] | None = None
@@ -697,6 +772,9 @@ class GameState:
     #: Set while a just-played [Repeat] spell waits for the caster to decide
     #: whether to pay the additional cost and repeat. See PendingSpellRepeat.
     pending_spell_repeat: "PendingSpellRepeat | None" = None
+    #: A spell/ability that chose an opponent's [Deflect] unit is paused here for
+    #: the pay-or-drop decision before it lands on the chain. See PendingDeflect.
+    pending_deflect: "PendingDeflect | None" = None
     #: Set while a just-played [Accelerate] unit waits for its controller to
     #: decide whether to pay the extra cost to enter ready. See PendingAccelerate.
     pending_accelerate: "PendingAccelerate | None" = None
@@ -746,6 +824,15 @@ class GameState:
     #: Energy, Power resets at turn end — it does NOT persist across turns.
     player_1_power: dict[str, int] = field(default_factory=dict)
     player_2_power: dict[str, int] = field(default_factory=dict)
+    #: Minimal legend state: whether each player's legend is currently exhausted.
+    #: Legends aren't otherwise modelled yet; this exists so "ready your legend"
+    #: (Hall of Legends) and the Awake step have something to clear.
+    player_1_legend_exhausted: bool = False
+    player_2_legend_exhausted: bool = False
+    #: Runes to ready when THIS turn ends (Targon's Peak: "ready up to 2 runes at
+    #: the end of this turn"). Applied + reset in _advance_turn; sources add up.
+    player_1_end_turn_ready_runes: int = 0
+    player_2_end_turn_ready_runes: int = 0
     #: Shuffled rune deck (remaining); draws from the front. Set when the game starts after mulligan.
     player_1_rune_library: list[Rune] | None = None
     player_2_rune_library: list[Rune] | None = None
@@ -770,10 +857,19 @@ class GameState:
     #: per turn, regardless of the source.
     player_1_score: int = 0
     player_2_score: int = 0
+    #: The player who has WON the game (``RequiredTo.value`` string), or None
+    #: while it's still going. Set the moment someone reaches the Victory Score
+    #: with strictly more points than their opponent (see ``_check_victory``);
+    #: once set it never changes — the game is over.
+    winner: str | None = None
     #: Battlefields that have already awarded a point this turn (e.g. via
     #: B-phase HOLD or a showdown win). Cleared on ``_advance_turn`` so
     #: each new turn starts fresh.
     scored_bfs_this_turn: set[str] = field(default_factory=set)
+    #: "First time each turn" caps for FIRST_TIME_PLAYER_CHOOSE_FRIENDLY_WITH_
+    #: SPELL_EACH_TURN (The Dreaming Tree), as ``"<battlefield>:<player>"`` keys.
+    #: Cleared on ``_advance_turn`` so the once-per-turn draw resets.
+    first_choose_friendly_fired_this_turn: set[str] = field(default_factory=set)
     #: Counts each time a player begins their turn (first active turn after setup = 1).
     total_turn_number: int = 0
     #: How many turns this player has started (e.g. 5 = that player's 5th turn).
@@ -849,7 +945,9 @@ class GameEngine:
                 for e in self._game_state.action_log
             ],
             event_feed=[
-                EventLogEntry(sequence=e.sequence, kind=e.kind, text=e.text)
+                EventLogEntry(
+                    sequence=e.sequence, kind=e.kind, text=e.text, code=e.code, card=e.card
+                )
                 for e in self._game_state.event_feed
             ],
             first_turn_choice=self._game_state.first_turn_choice,
@@ -870,11 +968,11 @@ class GameEngine:
             player_1_hand=list(self._game_state.player_1_hand) if self._game_state.player_1_hand is not None else None,
             player_2_hand=list(self._game_state.player_2_hand) if self._game_state.player_2_hand is not None else None,
             player_1_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, uid=u.uid, token=u.token)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, bonus_deflect=u.bonus_deflect, cant_move=u.cant_move, uid=u.uid, token=u.token, buffed=u.buffed, damage=u.damage)
                 for u in self._game_state.player_1_units
             ],
             player_2_units=[
-                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, uid=u.uid, token=u.token)
+                PlayedUnit(card=u.card, location=u.location, exhausted=u.exhausted, bonus_might=u.bonus_might, bonus_shield=u.bonus_shield, bonus_deflect=u.bonus_deflect, cant_move=u.cant_move, uid=u.uid, token=u.token, buffed=u.buffed, damage=u.damage)
                 for u in self._game_state.player_2_units
             ],
             player_1_spells=[
@@ -903,6 +1001,7 @@ class GameEngine:
                     attached_uid=g.attached_uid,
                     attached_to=g.attached_to,
                     attached_on_turn=g.attached_on_turn,
+                    token=g.token,
                 )
                 for g in self._game_state.player_1_gears
             ],
@@ -914,6 +1013,7 @@ class GameEngine:
                     attached_uid=g.attached_uid,
                     attached_to=g.attached_to,
                     attached_on_turn=g.attached_on_turn,
+                    token=g.token,
                 )
                 for g in self._game_state.player_2_gears
             ],
@@ -958,6 +1058,23 @@ class GameEngine:
                         "any_power": int(self._game_state.pending_spell_repeat.cost.get("any_power", 0)),
                     },
                     rounds=[list(r) for r in self._game_state.pending_spell_repeat.rounds],
+                )
+            ),
+            pending_deflect=(
+                None
+                if self._game_state.pending_deflect is None
+                else PendingDeflect(
+                    actor=self._game_state.pending_deflect.actor,
+                    kind=self._game_state.pending_deflect.kind,
+                    queue=[tuple(q) for q in self._game_state.pending_deflect.queue],
+                    dropped=list(self._game_state.pending_deflect.dropped),
+                    card=self._game_state.pending_deflect.card,
+                    rounds=[list(r) for r in self._game_state.pending_deflect.rounds],
+                    source=self._game_state.pending_deflect.source,
+                    effects=tuple(self._game_state.pending_deflect.effects),
+                    targets=list(self._game_state.pending_deflect.targets),
+                    target_uids=list(self._game_state.pending_deflect.target_uids),
+                    requirement=self._game_state.pending_deflect.requirement,
                 )
             ),
             pending_accelerate=(
@@ -1102,7 +1219,11 @@ class GameEngine:
             player_2_power=dict(self._game_state.player_2_power),
             player_1_score=self._game_state.player_1_score,
             player_2_score=self._game_state.player_2_score,
+            winner=self._game_state.winner,
             scored_bfs_this_turn=set(self._game_state.scored_bfs_this_turn),
+            first_choose_friendly_fired_this_turn=set(
+                self._game_state.first_choose_friendly_fired_this_turn
+            ),
             player_1_rune_library=(
                 [Rune(domain=r.domain, exhausted=r.exhausted) for r in self._game_state.player_1_rune_library]
                 if self._game_state.player_1_rune_library is not None
@@ -1253,12 +1374,17 @@ class GameEngine:
             raise ValueError("cannot end the turn while an effect choice is pending")
         if self._game_state.pending_spell_repeat is not None:
             raise ValueError("cannot end the turn while a [Repeat] decision is pending")
+        if self._game_state.pending_deflect is not None:
+            raise ValueError("cannot end the turn while a [Deflect] decision is pending")
         if self._game_state.pending_chain is not None:
             raise ValueError("cannot end the turn while the chain is open — resolve it first")
         # The active player's turn is ending — fire end-of-turn triggers (e.g.
         # an equipment's unattach + self-damage) BEFORE per-turn cleanup, while
         # the board is still intact. Queued now; drained at the start() choke.
         self._emit(GameEvent(kind="TURN_END", controller=cp.value))
+        # Deferred "ready up to N runes at end of this turn" (Targon's Peak),
+        # applied now so the readied runes are available going into the next turn.
+        self._apply_end_turn_ready_runes()
         # Energy and Power are per-turn: clear both players' pools so nothing
         # carries into the next turn.
         self._game_state.player_1_energy = 0
@@ -1268,11 +1394,15 @@ class GameEngine:
         # The per-BF scoring cap is also per-turn: clear the set so each
         # battlefield can score again on the new turn (if conditions hold).
         self._game_state.scored_bfs_this_turn = set()
+        self._game_state.first_choose_friendly_fired_this_turn = set()
         # Might buffs and granted [Shield] are "this turn" (every implemented
         # buff/grant reads "… this turn"): they expire when the turn ends.
         for unit in (*self._game_state.player_1_units, *self._game_state.player_2_units):
             unit.bonus_might = 0
             unit.bonus_shield = 0
+            unit.bonus_deflect = 0
+            unit.cant_move = False  # "can't move" lasts only the turn it was applied
+            unit.damage = 0  # damage Heals at the end of each player's turn (rule 143.3.b.1)
         # Spells "resolve" at end of turn — we don't yet model their effects
         # or a discard pile, so for now they simply vanish off the right-side
         # spell overlay. Both players' stacks are cleared (only the active
@@ -1416,13 +1546,40 @@ class GameEngine:
         raise ValueError("player_score requires player_1 or player_2")
 
     def add_score(self, actor: RequiredTo, amount: int) -> None:
-        """Add ``amount`` to ``actor``'s match score."""
+        """Add ``amount`` to ``actor``'s match score, then check for a win.
+
+        This is the single choke point for every point gained — Conquer, Hold,
+        and effect sources like SCORE_1_POINT all funnel through here — so the
+        victory check (rule §467) lives here and runs no matter how the point
+        arrived."""
         if actor == RequiredTo.PLAYER_1:
             self._game_state.player_1_score += amount
         elif actor == RequiredTo.PLAYER_2:
             self._game_state.player_2_score += amount
         else:
             raise ValueError("add_score requires player_1 or player_2")
+        self._check_victory()
+
+    def _check_victory(self) -> None:
+        """Declare a winner if one is owed (rules §467 / §323.1): a player whose
+        score is at or above the Victory Score AND strictly greater than their
+        opponent's wins. A tie at/above the Victory Score is NOT a win — you need
+        MORE points than the opponent. Once a winner is set the game is over and
+        this never overwrites it."""
+        gs = self._game_state
+        if gs.winner is not None:
+            return
+        p1, p2 = gs.player_1_score, gs.player_2_score
+        if p1 >= VICTORY_SCORE and p1 > p2:
+            gs.winner = RequiredTo.PLAYER_1.value
+        elif p2 >= VICTORY_SCORE and p2 > p1:
+            gs.winner = RequiredTo.PLAYER_2.value
+        else:
+            return
+        self._log_event(
+            "event",
+            f"{gs.winner} reached the Victory Score ({VICTORY_SCORE}) and wins the game",
+        )
 
     def award_bf_point(
         self, actor: RequiredTo, battlefield: str, *, via: str = "conquer"
@@ -1443,13 +1600,53 @@ class GameEngine:
         if battlefield in self._game_state.scored_bfs_this_turn:
             return False
         self._game_state.scored_bfs_this_turn.add(battlefield)
-        self.add_score(actor, 1)
+        # A Score occurs (control seized/kept) — but whether it GAINS a point can
+        # be limited by the Winning Point rule (§466.1.b). Resolve the point
+        # first; the Score events below fire either way (§466.2 triggers fire on
+        # the Score regardless of whether the point landed).
+        gained = self._gain_score_point(actor, battlefield, via=via)
         # The conquer/hold-specific event first, then the generic score event.
         kind = "ON_HOLD" if via == "hold" else "ON_CONQUER"
         self._emit(GameEvent(kind=kind, controller=actor.value, battlefield=battlefield))
         self._emit(
             GameEvent(kind="ON_SCORE", controller=actor.value, battlefield=battlefield)
         )
+        return gained
+
+    def _gain_score_point(
+        self, actor: RequiredTo, battlefield: str, *, via: str
+    ) -> bool:
+        """Resolve the point for a Score, honoring the Winning Point rule
+        (§466.1.b). Returns True if a point was gained, False if it was withheld.
+
+        Normal Scores just gain 1 point. But when this Score would be the WINNING
+        point — the player's current total is already within 1 of the Victory
+        Score — the final point is restricted:
+
+          * via HOLD  → the player gains the Winning Point (§466.1.b.1).
+          * via CONQUER → only if they have Scored EVERY battlefield this turn
+            (§466.1.b.2); otherwise they draw a card instead and gain no point.
+
+        ``scored_bfs_this_turn`` already includes ``battlefield`` (the caller
+        added it), so the "scored every battlefield" check counts this Conquer.
+        Points from non-Conquer/Hold sources bypass this entirely — they call
+        ``add_score`` directly (§466.1.a.1)."""
+        would_be_winning_point = self.player_score(actor) >= VICTORY_SCORE - 1
+        if would_be_winning_point and via == "conquer":
+            all_battlefields = {"battlefield_1", "battlefield_2"}
+            if not all_battlefields.issubset(self._game_state.scored_bfs_this_turn):
+                # Final point via Conquer without scoring every battlefield: the
+                # player draws a card instead of gaining the Winning Point.
+                from .effects import _draw_n
+
+                _draw_n(self, actor, 1)
+                self._log_event(
+                    "event",
+                    f"{actor.value} Conquered the Winning Point but had not Scored "
+                    "every battlefield — drew a card instead",
+                )
+                return False
+        self.add_score(actor, 1)
         return True
 
     def _spell_choice_options(self, choice: "PendingSpellChoice") -> list[str]:
@@ -1807,7 +2004,7 @@ class GameEngine:
         return relocated, ""
 
     def _push_spell_to_chain(
-        self, actor: RequiredTo, card: str, rounds: list[list[str]]
+        self, actor: RequiredTo, card: str, rounds: list[list[str]], *, deflect_gated: bool = False
     ) -> None:
         """Put a just-played spell onto the chain and (re)open priority.
 
@@ -1826,6 +2023,13 @@ class GameEngine:
         it shows in the spell overlay the moment it's cast (not only after
         the chain resolves). The chain just tracks the open priority window;
         ``_resolve_chain`` closes it without touching the pile."""
+        # [Deflect] gate: if the spell chose any OPPONENT unit with Deflect, pause
+        # for the caster's pay-or-drop decision BEFORE the item lands on the chain.
+        # On resume (``deflect_gated``) the dropped targets are already pruned.
+        if not deflect_gated and self._gate_deflect(
+            actor, "spell", card=card, rounds=[list(r) for r in rounds]
+        ):
+            return
         # Make sure every unit in play has a uid, then capture the uid behind
         # each chosen unit target so the spell can re-locate them at resolution
         # even if positional indices shifted (units left play in between).
@@ -1837,14 +2041,30 @@ class GameEngine:
         repeats = [list(r) for r in rounds[1:]] if rounds else []
         base_uids = [self._target_token_uid(t) for t in base]
         repeat_uids = [[self._target_token_uid(t) for t in r] for r in repeats]
+        # "When you choose me with a spell" (Irelia) — fire for each unit the
+        # spell chose as a target (SELF scope, so only that unit responds).
+        for token in base:
+            if token.startswith(("player_1:", "player_2:")):
+                self._emit(GameEvent(kind="ON_CHOOSE", controller=actor.value, source=token))
+        # [Repeat]: if the spell has IMPLEMENTED effect codes, each extra paid
+        # round goes on the chain as its OWN effect item below (so the effect
+        # lands again and resolves one after the other). The base item then
+        # carries only the base round. Spells with no implemented effect keep
+        # the legacy single-item behavior (repeat rounds fold into this item).
+        from .triggers import TriggeredEffect
+
+        spell_codes: list[str] = []
+        for _ab in _abilities.triggered_abilities_for(card or ""):
+            spell_codes.extend(_ab.active_effects)
+        split_repeats = bool(repeats) and bool(spell_codes)
         item = ChainItem(
             actor=actor,
             card=card,
             targets=base,
-            repeat_targets=repeats,
+            repeat_targets=[] if split_repeats else repeats,
             requirement=requirement,
             target_uids=base_uids,
-            repeat_target_uids=repeat_uids,
+            repeat_target_uids=[] if split_repeats else repeat_uids,
             cid=self._take_chain_cid(),
         )
         chain = self._game_state.pending_chain
@@ -1870,6 +2090,31 @@ class GameEngine:
         spells.append(
             PlayedSpell(card=card, targets=base, order=order, repeat_targets=repeats)
         )
+        # Put each [Repeat] round on the chain as its own effect item, right
+        # below the base spell, so they resolve in order: base → repeat → repeat.
+        if split_repeats:
+            chain = self._game_state.pending_chain
+            if chain is not None:
+                for i, (rd, ru) in enumerate(zip(repeats, repeat_uids)):
+                    te = TriggeredEffect(
+                        controller=actor.value,
+                        source=None,
+                        trigger="REPEAT",
+                        event_kind="REPEAT",
+                        effects=tuple(spell_codes),
+                        label=f"{card} (repeat)",
+                    )
+                    rep_item = ChainItem(
+                        actor=actor,
+                        card=None,
+                        targets=list(rd),
+                        effect=te,
+                        label=f"{card} (repeat)",
+                        requirement=requirement,
+                        target_uids=list(ru),
+                        cid=self._take_chain_cid(),
+                    )
+                    chain.items.insert(1 + i, rep_item)
         # NOTE: spell-play triggers ("when you play a spell…") fire when the
         # spell RESOLVES, not here at cast time — see _execute_chain_item.
         # House rule: the spell gets its reaction window alone; only after it
@@ -1902,8 +2147,12 @@ class GameEngine:
             chain.consecutive_passes = 0
         else:
             self._game_state.pending_chain = None
-        # Resolving an item may itself fire events (e.g. an effect kills a
-        # unit). Push any it produced before play continues.
+        # A resolved item may have Dealt damage — run the cleanup lethal sweep
+        # (rules 323.4/323.5) so any unit now at/over lethal damage has its
+        # Deathknell queued (via ON_DEATH) and is Killed, before play continues.
+        self._lethal_sweep()
+        # Resolving an item (or the sweep above) may itself fire events (e.g. an
+        # effect kills a unit). Push any it produced before play continues.
         self._drain_triggers()
 
     def _execute_chain_item(self, item: "ChainItem") -> None:
@@ -1934,8 +2183,14 @@ class GameEngine:
                         controller=item.actor.value,
                         source=None,
                         # Card name rides along so a "when a spell is played"
-                        # trigger can reference WHICH spell set it off.
-                        data={"card": item.card},
+                        # trigger can reference WHICH spell set it off; the
+                        # battlefields where the caster CHOSE one of their own
+                        # units feed "chooses a friendly unit here with a spell"
+                        # (The Dreaming Tree).
+                        data={
+                            "card": item.card,
+                            "chosen_friendly_bfs": self._chosen_friendly_battlefields(item),
+                        },
                     )
                 )
             return
@@ -2026,6 +2281,61 @@ class GameEngine:
                 targets=resolved,
             )
 
+    def _open_effect_choice(
+        self,
+        *,
+        actor: RequiredTo,
+        code: str,
+        source: str | None,
+        label: str,
+        trigger: str = "",
+        event_kind: str = "",
+        remaining_effects: "list[str] | tuple[str, ...]" = (),
+        continuation_targets: tuple[str, ...] = (),
+    ) -> bool:
+        """Open a pending CHOICE for ``actor`` to answer. Returns True if it
+        paused (a real choice is now waiting), False if there was nothing to
+        pick (logged as a no-op / the choice's on_empty fallback ran).
+
+        Shared by ``_run_effect_codes`` (the normal path) and by choice handlers
+        that chain a follow-up decision for a DIFFERENT player — e.g.
+        OPPONENT_DISCARD_1's "choose a player; THEY discard" opens a discard
+        choice whose ``actor`` is the chosen player."""
+        ctx = _effects.EffectContext(
+            engine=self,
+            controller=actor,
+            source=source,
+            code=code,
+            trigger=trigger,
+            event_kind=event_kind,
+            targets=tuple(continuation_targets),
+        )
+        options = _effects.choice_effect_options(ctx)
+        if options:
+            self._game_state.pending_effect_choice = PendingEffectChoice(
+                actor=actor,
+                code=code,
+                source=source,
+                source_card=self._card_name_for_ref(source),
+                options=options,
+                remaining_effects=list(remaining_effects),
+                label=label,
+                trigger=trigger,
+                event_kind=event_kind,
+                optional=_effects.choice_effect_optional(code),
+                continuation_targets=tuple(continuation_targets),
+            )
+            self._log_event("effect", f"{label}: {actor.value} to choose")
+            return True
+        # No options to pick. Some choice effects still have a non-choice half
+        # to run (e.g. DISCARD_1_DRAW_1 with an empty hand still draws).
+        empty_line = _effects.run_choice_effect_on_empty(ctx)
+        if empty_line is not None:
+            self._log_event("effect", f"{label}: {empty_line}")
+        else:
+            self._log_event("effect", f"{label}: {code} (no valid target)")
+        return False
+
     def _run_effect_codes(
         self,
         controller: RequiredTo,
@@ -2058,37 +2368,27 @@ class GameEngine:
             )
             line_label = label or source or code
             if _effects.is_choice_effect(code):
-                options = _effects.choice_effect_options(ctx)
-                if options:
-                    self._game_state.pending_effect_choice = PendingEffectChoice(
-                        actor=controller,
-                        code=code,
-                        source=source,
-                        source_card=self._card_name_for_ref(source),
-                        options=options,
-                        remaining_effects=list(codes[i + 1 :]),
-                        label=line_label,
-                        trigger=trigger,
-                        event_kind=event_kind,
-                        optional=_effects.choice_effect_optional(code),
-                        continuation_targets=tuple(targets or ()),
-                    )
-                    self._log_event(
-                        "effect", f"{line_label}: {controller.value} to choose"
-                    )
-                    return
-                # No options to pick. Some choice effects still have a
-                # non-choice half to run (e.g. DISCARD_1_DRAW_1 with an empty
-                # hand still draws) — that's the on_empty fallback.
-                empty_line = _effects.run_choice_effect_on_empty(ctx)
-                if empty_line is not None:
-                    self._log_event("effect", f"{line_label}: {empty_line}")
-                else:
-                    self._log_event("effect", f"{line_label}: {code} (no valid target)")
-                continue
+                opened = self._open_effect_choice(
+                    actor=controller,
+                    code=code,
+                    source=source,
+                    label=line_label,
+                    trigger=trigger,
+                    event_kind=event_kind,
+                    remaining_effects=codes[i + 1 :],
+                    continuation_targets=tuple(targets or ()),
+                )
+                if opened:
+                    return  # paused on the choice; continuation runs the rest
+                continue  # no valid pick — already logged a no-op / on_empty
             ran = _effects.execute_effect(ctx)
             if ran:
-                self._log_event("effect", f"{line_label}: {code}")
+                self._log_event(
+                    "effect",
+                    f"{line_label}: {code}",
+                    code=code,
+                    card=self._card_name_for_ref(source) or label,
+                )
             else:
                 self._log_event("effect", f"{line_label}: {code} (not implemented)")
 
@@ -2126,10 +2426,27 @@ class GameEngine:
     # ----------------------------------------------------------------- #
     # Trigger / event plumbing
     # ----------------------------------------------------------------- #
-    def _log_event(self, kind: str, text: str) -> None:
-        """Append a line to the on-screen trigger/effect feed."""
+    def _log_event(
+        self,
+        kind: str,
+        text: str,
+        *,
+        code: str | None = None,
+        card: str | None = None,
+    ) -> None:
+        """Append a line to the on-screen trigger/effect feed.
+
+        ``text`` is the raw fallback string. ``code`` (a trigger/effect code or
+        event kind) and ``card`` (the source card name) let the UI render a
+        translated, human-readable line instead of the raw code."""
         self._game_state.event_feed.append(
-            EventLogEntry(sequence=len(self._game_state.event_feed), kind=kind, text=text)
+            EventLogEntry(
+                sequence=len(self._game_state.event_feed),
+                kind=kind,
+                text=text,
+                code=code,
+                card=card,
+            )
         )
 
     def _abilities_in_play(self):
@@ -2248,15 +2565,24 @@ class GameEngine:
 
     def _recall_instead_of_death(self, controller: str, unit: "PlayedUnit") -> None:
         """Apply a HEAL_EXHAUST_RECALL would-die replacement: the unit does NOT
-        die (no ON_DEATH, nothing to trash). HEAL is a no-op (this game keeps no
-        persistent damage); the unit's temporary buffs and exhaust state drop as
-        it leaves play; RECALL returns the card to its owner's hand.
+        die (no ON_DEATH, nothing to trash). HEAL clears its marked damage
+        (rule 418); its temporary buffs and exhaust state drop as it leaves the
+        board (rule 110); RECALL returns the card to its owner's hand.
 
         The caller is responsible for removing ``unit`` from its units list;
         this only handles the destination (hand) and the feed line."""
         unit.bonus_might = 0
         unit.bonus_shield = 0
+        unit.damage = 0
         unit.exhausted = False
+        # A token can't be recalled to hand — it isn't a real card, so the
+        # would-die replacement just lets it cease to exist (no hand, no trash).
+        if unit.token:
+            self._log_event(
+                "effect",
+                f"{unit.card} would die — token ceases to exist",
+            )
+            return
         hand = (
             self._game_state.player_1_hand
             if controller == "player_1"
@@ -2298,12 +2624,174 @@ class GameEngine:
             )
         )
         dead = units.pop(index)
+        # Tokens cease to exist when they leave play — they are not real cards,
+        # so a dead token does NOT go to its owner's trash.
+        if dead.token:
+            return
         trash = (
             self._game_state.player_1_trash
             if controller == "player_1"
             else self._game_state.player_2_trash
         )
         trash.append(dead.card)
+
+    # ----------------------------------------------------------------- #
+    # Damage (rules 142/143, 417 Deal, 418 Heal, 712 Bonus Damage) and the
+    # cleanup lethal sweep (rules 323.4/323.5).
+    # ----------------------------------------------------------------- #
+    def _bonus_damage_at(self, slot: str | None) -> int:
+        """Bonus Damage (rules 712-715) that applies to a Deal action targeting
+        a unit at battlefield ``slot``. Sourced from battlefields whose passive
+        grants ``SPELLS_ABILITIES_DEALING_DMG_DEAL_1_BONUS`` to units 'here'
+        (Void Gate): +1 per such battlefield. All instances sum (rule 714)."""
+        if slot not in ("battlefield_1", "battlefield_2"):
+            return 0
+        from . import abilities as _abilities
+
+        name = (
+            self._game_state.battlefield_1
+            if slot == "battlefield_1"
+            else self._game_state.battlefield_2
+        )
+        if not name:
+            return 0
+        bonus = 0
+        for ability in _abilities.triggered_abilities_for(name):
+            bonus += sum(
+                1
+                for code in ability.passive_effects
+                if code == "SPELLS_ABILITIES_DEALING_DMG_DEAL_1_BONUS"
+            )
+        return bonus
+
+    def deal_damage(self, ref: str | None, amount: int) -> int:
+        """Deal ``amount`` damage to the unit at ``ref`` (rule 417): add any
+        Bonus Damage that applies where it sits (712-715), then MARK the total
+        on the unit (143.3). Returns the total marked (0 if nothing was dealt).
+
+        Only Valid Damage — a positive integer ≥1 — is dealt (417.1.e); Bonus
+        Damage is applied only because a Deal actually occurs (715.4). Death is
+        NOT applied here: it is resolved by the cleanup lethal sweep."""
+        from .effects import _resolve_unit
+
+        _units, idx, unit = _resolve_unit(self, ref)
+        if unit is None or amount < 1:
+            return 0
+        total = amount + self._bonus_damage_at(unit.location)
+        unit.damage += total
+        return total
+
+    def _heal_all_damage(self) -> None:
+        """Heal (clear marked damage) from every unit on the board — rule 418.
+        Invoked at the end of each player's turn (143.3.b.1) and during a Combat
+        Cleanup (143.3.b.2)."""
+        for unit in (*self._game_state.player_1_units, *self._game_state.player_2_units):
+            unit.damage = 0
+
+    def _apply_beginning_phase_bf_damage(self) -> None:
+        """Frozen Fortress: "At the start of each player's Beginning Phase, deal
+        1 to each unit here." Battlefields whose passive carries
+        ``DEAL_1_DAMAGE_TO_UNITS_HERE`` deal 1 to every unit (either player's) at
+        that battlefield, then the lethal sweep resolves any deaths. Run before
+        HOLD scoring (the card notes "this happens before scoring")."""
+        from . import abilities as _abilities
+
+        gs = self._game_state
+        dealt = False
+        for slot, name in (
+            ("battlefield_1", gs.battlefield_1),
+            ("battlefield_2", gs.battlefield_2),
+        ):
+            if not name:
+                continue
+            has = any(
+                "DEAL_1_DAMAGE_TO_UNITS_HERE" in ability.passive_effects
+                for ability in _abilities.triggered_abilities_for(name)
+            )
+            if not has:
+                continue
+            for side in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+                units = gs.player_1_units if side == RequiredTo.PLAYER_1 else gs.player_2_units
+                for i, u in enumerate(units):
+                    if u.location == slot:
+                        self.deal_damage(f"{side.value}:{i}", 1)
+                        dealt = True
+        if dealt:
+            self._lethal_sweep()
+            self._drain_triggers()
+
+    def _unit_is_lethal(self, controller: str, index: int, unit: "PlayedUnit") -> bool:
+        """A unit dies (rule 143.2.a) when it has nonzero marked damage that
+        equals or exceeds its Might. Uses ``effective_unit_might`` so buffs,
+        auras, and (while defending) [Shield] raise the threshold the same way
+        combat lethal does."""
+        return unit.damage > 0 and unit.damage >= self.effective_unit_might(controller, index)
+
+    def _lethal_sweep(self) -> int:
+        """Cleanup tasks 323.4/323.5: every unit whose marked damage ≥ its Might
+        has its Deathknell added (ON_DEATH) and is then Killed (to its owner's
+        trash, or recalled if it has a would-die replacement). Applied as a
+        simultaneous batch, then repeated until the board is stable (rule 322) —
+        a later pass catches units made lethal by an aura source dying. Returns
+        the number of units killed across all passes."""
+        total = 0
+        while True:
+            gs = self._game_state
+            lethal: list[tuple[str, int]] = []
+            for side in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
+                units = (
+                    gs.player_1_units if side == RequiredTo.PLAYER_1 else gs.player_2_units
+                )
+                for i, u in enumerate(units):
+                    if self._unit_is_lethal(side.value, i, u):
+                        lethal.append((side.value, i))
+            if not lethal:
+                return total
+            # Fire ON_DEATH for the truly-dead first (deathknell / "when a unit
+            # dies" watchers see them in play), respecting would-die
+            # replacements; then remove them all simultaneously.
+            replaced: list[tuple[str, int]] = []
+            for controller, i in lethal:
+                units = (
+                    gs.player_1_units if controller == "player_1" else gs.player_2_units
+                )
+                if not (0 <= i < len(units)):
+                    continue
+                if self._death_replacement_for(units[i]):
+                    replaced.append((controller, i))
+                    continue
+                self._emit(
+                    GameEvent(
+                        kind="ON_DEATH",
+                        controller=controller,
+                        source=f"{controller}:{i}",
+                        battlefield=units[i].location
+                        if units[i].location in ("battlefield_1", "battlefield_2")
+                        else None,
+                    )
+                )
+            dead_set = {(c, i) for (c, i) in lethal if (c, i) not in replaced}
+            for controller in ("player_1", "player_2"):
+                units = (
+                    gs.player_1_units if controller == "player_1" else gs.player_2_units
+                )
+                trash = (
+                    gs.player_1_trash if controller == "player_1" else gs.player_2_trash
+                )
+                # Recall the replaced (would-die) units, trash the truly dead
+                # non-tokens, then rebuild the list without any of them.
+                for i, u in enumerate(units):
+                    if (controller, i) in replaced:
+                        self._recall_instead_of_death(controller, u)
+                    elif (controller, i) in dead_set and not u.token:
+                        trash.append(u.card)
+                kill_idx = {i for (c, i) in lethal if c == controller}
+                survivors = [u for i, u in enumerate(units) if i not in kill_idx]
+                if controller == "player_1":
+                    gs.player_1_units = survivors
+                else:
+                    gs.player_2_units = survivors
+            total += len(lethal)
 
     def _emit(self, event: GameEvent) -> None:
         """Announce a state transition. Scans cards in play RIGHT NOW for
@@ -2312,7 +2800,11 @@ class GameEngine:
         not at drain — means an ability on a unit that's about to leave play
         (e.g. a DEATHKNELL emitted just before the unit is removed) is still
         found."""
-        self._log_event("event", self._describe_event(event))
+        # We do NOT write a feed line for the raw event itself ("A unit was
+        # played", "A showdown began", …): it duplicates the action log and
+        # clutters the trigger feed. Only the abilities it FIRES (and the
+        # effects they resolve) are logged — those carry the meaningful info.
+        matched_effects: list[TriggeredEffect] = []
         for ref, controller, location, card, ability in self._abilities_in_play():
             matched = [
                 t
@@ -2340,7 +2832,27 @@ class GameEngine:
             )
             if effect_controller is None:
                 continue
-            self._trigger_queue.append(
+            # Stateful gates that a pure trigger_matches can't express ("first
+            # time each turn", "first Beginning Phase"). Drop codes whose extra
+            # condition isn't met right now.
+            matched = [
+                t
+                for t in matched
+                if self._trigger_state_ok(t, event, effect_controller, location)
+            ]
+            if not matched:
+                continue
+            for t in matched:
+                self._record_trigger_fired(t, event, effect_controller, location)
+            # The unit the event was ABOUT (moved / returned / chosen / readied),
+            # fed to the ability's targeted effects ("give IT +1 might"). Only
+            # for triggers whose effect acts on that unit; others pick their own.
+            ev_targets: tuple[str, ...] = ()
+            if matched[0] in _EVENT_UNIT_TARGET_TRIGGERS:
+                unit_ref = event.data.get("unit") or event.source
+                if unit_ref:
+                    ev_targets = (unit_ref,)
+            matched_effects.append(
                 TriggeredEffect(
                     controller=effect_controller,
                     source=ref,
@@ -2353,17 +2865,80 @@ class GameEngine:
                     # The card the event was about (e.g. the resolved spell
                     # for ON_PLAY_SPELL) — surfaced in the chain UI.
                     context_card=event.data.get("card"),
+                    targets=ev_targets,
                 )
             )
+        self._trigger_queue.extend(matched_effects)
 
-    @staticmethod
-    def _describe_event(event: GameEvent) -> str:
-        bits = [event.kind]
-        if event.controller:
-            bits.append(event.controller)
-        if event.battlefield:
-            bits.append(f"@{event.battlefield}")
-        return " ".join(bits)
+    def _trigger_state_ok(
+        self,
+        trigger_code: str,
+        event: GameEvent,
+        effect_controller: str,
+        owner_location: str | None,
+    ) -> bool:
+        """Stateful firing conditions that ``trigger_matches`` (a pure function)
+        can't see — "first time each turn" caps and "first Beginning Phase".
+        Returns True for any code without such a condition."""
+        gs = self._game_state
+
+        if trigger_code == "AT_START_EACH_FIRST_BEGGINNING_PHASE":
+            # Only the beneficiary's FIRST turn (turn_number is bumped before the
+            # TURN_START emit, so it reads 1 on that player's opening turn).
+            tn = (
+                gs.player_1_turn_number
+                if effect_controller == RequiredTo.PLAYER_1.value
+                else gs.player_2_turn_number
+            )
+            return tn == 1
+
+        if trigger_code == "FIRST_TIME_PLAYER_CHOOSE_FRIENDLY_WITH_SPELL_EACH_TURN":
+            # The caster must have chosen one of THEIR units sitting at THIS
+            # battlefield, and only the first such spell each turn fires.
+            bfs = event.data.get("chosen_friendly_bfs") or set()
+            if owner_location not in bfs:
+                return False
+            key = f"{owner_location}:{effect_controller}"
+            return key not in gs.first_choose_friendly_fired_this_turn
+
+        return True
+
+    def _record_trigger_fired(
+        self,
+        trigger_code: str,
+        event: GameEvent,
+        effect_controller: str,
+        owner_location: str | None,
+    ) -> None:
+        """Record once-per-turn caps for a trigger that just fired, so a later
+        event in the same turn won't fire it again."""
+        if trigger_code == "FIRST_TIME_PLAYER_CHOOSE_FRIENDLY_WITH_SPELL_EACH_TURN":
+            self._game_state.first_choose_friendly_fired_this_turn.add(
+                f"{owner_location}:{effect_controller}"
+            )
+
+    def _chosen_friendly_battlefields(self, item: "ChainItem") -> set[str]:
+        """Battlefields where the spell ``item`` chose a unit controlled by its
+        caster (a "friendly unit here"). Used by The Dreaming Tree's trigger."""
+        gs = self._game_state
+        out: set[str] = set()
+        refs = list(item.targets)
+        for extra in item.repeat_targets:
+            refs.extend(extra)
+        for ref in refs:
+            side, _, idx_s = ref.partition(":")
+            if side != item.actor.value:  # only the caster's own units
+                continue
+            units = gs.player_1_units if side == "player_1" else gs.player_2_units
+            try:
+                idx = int(idx_s)
+            except ValueError:
+                continue
+            if 0 <= idx < len(units):
+                loc = units[idx].location
+                if loc and loc.startswith("battlefield"):
+                    out.add(loc)
+        return out
 
     def _resolve_exhaustable_source(self, ref: str | None):
         """The in-play unit or gear behind an ability's ``source`` ref, if it has
@@ -2406,14 +2981,32 @@ class GameEngine:
     @staticmethod
     def _derive_activation_requirement(effects: tuple[str, ...]) -> str:
         """The target requirement an activated ability's effects imply, in the
-        same grammar spells use. Today only ``GIVE_UNIT_±NM`` needs a target
-        ("a unit"); untargeted effects return "" (no pick)."""
+        same grammar spells use. ``GIVE_UNIT_±NM`` needs any unit;
+        ``MOVE_FRIENDLY_UNIT_BF_TO_BASE`` (The Syren) needs a friendly unit AT a
+        battlefield (the destination is fixed at base, so no destination pick).
+        Untargeted effects return "" (no pick)."""
         import re as _re
 
         for e in effects:
+            if e == "MOVE_FRIENDLY_UNIT_BF_TO_BASE":
+                return "FRIENDLY UNIT (1[BF])"
             if _re.fullmatch(r"GIVE_UNIT_[+-]\d+M", e):
                 return "ANY UNIT (1)"
         return ""
+
+    def _activation_target_available(self, actor: "RequiredTo", requirement: str) -> bool:
+        """Whether at least one unit currently satisfies an activated ability's
+        derived target ``requirement`` (so the activation is worth offering). An
+        empty requirement needs no pick and is always available; a requirement
+        that isn't a unit selector we evaluate is left ungated (True)."""
+        if not requirement:
+            return True
+        from .requirements import board_units, parse_phrase
+
+        req = getattr(parse_phrase(requirement), "unit", None)
+        if req is None:
+            return True
+        return any(req.unit_matches(u, actor.value) for u in board_units(self._game_state))
 
     def _push_activated_effect(
         self,
@@ -2423,11 +3016,26 @@ class GameEngine:
         targets: list[str],
         target_uids: list[int | None],
         requirement: str,
+        *,
+        deflect_gated: bool = False,
     ) -> None:
         """Put an activated ability's effect on the chain as an EFFECT item
         carrying its chosen targets (so it resolves like a triggered ability,
         but with pre-picked targets). The cost was already paid by the caller."""
         from .triggers import TriggeredEffect
+
+        # [Deflect] gate: pause for the pay-or-drop decision if any chosen target
+        # is an opponent unit with Deflect (skipped on the post-decision resume).
+        if not deflect_gated and self._gate_deflect(
+            actor,
+            "activated",
+            source=source,
+            effects=tuple(effects),
+            targets=list(targets),
+            target_uids=list(target_uids),
+            requirement=requirement,
+        ):
+            return
 
         label = f"{self._card_name_for_ref(source) or 'ability'} — activated"
         te = TriggeredEffect(
@@ -2457,7 +3065,186 @@ class GameEngine:
             chain.items.insert(0, item)
             chain.priority = actor
             chain.consecutive_passes = 0
-        self._log_event("trigger", f"{label} → chain")
+        self._log_event(
+            "trigger",
+            f"{label} → chain",
+            code="ACTIVATED",
+            card=self._card_name_for_ref(source),
+        )
+
+    # ----------------------------------------------------------------- #
+    # [Deflect] — taxing an opponent for CHOOSING this unit as an ability
+    # target. The tax is gated at chain-push time (see _push_spell_to_chain /
+    # _push_activated_effect); combat targeting never routes through here, so
+    # combat lethal damage is naturally exempt.
+    # ----------------------------------------------------------------- #
+    def _total_power(self, actor: RequiredTo) -> int:
+        """Total Power ``actor`` holds across all domains."""
+        return sum(self.player_power(actor).values())
+
+    def _deduct_any_power(self, actor: RequiredTo, n: int) -> None:
+        """Spend ``n`` Power of ANY domain, greedy across the pool."""
+        pool = self.player_power(actor)
+        for domain in list(pool.keys()):
+            if n <= 0:
+                break
+            take = min(pool.get(domain, 0), n)
+            if take:
+                self.add_power(actor, domain, -take)
+                n -= take
+        if n > 0:
+            raise ValueError("internal error: not enough Power for the Deflect tax")
+
+    def _deflect_queue_for(
+        self, actor: RequiredTo, refs: list[str]
+    ) -> list[tuple[str, int, str]]:
+        """``(ref, stacks, card)`` for each OPPONENT unit among ``refs`` that has
+        [Deflect]. Only opponents of ``actor`` are taxed; de-duplicated so a unit
+        chosen across multiple [Repeat] rounds is taxed once. Order preserved."""
+        queue: list[tuple[str, int, str]] = []
+        seen: set[str] = set()
+        for ref in refs:
+            if ref in seen:
+                continue
+            parsed = self._unit_ref_from_token(ref)
+            if parsed is None:
+                continue
+            controller, idx = parsed
+            if controller == actor.value:
+                continue  # a unit's own controller targets it freely
+            stacks = self.unit_deflect_count(controller, idx)
+            if stacks <= 0:
+                continue
+            seen.add(ref)
+            units = (
+                self._game_state.player_1_units
+                if controller == "player_1"
+                else self._game_state.player_2_units
+            )
+            card = units[idx].card if 0 <= idx < len(units) else ref
+            queue.append((ref, stacks, card))
+        return queue
+
+    def _gate_deflect(self, actor: RequiredTo, kind: str, **payload) -> bool:
+        """If the push chose opponent [Deflect] unit(s), park a PendingDeflect for
+        the pay-or-drop decision and return True (push deferred). Else False."""
+        if kind == "spell":
+            refs = [t for r in payload.get("rounds", []) for t in r]
+        else:
+            refs = list(payload.get("targets", []))
+        queue = self._deflect_queue_for(actor, refs)
+        if not queue:
+            return False
+        self._game_state.pending_deflect = PendingDeflect(
+            actor=actor,
+            kind=kind,
+            queue=queue,
+            dropped=[],
+            card=payload.get("card"),
+            rounds=[list(r) for r in payload.get("rounds", [])],
+            source=payload.get("source"),
+            effects=tuple(payload.get("effects", ())),
+            targets=list(payload.get("targets", [])),
+            target_uids=list(payload.get("target_uids", [])),
+            requirement=payload.get("requirement", ""),
+        )
+        self._log_event(
+            "effect",
+            f"[Deflect]: {actor.value} must pay or drop {len(queue)} target(s)",
+        )
+        return True
+
+    def resolve_deflect_decision(self, actor: RequiredTo, pay: bool) -> None:
+        """Apply one Deflect pay/decline decision for the current queued target.
+        PAY deducts ``stacks`` Power (any domain) and keeps the target; DECLINE
+        drops it (the rest of the ability still resolves). When the queue empties,
+        the deferred push runs with dropped targets pruned."""
+        pd = self._game_state.pending_deflect
+        if pd is None:
+            raise ValueError("no Deflect decision is pending")
+        if actor != pd.actor:
+            raise ValueError(
+                f"the Deflect decision belongs to {pd.actor.value}, not {actor.value}"
+            )
+        if not pd.queue:
+            raise ValueError("no Deflect target awaiting a decision")
+        ref, stacks, card = pd.queue[0]
+        if pay:
+            if self._total_power(actor) < stacks:
+                raise ValueError(
+                    f"cannot pay the Deflect tax for {card}: needs {stacks} Power"
+                )
+            self._deduct_any_power(actor, stacks)
+            self._log_event("effect", f"[Deflect]: paid {stacks} Power for {card}")
+        else:
+            pd.dropped.append(ref)
+            self._log_event("effect", f"[Deflect]: declined — {card} dropped as a target")
+        pd.queue.pop(0)
+        if not pd.queue:
+            self._resume_deflect_push()
+
+    def _resume_deflect_push(self) -> None:
+        """Run the deferred push once all Deflect decisions are made, pruning the
+        dropped targets."""
+        pd = self._game_state.pending_deflect
+        self._game_state.pending_deflect = None
+        if pd is None:
+            return
+        dropped = set(pd.dropped)
+        if pd.kind == "spell":
+            rounds = [[t for t in r if t not in dropped] for r in pd.rounds]
+            self._push_spell_to_chain(pd.actor, pd.card, rounds, deflect_gated=True)
+        else:
+            kept = [
+                (t, u)
+                for t, u in zip(pd.targets, pd.target_uids)
+                if t not in dropped
+            ]
+            self._push_activated_effect(
+                pd.actor,
+                pd.source,
+                pd.effects,
+                [t for t, _ in kept],
+                [u for _, u in kept],
+                pd.requirement,
+                deflect_gated=True,
+            )
+
+    def _triggered_ability_has_legal_action(self, te: "TriggeredEffect") -> bool:
+        """Whether a queued triggered ability has at least one effect it can
+        legally perform RIGHT NOW (rule 402.3 — checked as it would go on the
+        chain). An ability whose every effect is a choice with no available
+        options (and no ``on_empty`` fallback) is inert — e.g. Abandoned Hall's
+        "may give a unit you control here +1" when the player has no unit there
+        — and must be dropped rather than put on the chain.
+
+        A non-choice effect (DRAW_1, SCORE_1_POINT, a self/owner buff, an
+        unimplemented code resolving as a logged no-op, …) is treated as
+        actionable, so this only suppresses the pure-empty-choice case and never
+        changes behaviour for ordinary triggers."""
+        from . import effects as _effects
+        from .effects import EffectContext
+
+        try:
+            controller = RequiredTo(te.controller)
+        except ValueError:
+            return True
+        for code in te.effects:
+            if not _effects.is_choice_effect(code):
+                return True  # non-choice effect always has something to attempt
+            if _effects.choice_effect_has_on_empty(code):
+                return True  # acts even with no options to pick
+            ctx = EffectContext(
+                engine=self,
+                controller=controller,
+                source=te.source,
+                code=code,
+                trigger=te.trigger,
+                event_kind=te.event_kind,
+            )
+            if _effects.choice_effect_options(ctx):
+                return True  # at least one legal pick exists
+        return False
 
     def _drain_triggers(self) -> None:
         """Push every queued triggered ability onto the chain, then clear the
@@ -2485,6 +3272,13 @@ class GameEngine:
         queue = sorted(self._trigger_queue, key=_order)
         self._trigger_queue = []
         for i, te in enumerate(queue):
+            # Rule 402.3: a triggered ability that can't make its required
+            # choices is removed from the chain — it never becomes a Chain Item,
+            # so it opens no reaction window and shows nothing. e.g. Abandoned
+            # Hall's "you MAY give a unit you control here +1" with no unit there
+            # at resolution has nothing legal to do, so it is simply dropped.
+            if not self._triggered_ability_has_legal_action(te):
+                continue
             if te.costs and self._cost_is_chargeable(te.costs):
                 try:
                     actor = RequiredTo(te.controller)
@@ -2660,7 +3454,7 @@ class GameEngine:
         except ValueError:
             return
         item = ChainItem(
-            actor=actor, card=None, targets=[], effect=te, label=te.label,
+            actor=actor, card=None, targets=list(te.targets), effect=te, label=te.label,
             cid=self._take_chain_cid(),
         )
         chain = self._game_state.pending_chain
@@ -2672,7 +3466,12 @@ class GameEngine:
             chain.items.insert(0, item)
             chain.priority = actor
             chain.consecutive_passes = 0
-        self._log_event("trigger", f"{te.label} → chain")
+        self._log_event(
+            "trigger",
+            f"{te.label} → chain",
+            code=te.trigger,
+            card=self._card_name_for_ref(te.source),
+        )
 
     def _take_chain_cid(self) -> int:
         """Hand out the next stable chain-item cid (monotonic per game)."""
@@ -2828,17 +3627,114 @@ class GameEngine:
         might = (
             (card_might_of(unit.card) or 0)
             + unit.bonus_might
+            + (1 if unit.buffed else 0)  # a [Buff] is a flat +1 Might (never stacks)
             + attached_might_bonus(gears, unit.uid, turn)
+            + self.aura_bonus("might", controller, index)  # "units here have +N M"
         )
         # [Shield] adds Might ONLY while this unit is DEFENDING (printed keyword
-        # + equipment SHIELD_N + this-turn granted bonus_shield, all stacking).
+        # + equipment SHIELD_N + this-turn granted bonus_shield + auras, stacking).
         if self._unit_is_defending(controller, unit.location):
             might += (
                 card_printed_shield(unit.card)
                 + unit.bonus_shield
                 + attached_shield_bonus(gears, unit.uid, turn)
+                + self.aura_bonus("shield", controller, index)
             )
         return might
+
+    def aura_bonus(self, prop: str, controller: str, index: int) -> int:
+        """Total of ``prop`` granted to the unit at (controller, index) by
+        CONTINUOUS auras from other permanents in play — every in-play unit and
+        battlefield whose passive carries a granting code (see
+        ``abilities.AURA_GRANTS``) whose scope reaches this unit. The fourth
+        source of a property, alongside printed / this-turn grant / equipment;
+        multiple sources STACK (summed). Computed live, so it tracks units
+        moving in and out of a battlefield."""
+        from .abilities import aura_specs_for_card
+
+        gs = self._game_state
+        units = (
+            gs.player_1_units
+            if controller == "player_1"
+            else gs.player_2_units
+            if controller == "player_2"
+            else []
+        )
+        if index < 0 or index >= len(units):
+            return 0
+        tgt_loc = units[index].location
+        total = 0
+        # Unit sources (both players).
+        for src_ctrl, src_units in (
+            ("player_1", gs.player_1_units),
+            ("player_2", gs.player_2_units),
+        ):
+            for si, su in enumerate(src_units):
+                for spec in aura_specs_for_card(su.card):
+                    if spec.property != prop:
+                        continue
+                    if spec.applies(
+                        src_controller=src_ctrl,
+                        src_location=su.location,
+                        src_index=si,
+                        tgt_controller=controller,
+                        tgt_location=tgt_loc,
+                        tgt_index=index,
+                    ):
+                        total += spec.amount
+        # Battlefield-card sources ("units here have …"); their "controller" is
+        # the slot's current holder (None if uncontested) and their location is
+        # the slot itself, so HERE means units standing on that battlefield.
+        for slot, name, holder in (
+            ("battlefield_1", gs.battlefield_1, gs.battlefield_1_controller),
+            ("battlefield_2", gs.battlefield_2, gs.battlefield_2_controller),
+        ):
+            if not name:
+                continue
+            for spec in aura_specs_for_card(name):
+                if spec.property != prop:
+                    continue
+                if spec.applies(
+                    src_controller=holder.value if holder is not None else None,
+                    src_location=slot,
+                    src_index=None,
+                    tgt_controller=controller,
+                    tgt_location=tgt_loc,
+                    tgt_index=index,
+                ):
+                    total += spec.amount
+        return total
+
+    def unit_deflect_count(self, controller: str, index: int) -> int:
+        """A unit's total [Deflect] stacks — the single source of truth for the
+        Deflect tax. Sums its printed keyword, this-turn granted ``bonus_deflect``,
+        and any continuous DEFLECT_N from EFFECT-TEXT equipment attached to it
+        (computed live, like Might/Shield). 0 ⇒ no Deflect."""
+        from .abilities import attached_deflect_bonus
+        from .csv_data import card_printed_deflect
+
+        units = (
+            self._game_state.player_1_units
+            if controller == "player_1"
+            else self._game_state.player_2_units
+            if controller == "player_2"
+            else []
+        )
+        if index < 0 or index >= len(units):
+            return 0
+        unit = units[index]
+        gears = (
+            self._game_state.player_1_gears
+            if controller == "player_1"
+            else self._game_state.player_2_gears
+        )
+        turn = self._game_state.total_turn_number
+        return (
+            card_printed_deflect(unit.card)
+            + unit.bonus_deflect
+            + attached_deflect_bonus(gears, unit.uid, turn)
+            + self.aura_bonus("deflect", controller, index)  # e.g. Allay's aura
+        )
 
     def _unit_is_defending(self, controller: str, location: str) -> bool:
         """True if ``controller``'s unit at ``location`` is currently DEFENDING:
@@ -2897,63 +3793,28 @@ class GameEngine:
         p1_targets = set(pc.player_1_targets or [])  # P2 units P1 killed
         p2_targets = set(pc.player_2_targets or [])  # P1 units P2 killed
 
-        # Split each casualty set into units that TRULY die vs units saved by a
-        # would-die REPLACEMENT (e.g. an attached Guardian Angel → recall). A
-        # replaced unit never dies: no ON_DEATH, no trash — it returns to hand.
-        def _split(units: list, targets: set[int]) -> tuple[set[int], set[int]]:
-            dead, replaced = set(), set()
-            for i in targets:
-                if 0 <= i < len(units):
-                    (replaced if self._death_replacement_for(units[i]) else dead).add(i)
-            return dead, replaced
-
-        p1_dead, p1_replaced = _split(gs.player_1_units, p2_targets)  # P1's units P2 hit
-        p2_dead, p2_replaced = _split(gs.player_2_units, p1_targets)  # P2's units P1 hit
-
-        # Fire death triggers BEFORE pruning, while the dying units are still in
-        # play — so a unit's own DEATHKNELL (and "when a unit dies" watchers)
-        # can still see it. ONLY the truly-dead emit ON_DEATH (a replaced unit
-        # didn't die). Each death is its own event, tagged with the dead unit's
-        # owner + ref and the battlefield it fell on.
-        for i in p1_dead:
-            self._emit(
-                GameEvent(
-                    kind="ON_DEATH",
-                    controller=RequiredTo.PLAYER_1.value,
-                    source=f"{RequiredTo.PLAYER_1.value}:{i}",
-                    battlefield=battlefield,
-                )
-            )
-        for i in p2_dead:
-            self._emit(
-                GameEvent(
-                    kind="ON_DEATH",
-                    controller=RequiredTo.PLAYER_2.value,
-                    source=f"{RequiredTo.PLAYER_2.value}:{i}",
-                    battlefield=battlefield,
-                )
-            )
-        # Apply simultaneously: snapshot both lists first. Truly-dead units →
-        # owner's trash (index order); replaced units → recalled to hand; then
-        # both leave play entirely.
-        gs.player_2_trash.extend(
-            u.card for i, u in enumerate(gs.player_2_units) if i in p2_dead
-        )
-        gs.player_1_trash.extend(
-            u.card for i, u in enumerate(gs.player_1_units) if i in p1_dead
-        )
-        for i, u in enumerate(gs.player_1_units):
-            if i in p1_replaced:
-                self._recall_instead_of_death(RequiredTo.PLAYER_1.value, u)
-        for i, u in enumerate(gs.player_2_units):
-            if i in p2_replaced:
-                self._recall_instead_of_death(RequiredTo.PLAYER_2.value, u)
-        gs.player_2_units = [
-            u for i, u in enumerate(gs.player_2_units) if i not in p1_targets
-        ]
-        gs.player_1_units = [
-            u for i, u in enumerate(gs.player_1_units) if i not in p2_targets
-        ]
+        # Migrate the committed combat kills onto the persistent-damage path
+        # (rule 417.6.c: combat-assigned damage is Dealt, sourced from the
+        # opposing units). MARK lethal damage on each unit its opponent assigned
+        # to, then resolve every death through the SAME cleanup lethal sweep
+        # used by spell/ability damage (323.4/323.5) — so Deathknell/ON_DEATH,
+        # would-die replacement (Guardian Angel → recall), token handling and
+        # trashing all flow through one pipeline. The mark must be computed
+        # while ``pending_combat`` is still set, so a defender's [Shield] still
+        # raises its Might (and thus its lethal threshold) exactly as it did
+        # when the attacker assigned the lethal amount.
+        for i in p1_targets:
+            if 0 <= i < len(gs.player_2_units):
+                u = gs.player_2_units[i]
+                u.damage = max(u.damage, self.effective_unit_might(RequiredTo.PLAYER_2.value, i), 1)
+        for i in p2_targets:
+            if 0 <= i < len(gs.player_1_units):
+                u = gs.player_1_units[i]
+                u.damage = max(u.damage, self.effective_unit_might(RequiredTo.PLAYER_1.value, i), 1)
+        self._lethal_sweep()
+        # Combat Cleanup heals all remaining marked damage (rule 143.3.b.2): any
+        # non-lethal combat damage on the survivors clears now.
+        self._heal_all_damage()
         gs.pending_combat = None
 
     def player_power(self, actor: RequiredTo) -> dict[str, int]:
@@ -3099,6 +3960,41 @@ class GameEngine:
         if remaining > 0:
             raise ValueError("internal error: still short on any-type Power for equip")
 
+    def set_legend_exhausted(self, actor: RequiredTo, value: bool) -> None:
+        """Set ``actor``'s legend exhausted flag (READY_LEGEND clears it; the
+        Awake step also clears it). No-op for BOTH."""
+        if actor == RequiredTo.PLAYER_1:
+            self._game_state.player_1_legend_exhausted = value
+        elif actor == RequiredTo.PLAYER_2:
+            self._game_state.player_2_legend_exhausted = value
+
+    def schedule_end_turn_ready_runes(self, actor: RequiredTo, n: int) -> None:
+        """Queue ``n`` runes to ready when this turn ends (Targon's Peak). Sources
+        accumulate; applied + reset in ``_advance_turn``."""
+        if actor == RequiredTo.PLAYER_1:
+            self._game_state.player_1_end_turn_ready_runes += n
+        elif actor == RequiredTo.PLAYER_2:
+            self._game_state.player_2_end_turn_ready_runes += n
+
+    def _apply_end_turn_ready_runes(self) -> None:
+        """Ready up to the scheduled number of each player's exhausted runes
+        (deferred from a Targon's Peak-style effect), then clear the schedule."""
+        gs = self._game_state
+        for who, attr, pool in (
+            (RequiredTo.PLAYER_1, "player_1_end_turn_ready_runes", gs.player_1_runes),
+            (RequiredTo.PLAYER_2, "player_2_end_turn_ready_runes", gs.player_2_runes),
+        ):
+            n = getattr(gs, attr)
+            if n <= 0:
+                continue
+            for rune in pool:
+                if n <= 0:
+                    break
+                if rune.exhausted:
+                    rune.exhausted = False
+                    n -= 1
+            setattr(gs, attr, 0)
+
     def _ready_all_runes(self, actor: RequiredTo) -> None:
         """Step A (Awake): flip every exhausted rune in the active player's pool back to ready."""
         if actor == RequiredTo.PLAYER_1:
@@ -3123,8 +4019,17 @@ class GameEngine:
             units = self._game_state.player_2_units
         else:
             return
-        for unit in units:
+        readied = []
+        for i, unit in enumerate(units):
+            if unit.exhausted:
+                readied.append(i)
             unit.exhausted = False
+        # "When you ready me" (Irelia) — fire for each unit that was actually
+        # readied (SELF scope, so only that unit's ability responds).
+        for i in readied:
+            self._emit(
+                GameEvent(kind="ON_READY", controller=actor.value, source=f"{actor.value}:{i}")
+            )
 
     def _ready_all_gears(self, actor: RequiredTo) -> None:
         """Step A (Awake): flip every exhausted gear owned by ``actor`` back to ready.
@@ -3150,16 +4055,22 @@ class GameEngine:
         if key == "a":
             if gs.abcd_a_done:
                 raise ValueError("A already completed this turn")
-            # A = Awake: ready all the active player's exhausted runes and units.
+            # A = Awake: ready all the active player's exhausted runes, units,
+            # gears, and their legend.
             self._ready_all_runes(actor)
             self._ready_all_units(actor)
             self._ready_all_gears(actor)
+            self.set_legend_exhausted(actor, False)
             gs.abcd_a_done = True
         elif key == "b":
             if not gs.abcd_a_done:
                 raise ValueError("A must be completed before B")
             if gs.abcd_b_done:
                 raise ValueError("B already completed this turn")
+            # Beginning-Phase battlefield damage (Frozen Fortress: "At the start
+            # of each player's Beginning Phase, deal 1 to each unit here. This
+            # happens BEFORE scoring."). Resolved here, ahead of HOLD scoring.
+            self._apply_beginning_phase_bf_damage()
             # HOLD scoring: at the start of B, score 1 point per battlefield
             # the active player currently controls. The per-BF-per-turn cap
             # is enforced via award_bf_point — same cap applies if the same
@@ -3195,26 +4106,62 @@ class GameEngine:
         for letter in ("a", "b", "c", "d"):
             self._apply_abcd_letter(letter, actor)
 
-    def _mulligan_options(self, who: RequiredTo) -> list[str]:
-        """Full ``mulligan_resolve:player_N:<csv>`` actions for ``who``: keep
-        all (empty payload), bottom any single card, or bottom any pair (the
-        rules cap the bottom at two). One option = one complete resolution, so
-        a single-click client can pick directly."""
-        import itertools
+    def _mulligan_bottomed_for(self, who: RequiredTo) -> list[int]:
+        return (
+            self._game_state.player_1_mulligan_bottomed
+            if who == RequiredTo.PLAYER_1
+            else self._game_state.player_2_mulligan_bottomed
+        )
 
+    def _mulligan_options(self, who: RequiredTo) -> list[str]:
+        """One-card-at-a-time mulligan options for ``who``: a
+        ``mulligan_bottom:player_N:<i>`` for each ORIGINAL card not yet chosen
+        (and only while under the cap), plus ``mulligan_done:player_N`` — the
+        "No mulligan" / stop option that finalizes (bottoming the chosen cards
+        and drawing replacements). So the first decision offers all four cards +
+        No-mulligan; after one is chosen, the three remaining + No-mulligan; and
+        once the cap (MULLIGAN_MAX_BOTTOM) is hit it auto-finalizes."""
         hand = (
             self._game_state.player_1_mulligan_hand
             if who == RequiredTo.PLAYER_1
             else self._game_state.player_2_mulligan_hand
         ) or []
-        n = len(hand)
-        prefix = f"mulligan_resolve:{who.value}:"
-        opts = [prefix]  # keep all
-        for i in range(n):
-            opts.append(prefix + str(i))
-        for a, b in itertools.combinations(range(n), 2):
-            opts.append(prefix + f"{a},{b}")
+        bottomed = set(self._mulligan_bottomed_for(who))
+        opts: list[str] = []
+        if len(bottomed) < MULLIGAN_MAX_BOTTOM:
+            for i in range(len(hand)):
+                if i not in bottomed:
+                    opts.append(f"mulligan_bottom:{who.value}:{i}")
+        opts.append(f"mulligan_done:{who.value}")
         return opts
+
+    def _resolve_mulligan_for(self, who: RequiredTo) -> None:
+        """Finalize ``who``'s mulligan: bottom the cards chosen so far, draw
+        replacements (kept order), set the real hand, and mark resolved."""
+        if who == RequiredTo.PLAYER_1:
+            hand = self._game_state.player_1_mulligan_hand
+            rest = self._game_state.player_1_library
+            if hand is None or rest is None:
+                raise ValueError("mulligan is not active for player_1")
+            bottom = list(self._game_state.player_1_mulligan_bottomed)
+            new_hand, new_library = self._mulligan_hand_and_library(hand, rest, bottom)
+            self._game_state.player_1_hand = new_hand
+            self._game_state.player_1_library = new_library
+            self._game_state.player_1_mulligan_hand = None
+            self._game_state.player_1_mulligan_bottomed = []
+            self._game_state.mulligan_player_1_resolved = True
+        else:
+            hand = self._game_state.player_2_mulligan_hand
+            rest = self._game_state.player_2_library
+            if hand is None or rest is None:
+                raise ValueError("mulligan is not active for player_2")
+            bottom = list(self._game_state.player_2_mulligan_bottomed)
+            new_hand, new_library = self._mulligan_hand_and_library(hand, rest, bottom)
+            self._game_state.player_2_hand = new_hand
+            self._game_state.player_2_library = new_library
+            self._game_state.player_2_mulligan_hand = None
+            self._game_state.player_2_mulligan_bottomed = []
+            self._game_state.mulligan_player_2_resolved = True
 
     def _deck_selection_output(self) -> EngineOutput | None:
         available_decks = list(list_deck_ids())
@@ -3279,28 +4226,24 @@ class GameEngine:
                 )
             if not self._game_state.is_mulligan_done:
                 self._prepare_mulligan_draws()
-                if not (
-                    self._game_state.mulligan_player_1_resolved and self._game_state.mulligan_player_2_resolved
-                ):
-                    # Surface the mulligan as full ``mulligan_resolve:player_N:<idx>``
-                    # action options (keep-all, plus each way to bottom up to two
-                    # cards) so a generic client like the Branch view can pick one
-                    # in a single click. The board has its own card-picker UI and
-                    # reads ``player_X_mulligan_hand`` from state directly, so it's
-                    # unaffected by what we list here.
+                # SEQUENTIAL mulligan: player_1 fully resolves their one-card-at-
+                # a-time mulligan FIRST, then player_2 — never both at once. Only
+                # the active player gets options and the required_action actor.
+                if not self._game_state.mulligan_player_1_resolved:
                     return EngineOutput(
                         game_state=self.game_state,
-                        player_1_options=(
-                            self._mulligan_options(RequiredTo.PLAYER_1)
-                            if not self._game_state.mulligan_player_1_resolved
-                            else []
+                        player_1_options=self._mulligan_options(RequiredTo.PLAYER_1),
+                        required_action=_required_action(
+                            RequiredTo.PLAYER_1, RequiredStep.CHOOSE_MULLIGAN
                         ),
-                        player_2_options=(
-                            self._mulligan_options(RequiredTo.PLAYER_2)
-                            if not self._game_state.mulligan_player_2_resolved
-                            else []
+                    )
+                if not self._game_state.mulligan_player_2_resolved:
+                    return EngineOutput(
+                        game_state=self.game_state,
+                        player_2_options=self._mulligan_options(RequiredTo.PLAYER_2),
+                        required_action=_required_action(
+                            RequiredTo.PLAYER_2, RequiredStep.CHOOSE_MULLIGAN
                         ),
-                        required_action=_required_action(RequiredTo.BOTH, RequiredStep.CHOOSE_MULLIGAN),
                     )
                 self._finalize_setup_after_mulligan()
 
@@ -3353,7 +4296,7 @@ class GameEngine:
                         else self._game_state.player_2_units
                     )
                     for ui, u in enumerate(init_units):
-                        if not u.exhausted and u.location == "base":
+                        if not u.exhausted and not u.cant_move and u.location == "base":
                             opts.append(
                                 f"play:move_unit:{ui}:{showdown.battlefield}"
                             )
@@ -3431,6 +4374,23 @@ class GameEngine:
                     player_1_options=p1_options,
                     player_2_options=p2_options,
                     required_action=_required_action(next_actor, RequiredStep.ACTION_TURN),
+                )
+
+            deflect = self._game_state.pending_deflect
+            if deflect is not None and deflect.queue:
+                # A spell/ability chose an opponent [Deflect] unit. Its
+                # controller pays (1 Power/stack, any domain) to keep that target
+                # or declines to drop it — one decision per Deflect target. PAY is
+                # only offered when affordable; DECLINE is always available.
+                chooser = deflect.actor
+                stacks = deflect.queue[0][1]
+                can_pay = self._total_power(chooser) >= stacks
+                opts = (["play:pay_deflect"] if can_pay else []) + ["play:decline_deflect"]
+                return EngineOutput(
+                    game_state=self.game_state,
+                    player_1_options=opts if chooser == RequiredTo.PLAYER_1 else [],
+                    player_2_options=opts if chooser == RequiredTo.PLAYER_2 else [],
+                    required_action=_required_action(chooser, RequiredStep.ACTION_TURN),
                 )
 
             repeat = self._game_state.pending_spell_repeat
@@ -3622,7 +4582,6 @@ class GameEngine:
                 # for now; offered as play:activate:<source ref>. Gated on a
                 # valid target existing when the ability targets a unit.
                 _gs = self._game_state
-                _have_unit = bool(_gs.player_1_units or _gs.player_2_units)
                 _av_units = _gs.player_1_units if active == RequiredTo.PLAYER_1 else _gs.player_2_units
                 _av_gears = _gs.player_1_gears if active == RequiredTo.PLAYER_1 else _gs.player_2_gears
                 for _ui, _u in enumerate(_av_units):
@@ -3632,7 +4591,9 @@ class GameEngine:
                     _ab = self._activated_ability_at(_ref)
                     if _ab is None:
                         continue
-                    if self._derive_activation_requirement(tuple(_ab.active_effects)) == "ANY UNIT (1)" and not _have_unit:
+                    if not self._activation_target_available(
+                        active, self._derive_activation_requirement(tuple(_ab.active_effects))
+                    ):
                         continue
                     if not self._can_pay_ability_cost(active, _ref, tuple(_ab.costs)):
                         continue
@@ -3644,7 +4605,9 @@ class GameEngine:
                     _ab = self._activated_ability_at(_ref)
                     if _ab is None:
                         continue
-                    if self._derive_activation_requirement(tuple(_ab.active_effects)) == "ANY UNIT (1)" and not _have_unit:
+                    if not self._activation_target_available(
+                        active, self._derive_activation_requirement(tuple(_ab.active_effects))
+                    ):
                         continue
                     if not self._can_pay_ability_cost(active, _ref, tuple(_ab.costs)):
                         continue
@@ -3735,7 +4698,7 @@ class GameEngine:
                     else self._game_state.player_2_units
                 )
                 for unit_idx, unit in enumerate(active_units):
-                    if unit.exhausted:
+                    if unit.exhausted or unit.cant_move:
                         continue
                     if unit.location == "base":
                         # Base → both battlefields are always offered;
@@ -3826,6 +4789,8 @@ class GameEngine:
             apply_prefix(ApplyVerb.CHOOSE_BATTLEFIELD_1),
             apply_prefix(ApplyVerb.CHOOSE_BATTLEFIELD_2),
             "mulligan_resolve:",
+            apply_prefix(ApplyVerb.MULLIGAN_BOTTOM),
+            apply_prefix(ApplyVerb.MULLIGAN_DONE),
         )
         if not action.startswith(_known_prefixes):
             if gs.player_1_deck is None or gs.player_2_deck is None:
@@ -3897,6 +4862,75 @@ class GameEngine:
                 raise ValueError("battlefield_2 must be from player_2 deck battlefields")
             self._game_state.battlefield_2 = value
             self._game_state.player_2_base = value
+            return self.start()
+
+        if action.startswith(apply_prefix(ApplyVerb.MULLIGAN_BOTTOM)):
+            # Mark ONE original card for bottoming (one-card-at-a-time mulligan).
+            remainder = action.removeprefix(apply_prefix(ApplyVerb.MULLIGAN_BOTTOM))
+            who_raw, _, idx_raw = remainder.partition(":")
+            who = who_raw.strip().lower()
+            if who == RequiredTo.PLAYER_1.value:
+                target = RequiredTo.PLAYER_1
+            elif who == RequiredTo.PLAYER_2.value:
+                target = RequiredTo.PLAYER_2
+            else:
+                raise ValueError("mulligan_bottom who must be player_1 or player_2")
+            if actor != target:
+                raise ValueError(f"{target.value} must resolve their own mulligan")
+            if target == RequiredTo.PLAYER_2 and not self._game_state.mulligan_player_1_resolved:
+                raise ValueError("player_1 resolves their mulligan first (sequential)")
+            resolved = (
+                self._game_state.mulligan_player_1_resolved
+                if target == RequiredTo.PLAYER_1
+                else self._game_state.mulligan_player_2_resolved
+            )
+            if resolved:
+                raise ValueError(f"{target.value} mulligan already resolved")
+            hand = (
+                self._game_state.player_1_mulligan_hand
+                if target == RequiredTo.PLAYER_1
+                else self._game_state.player_2_mulligan_hand
+            )
+            if hand is None:
+                raise ValueError(f"mulligan is not active for {target.value}")
+            try:
+                index = int(idx_raw)
+            except ValueError as e:
+                raise ValueError("mulligan_bottom requires mulligan_bottom:player_N:<index>") from e
+            if index not in range(len(hand)):
+                raise ValueError(f"mulligan index must be 0..{len(hand) - 1}")
+            bottomed = self._mulligan_bottomed_for(target)
+            if index in bottomed:
+                raise ValueError("that card is already set to be mulliganed")
+            if len(bottomed) >= MULLIGAN_MAX_BOTTOM:
+                raise ValueError(f"at most {MULLIGAN_MAX_BOTTOM} cards may be mulliganed")
+            bottomed.append(index)
+            # Cap reached → auto-finalize (no extra "done" click needed).
+            if len(bottomed) >= MULLIGAN_MAX_BOTTOM:
+                self._resolve_mulligan_for(target)
+            return self.start()
+
+        if action.startswith(apply_prefix(ApplyVerb.MULLIGAN_DONE)):
+            # "No mulligan" / stop: finalize with whatever's been chosen so far.
+            who = action.removeprefix(apply_prefix(ApplyVerb.MULLIGAN_DONE)).strip().lower()
+            if who == RequiredTo.PLAYER_1.value:
+                target = RequiredTo.PLAYER_1
+            elif who == RequiredTo.PLAYER_2.value:
+                target = RequiredTo.PLAYER_2
+            else:
+                raise ValueError("mulligan_done who must be player_1 or player_2")
+            if actor != target:
+                raise ValueError(f"{target.value} must resolve their own mulligan")
+            if target == RequiredTo.PLAYER_2 and not self._game_state.mulligan_player_1_resolved:
+                raise ValueError("player_1 resolves their mulligan first (sequential)")
+            resolved = (
+                self._game_state.mulligan_player_1_resolved
+                if target == RequiredTo.PLAYER_1
+                else self._game_state.mulligan_player_2_resolved
+            )
+            if resolved:
+                raise ValueError(f"{target.value} mulligan already resolved")
+            self._resolve_mulligan_for(target)
             return self.start()
 
         if action.startswith(apply_prefix(ApplyVerb.MULLIGAN_RESOLVE)):

@@ -73,6 +73,37 @@ class EffectChoiceTests(unittest.TestCase):
         _fire_spell_trigger(eng)
         self.assertIsNone(eng._game_state.pending_effect_choice)
 
+    def test_no_units_here_never_reaches_the_chain(self) -> None:
+        # Rule 402.3: with no unit at the Hall, the "may give a unit here +1"
+        # ability has no legal choice, so it is dropped as it would go on the
+        # chain — it never becomes a Chain Item, opens NO reaction window, and
+        # shows nothing. (Previously it went on the chain and fizzled at
+        # resolution, briefly offering an empty reaction window.)
+        eng = _engine_at_hall([PlayedUnit(card="Scuttle Crab", location="base", exhausted=False)])
+        gs = eng._game_state
+        with _patched_taxonomy():
+            eng._emit(
+                GameEvent(kind="ON_PLAY_SPELL", controller="player_1", data={"card": "En Garde"})
+            )
+            eng._drain_triggers()
+        self.assertIsNone(gs.pending_chain, "inert trigger must not create a chain item")
+        self.assertIsNone(gs.pending_effect_choice)
+
+    def test_unit_here_still_opens_the_chain(self) -> None:
+        # Control case: with a unit at the Hall there IS a legal choice, so the
+        # ability goes on the chain as normal (then pauses for the pick).
+        eng = _engine_at_hall(
+            [PlayedUnit(card="Ravenbloom Student", location="battlefield_1", exhausted=False)]
+        )
+        gs = eng._game_state
+        with _patched_taxonomy():
+            eng._emit(
+                GameEvent(kind="ON_PLAY_SPELL", controller="player_1", data={"card": "En Garde"})
+            )
+            eng._drain_triggers()
+        self.assertIsNotNone(gs.pending_chain)
+        self.assertTrue(gs.pending_chain.items)
+
     def test_pause_enumerates_controllers_units_here(self) -> None:
         eng = _engine_at_hall(
             [

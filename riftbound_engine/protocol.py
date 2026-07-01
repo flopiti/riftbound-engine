@@ -5,7 +5,17 @@ Values are stable API — tests and any client should use these names, not ad ho
 
 from __future__ import annotations
 
-from enum import StrEnum
+try:  # Python 3.11+
+    from enum import StrEnum
+except ImportError:  # Python 3.10 and earlier — minimal stand-in
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        """Compat shim: members are real ``str``s and ``str(member)`` is the
+        value (matching 3.11's StrEnum), so the engine imports/runs on 3.10."""
+
+        def __str__(self) -> str:
+            return str(self.value)
 
 
 class RequiredStep(StrEnum):
@@ -28,6 +38,12 @@ class ApplyVerb(StrEnum):
     CHOOSE_BATTLEFIELD_1 = "choose_battlefield_1"
     CHOOSE_BATTLEFIELD_2 = "choose_battlefield_2"
     MULLIGAN_RESOLVE = "mulligan_resolve"
+    #: One-card-at-a-time mulligan: bottom a single card by index
+    #: (`mulligan_bottom:player_N:<i>`); MULLIGAN_DONE is the "No mulligan" /
+    #: stop option that finalizes. MULLIGAN_RESOLVE is kept for the legacy
+    #: one-shot path (fake-fill auto-setup, CLI, older clients).
+    MULLIGAN_BOTTOM = "mulligan_bottom"
+    MULLIGAN_DONE = "mulligan_done"
     ABCD = "abcd"
     PLAY = "play"
 

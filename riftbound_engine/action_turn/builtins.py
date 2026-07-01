@@ -500,8 +500,10 @@ def _play_spell(ctx: ActionTurnContext) -> None:
     )
 
     raw_req = card_spell_requirement_of(card)
+    from ..requirements import spell_needs_target_choice
+
     if (
-        spell_target_plan(raw_req)
+        spell_needs_target_choice(raw_req, gs, ctx.actor)
         or battlefield_picks(raw_req)
         or gear_picks(raw_req)
         or trash_picks(raw_req)
@@ -661,12 +663,14 @@ def _choose_spell_targets(ctx: ActionTurnContext) -> None:
     used = {token_to_ref(tok) for picks in choice.chosen for tok in picks}
 
     payload = ctx.payload.strip()
-    if not payload:
+    refs = [token_to_ref(tok) for tok in payload.split(",") if tok.strip()]
+    # An empty pick is the "No targets" / skip choice — only valid when the
+    # current phrase is OPTIONAL (min 0, e.g. "up to three units").
+    if not refs and req.min_count > 0:
         raise ValueError(
             "play:choose_spell_targets requires target refs "
             "(e.g. play:choose_spell_targets:p1-0)"
         )
-    refs = [token_to_ref(tok) for tok in payload.split(",") if tok.strip()]
     if not target_set_satisfies(req, gs, refs, caster=caster, exclude=used):
         raise ValueError(
             f"invalid target set for '{choice.card}': {payload} "
@@ -1077,6 +1081,25 @@ def _choose_effect_target(ctx: ActionTurnContext) -> None:
     ctx.engine._drain_triggers()
 
 
+@register_turn_action("pay_deflect")
+def _pay_deflect(ctx: ActionTurnContext) -> None:
+    """Pay the [Deflect] tax for the current target so the ability keeps it.
+
+    Wire format: ``play:pay_deflect`` (no payload). Deducts 1 Power per Deflect
+    stack (any domain) from the ability's controller. When the last Deflect
+    decision is made, the deferred spell/ability lands on the chain."""
+    ctx.engine.resolve_deflect_decision(ctx.actor, pay=True)
+
+
+@register_turn_action("decline_deflect")
+def _decline_deflect(ctx: ActionTurnContext) -> None:
+    """Decline the [Deflect] tax for the current target — it's dropped from the
+    ability's targets (the rest of the ability still resolves).
+
+    Wire format: ``play:decline_deflect`` (no payload)."""
+    ctx.engine.resolve_deflect_decision(ctx.actor, pay=False)
+
+
 @register_turn_action("choose_repeat")
 def _choose_repeat(ctx: ActionTurnContext) -> None:
     """Decide whether to repeat a just-played [Repeat] spell.
@@ -1131,8 +1154,10 @@ def _choose_repeat(ctx: ActionTurnContext) -> None:
     # park a fresh PendingSpellChoice carrying the rounds so far; otherwise
     # there's nothing to pick, so record an empty round and re-offer at once.
     raw_req = card_spell_requirement_of(rep.card)
+    from ..requirements import spell_needs_target_choice
+
     has_picks = bool(
-        spell_target_plan(raw_req)
+        spell_needs_target_choice(raw_req, gs, rep.actor)
         or battlefield_picks(raw_req)
         or gear_picks(raw_req)
         or trash_picks(raw_req)
@@ -1303,6 +1328,7 @@ def _activate(ctx: ActionTurnContext) -> None:
         getattr(gs, "pending_accelerate", None), getattr(gs, "pending_ability_cost", None),
         getattr(gs, "pending_ability_payment", None),
         getattr(gs, "pending_effect_choice", None),
+        getattr(gs, "pending_deflect", None),
     )
     if any(b is not None for b in blockers):
         raise ValueError("cannot activate an ability mid-resolution")
@@ -1332,7 +1358,7 @@ def _activate(ctx: ActionTurnContext) -> None:
 
     effects = tuple(ability.active_effects)
     req = ctx.engine._derive_activation_requirement(effects)
-    if req == "ANY UNIT (1)" and not (gs.player_1_units or gs.player_2_units):
+    if not ctx.engine._activation_target_available(ctx.actor, req):
         raise ValueError("no valid target for this ability")
 
     # Pay the cost (exhaust + Energy/specific-domain Power), then resolve. If the
@@ -1381,6 +1407,10 @@ def _pass_priority(ctx: ActionTurnContext) -> None:
     if gs.pending_spell_repeat is not None:
         raise ValueError(
             "resolve the pending [Repeat] decision before passing priority"
+        )
+    if getattr(gs, "pending_deflect", None) is not None:
+        raise ValueError(
+            "resolve the pending [Deflect] decision before passing priority"
         )
     if ctx.actor != chain.priority:
         raise ValueError(
@@ -1699,6 +1729,10 @@ def _move_unit(ctx: ActionTurnContext) -> None:
             f"unit at index {index} ({unit.card!r}) is exhausted and cannot move "
             "this turn — it will ready on the owner's next Awake"
         )
+    if getattr(unit, "cant_move", False):
+        raise ValueError(
+            f"unit at index {index} ({unit.card!r}) can't move this turn"
+        )
     if unit.location == destination:
         raise ValueError(
             f"unit at index {index} ({unit.card!r}) is already at {destination!r}"
@@ -1722,8 +1756,26 @@ def _move_unit(ctx: ActionTurnContext) -> None:
     elif destination == "battlefield_2":
         dest_controller = gs.battlefield_2_controller
 
+    origin = unit.location
     unit.location = destination
     unit.exhausted = True
+
+    # Fire the moving unit's own "when I move" abilities (Stellacorn Herder's
+    # draw, Noxian Drummer / Corina's Recruit tokens). SELF-scoped, so the
+    # source is the moved unit's ref; the destination battlefield (if any) is
+    # carried so "…here" effects land where it arrived. ``origin`` carries where
+    # it moved FROM so "a unit moves from here" (Back-Alley Bar) can match.
+    from ..triggers import GameEvent
+
+    ctx.engine._emit(
+        GameEvent(
+            kind="ON_MOVE",
+            controller=ctx.actor.value,
+            source=f"{ctx.actor.value}:{index}",
+            battlefield=destination if destination != "base" else None,
+            data={"origin": origin, "unit": f"{ctx.actor.value}:{index}"},
+        )
+    )
 
     # If the unit just walked onto a battlefield that the active player
     # does NOT already control, open a showdown. Both players' options
@@ -1736,13 +1788,31 @@ def _move_unit(ctx: ActionTurnContext) -> None:
             battlefield=destination,
             initiator=ctx.actor,
         )
+        from ..triggers import GameEvent
+
+        # "When a showdown begins here" — fires for cards on EITHER side that
+        # sit at the contested battlefield (the invaders that just moved in,
+        # the defender's units, the battlefield card itself), and unlike
+        # ON_DEFEND it fires even when the battlefield was UNCONTROLLED (no
+        # defender). controller=initiator gives a battlefield-card-sourced
+        # ability a player to resolve under (see engine._emit's fallback to
+        # event.controller for battlefield refs); HERE-scoped unit abilities
+        # ignore the event controller and resolve under their own controller.
+        # Queued now; drained on the next start() before the showdown menu, so
+        # it resolves in the reaction window ahead of mustering.
+        ctx.engine._emit(
+            GameEvent(
+                kind="ON_SHOWDOWN_BEGIN",
+                controller=ctx.actor.value,
+                battlefield=destination,
+            )
+        )
+
         # If the battlefield was held by the OPPONENT, they are the DEFENDER —
         # fire their "when you defend here" abilities. (An UNCONTROLLED BF has
         # no defender, so no ON_DEFEND.) Queued now; drained on the next
         # start() before the showdown menu, so it resolves in the reaction
         # window ahead of mustering. See engine.start() single drain point.
-        from ..triggers import GameEvent
-
         if dest_controller is not None and dest_controller != ctx.actor:
             ctx.engine._emit(
                 GameEvent(

@@ -11,8 +11,16 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from pathlib import Path
+
+try:  # Python 3.11+
+    from enum import StrEnum
+except ImportError:  # Python 3.10 and earlier
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        def __str__(self) -> str:
+            return str(self.value)
 from threading import Lock
 from typing import Any
 

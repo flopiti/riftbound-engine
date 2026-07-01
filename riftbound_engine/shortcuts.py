@@ -517,6 +517,10 @@ def compute_play_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         # A [Repeat] decision owns the clock — only the repeat picker
         # (compute_repeat_intents) and the decline option are valid.
         return []
+    if getattr(gs, "pending_deflect", None) is not None:
+        # A [Deflect] pay-or-drop decision owns the clock — only the flat
+        # play:pay_deflect / play:decline_deflect options are valid.
+        return []
     if getattr(gs, "pending_accelerate", None) is not None:
         # An [Accelerate] decision owns the clock — only the accelerate picker
         # (compute_accelerate_intents) and the decline option are valid.
@@ -929,6 +933,7 @@ def compute_equip_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInt
         or getattr(gs, "pending_ability_cost", None) is not None
         or getattr(gs, "pending_ability_payment", None) is not None
         or getattr(gs, "pending_effect_choice", None) is not None
+        or getattr(gs, "pending_deflect", None) is not None
     ):
         return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
@@ -1058,6 +1063,7 @@ def compute_quick_draw_intents(engine: GameEngine, actor: RequiredTo) -> list[Pl
         or getattr(gs, "pending_ability_cost", None) is not None
         or getattr(gs, "pending_ability_payment", None) is not None
         or getattr(gs, "pending_effect_choice", None) is not None
+        or getattr(gs, "pending_deflect", None) is not None
     ):
         return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
@@ -1159,6 +1165,7 @@ def compute_move_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
         or getattr(gs, "pending_ability_cost", None) is not None
         or getattr(gs, "pending_ability_payment", None) is not None
         or getattr(gs, "pending_effect_choice", None) is not None
+        or getattr(gs, "pending_deflect", None) is not None
     ):
         return []
     if actor not in (RequiredTo.PLAYER_1, RequiredTo.PLAYER_2):
@@ -1181,7 +1188,7 @@ def compute_move_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInte
 
     out: list[PlayIntent] = []
     for ui, u in enumerate(units):
-        if u.exhausted:
+        if u.exhausted or getattr(u, "cant_move", False):
             continue
         dests = ["battlefield_1", "battlefield_2"] if u.location == "base" else ["base"]
         combos = tuple(

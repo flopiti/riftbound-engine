@@ -856,6 +856,17 @@ def _selectable_phrase_req(phrase: Phrase) -> UnitRequirement | None:
     return phrase.unit
 
 
+def _targetable_phrase_req(phrase: Phrase) -> UnitRequirement | None:
+    """Like :func:`_selectable_phrase_req`, but ALSO returns min-0 ("up to N")
+    unit phrases. Those are OPTIONAL picks — the caster may choose 0..max units
+    (the picker offers a "No targets" set) — so they belong in the target plan
+    instead of being silently dropped (which made "up to three" spells resolve
+    with no targets and never prompt)."""
+    if phrase.unit is None or phrase.unknown or phrase.unit.impossible:
+        return None
+    return phrase.unit
+
+
 def selectable_unit_requirement(raw: str | None) -> UnitRequirement | None:
     """Return the single ANY-UNIT requirement that needs an explicit pick.
 
@@ -902,10 +913,31 @@ def spell_target_plan(raw: str | None) -> list[UnitRequirement]:
         if any(c == "OR" for c in group.connectors):
             return []
         for phrase in group.phrases:
-            req = _selectable_phrase_req(phrase)
+            req = _targetable_phrase_req(phrase)
             if req is not None:
                 plan.append(req)
     return plan
+
+
+def spell_needs_target_choice(raw: str | None, state, caster: str | None = None) -> bool:
+    """Whether casting a spell with this requirement should PAUSE for a unit
+    target pick, given the current board ``state``.
+
+    A FORCED pick (a phrase whose ``min_count`` is ≥ 1) always pauses. An
+    all-OPTIONAL plan ("up to N" / ``n`` phrases, every ``min_count`` == 0)
+    pauses ONLY if at least one eligible unit exists to choose — with nothing to
+    pick there is no decision to make, so the cast proceeds straight to the
+    chain (matching how a no-requirement spell behaves). This keeps "up to N"
+    spells (Bellows Breath, Singularity) prompting when there are targets, while
+    a min-0 spell cast into an empty board (Fox-Fire) lands immediately."""
+    plan = spell_target_plan(raw)
+    if not plan:
+        return False
+    if any(req.min_count >= 1 for req in plan):
+        return True
+    units = board_units(state)
+    c = _norm_caster(caster)
+    return any(any(req.unit_matches(u, c) for u in units) for req in plan)
 
 
 def targets_still_satisfy(
@@ -1175,7 +1207,10 @@ def enumerate_unit_target_sets(
     if len(matching) < req.min_count:
         return []
     hi = len(matching) if req.max_count is None else min(req.max_count, len(matching))
-    lo = max(req.min_count, 1)  # the choice step never offers an empty pick
+    # For a REQUIRED pick (min >= 1) the smallest set has min_count units. For
+    # an OPTIONAL "up to N" pick (min 0) we also offer the EMPTY set, which is
+    # the "No targets" / skip option.
+    lo = req.min_count
 
     out: list[tuple[TargetRef, ...]] = []
     for size in range(lo, hi + 1):

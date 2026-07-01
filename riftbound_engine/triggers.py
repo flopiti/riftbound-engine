@@ -43,10 +43,35 @@ ON_SCORE = "ON_SCORE"
 #: Emitted for the defender (the prior controller) the moment the attacker
 #: moves in, before the muster/focus window.
 ON_DEFEND = "ON_DEFEND"
+#: A showdown OPENS at a battlefield — fires for ANY card sitting HERE, on
+#: either side, regardless of who controlled the battlefield (or no one).
+#: Distinct from ON_DEFEND, which fires only for the prior controller and not
+#: at all on an uncontrolled battlefield. Emitted once, when the showdown is
+#: born (not on muster/reinforce moves).
+ON_SHOWDOWN_BEGIN = "ON_SHOWDOWN_BEGIN"
 TURN_START = "TURN_START"
 TURN_END = "TURN_END"
 ON_CHANNEL = "ON_CHANNEL"
 ON_DRAW = "ON_DRAW"
+#: A unit MOVED (base ↔ battlefield). Emitted for the moving unit (SELF scope);
+#: ``battlefield`` carries the destination when it is a battlefield (None for a
+#: move back to base). ``data["origin"]`` carries where it moved FROM (a
+#: battlefield slot or "base"), so "when a unit moves from here" can match.
+ON_MOVE = "ON_MOVE"
+#: A player MOVED an ENEMY unit (e.g. Charm). Emitted for the player who did the
+#: moving (``controller``); ``data["unit"]`` is the moved enemy unit's ref.
+ON_MOVE_ENEMY = "ON_MOVE_ENEMY"
+#: A unit was RETURNED to its owner's hand (Gust, etc.). Emitted as the unit
+#: leaves play; ``controller`` is the unit's owner, ``data["origin"]`` the
+#: battlefield/base it sat at (so "a unit here is returned" can match).
+ON_RETURN_TO_HAND = "ON_RETURN_TO_HAND"
+#: A unit was CHOSEN (targeted) by a spell or ability. Emitted for the unit
+#: (SELF scope via ``source``); ``controller`` is the player who chose it.
+ON_CHOOSE = "ON_CHOOSE"
+#: A unit was READIED (un-exhausted) — including the Awake step refresh and any
+#: effect that readies it. Emitted per readied unit (SELF scope via ``source``);
+#: ``controller`` is its controller.
+ON_READY = "ON_READY"
 
 EVENT_KINDS = frozenset(
     {
@@ -57,10 +82,16 @@ EVENT_KINDS = frozenset(
         ON_HOLD,
         ON_SCORE,
         ON_DEFEND,
+        ON_SHOWDOWN_BEGIN,
         TURN_START,
         TURN_END,
         ON_CHANNEL,
         ON_DRAW,
+        ON_MOVE,
+        ON_MOVE_ENEMY,
+        ON_RETURN_TO_HAND,
+        ON_CHOOSE,
+        ON_READY,
     }
 )
 
@@ -72,13 +103,17 @@ FRIENDLY = "FRIENDLY"  # owner controlled by the player who caused the event
 ENEMY = "ENEMY"  # owner controlled by the OTHER player
 ANY = "ANY"  # fires regardless of who/where
 HERE = "HERE"  # owner sits at the event's battlefield
+ORIGIN_HERE = "ORIGIN_HERE"  # owner sits where the event ORIGINATED (data["origin"])
 
 
 @dataclass(frozen=True)
 class TriggerSpec:
-    """How one taxonomy trigger code maps onto an emitted event."""
+    """How one taxonomy trigger code maps onto an emitted event.
 
-    kind: str
+    ``kind`` is the event kind, or a tuple of kinds when one trigger responds to
+    several (e.g. "when you choose OR ready me")."""
+
+    kind: "str | tuple[str, ...]"
     scope: str
 
 
@@ -101,7 +136,11 @@ TRIGGER_EVENT_MAP: dict[str, TriggerSpec] = {
     "WHEN_PLAYER_PLAYS_SPELL": TriggerSpec(ON_PLAY_SPELL, ANY),
     "WHEN_YOU_PLAY_SPELL_OPP_TURN": TriggerSpec(ON_PLAY_SPELL, FRIENDLY),
     "WHILE_YOU_CONTROL_THIS_BF_WHEN_PLAY_SPELL": TriggerSpec(ON_PLAY_SPELL, FRIENDLY),
-    "FIRST_TIME_PLAYER_CHOOSE_FRIENDLY_WITH_SPELL_EACH_TURN": TriggerSpec(ON_PLAY_SPELL, FRIENDLY),
+    # The Dreaming Tree: "when a player chooses a friendly unit HERE with a
+    # spell for the FIRST time each turn, they draw 1." Fires on any spell
+    # (ANY); GameEngine narrows it to a caster who chose one of their units at
+    # THIS battlefield, capped once per player per turn (._trigger_state_ok).
+    "FIRST_TIME_PLAYER_CHOOSE_FRIENDLY_WITH_SPELL_EACH_TURN": TriggerSpec(ON_PLAY_SPELL, ANY),
     # --- a unit dies --------------------------------------------------------
     "DEATHKNELL": TriggerSpec(ON_DEATH, SELF),
     "WHEN_FRIENDLY_UNIT_DIES": TriggerSpec(ON_DEATH, FRIENDLY),
@@ -118,13 +157,50 @@ TRIGGER_EVENT_MAP: dict[str, TriggerSpec] = {
     # A showdown opened against a BF you control — fires for the card(s) HERE
     # (the battlefield card / your units there) on the defending side.
     "WHEN_YOU_DEFEND_HERE": TriggerSpec(ON_DEFEND, HERE),
+    # A showdown began at this battlefield — fires for the card(s) HERE on
+    # EITHER side (attacker's invaders, defender's units, the battlefield
+    # card itself), including showdowns over an uncontrolled battlefield.
+    "WHEN_SHOWDOWN_BEGINS_HERE": TriggerSpec(ON_SHOWDOWN_BEGIN, HERE),
     # --- start of a turn ----------------------------------------------------
     "AT_START_BEGGINNING_PHASE": TriggerSpec(TURN_START, FRIENDLY),
-    "AT_START_EACH_FIRST_BEGGINNING_PHASE": TriggerSpec(TURN_START, FRIENDLY),
+    # "each player's FIRST Beginning Phase" — fires for ANY player's turn start
+    # (Obelisk of Power / The Arena's Greatest benefit "that player"), but only
+    # the first one: the engine narrows it to turn_number == 1 for the
+    # beneficiary in GameEngine._trigger_state_ok.
+    "AT_START_EACH_FIRST_BEGGINNING_PHASE": TriggerSpec(TURN_START, ANY),
     # --- end of a turn ------------------------------------------------------
     # The owner's own turn ending (e.g. Blighted Battleaxe's end-of-turn
     # unattach + self-damage).
     "AT_END_OF_TURN": TriggerSpec(TURN_END, FRIENDLY),
+    # --- a unit moves -------------------------------------------------------
+    # The moving unit's own "when I move" ability (Stellacorn Herder's "draw 1";
+    # Noxian Drummer / Corina's "play a Recruit token here"). SELF scope: only
+    # the unit that actually moved fires.
+    "WHEN_I_MOVE": TriggerSpec(ON_MOVE, SELF),
+    # A unit moved AWAY from this battlefield (Back-Alley Bar: "give it +1
+    # might"). ORIGIN_HERE: the battlefield card matches the move's origin.
+    "WHEN_UNIT_MOVE_FROM_HERE": TriggerSpec(ON_MOVE, ORIGIN_HERE),
+    # You moved an ENEMY unit (Blast Cone, after Charm-style movement). Fires
+    # for the player who moved it.
+    "WHEN_YOU_MOVE_ENEMY_UNIT": TriggerSpec(ON_MOVE_ENEMY, FRIENDLY),
+    # --- a unit returns to hand ---------------------------------------------
+    # A unit sitting HERE is bounced to hand (Ripper's Bay). ORIGIN_HERE: the
+    # battlefield matches where the unit was when it left.
+    "WHEN_UNIT_RETURNED_HAND": TriggerSpec(ON_RETURN_TO_HAND, ORIGIN_HERE),
+    # --- this unit is interacted with ---------------------------------------
+    # "When I hold" — this unit holds the battlefield it is on (Ahri, Alluring).
+    # HERE scope: the unit sits at the battlefield that held a point.
+    "WHEN_I_HOLD": TriggerSpec(ON_HOLD, HERE),
+    # "When I attack or defend" — this unit is in a showdown at its battlefield
+    # (Ahri, Inquisitive). HERE scope: it sits at the contested battlefield.
+    "WHEN_I_ATTACK_OR_DEFEND": TriggerSpec(ON_SHOWDOWN_BEGIN, HERE),
+    # "When you choose OR ready me" (Irelia, Fervent). Either event, SELF scope.
+    "WHEN_YOU_CHOOSE_OR_READY_ME": TriggerSpec((ON_CHOOSE, ON_READY), SELF),
+    # --- end of your turn ---------------------------------------------------
+    # Dazzling Aurora: "At the end of your turn, reveal … until a unit … play
+    # it …". The reveal/play behaviour rides on the bundled effect code; the
+    # trigger just fires at the controller's turn end.
+    "AT_END_OF_YOUR_TURN_REVEAL_TOP_UNTIL_UNIT_PLAY_IT": TriggerSpec(TURN_END, FRIENDLY),
 }
 
 
@@ -169,6 +245,10 @@ class TriggeredEffect:
     #: spell that just resolved for an ON_PLAY_SPELL trigger. Lets the UI
     #: underline "spell" in the trigger label and hover-preview that card.
     context_card: str | None = None
+    #: Unit ref(s) the event was ABOUT, fed to the ability's targeted effects so
+    #: "give IT +1 might" / "[Stun] IT" act on the moved/returned/chosen unit
+    #: without a separate target pick. Empty for abilities that pick their own.
+    targets: tuple[str, ...] = ()
 
 
 @dataclass
@@ -177,12 +257,21 @@ class EventLogEntry:
 
     ``kind`` is ``"event"`` (something happened), ``"trigger"`` (an ability
     fired and went on the chain) or ``"effect"`` (an effect resolved).
-    ``text`` is a human-readable description for the UI.
+    ``text`` is a raw human-ish description kept as a FALLBACK for the UI.
+
+    ``code`` is the raw engine code the line is about (a trigger code, an
+    effect code, or an event kind) when there is one; ``card`` is the source
+    card NAME when there is one. The UI prefers these — it translates ``code``
+    through its label table (``chainLabels.ts::humanizeCode``) so the feed
+    reads "Draw 1" / "When you play this" instead of ``DRAW_1`` /
+    ``WHEN_YOU_PLAY_ME``. ``text`` is only used when ``code`` is absent.
     """
 
     sequence: int
     kind: str
     text: str
+    code: str | None = None
+    card: str | None = None
 
 
 def trigger_matches(
@@ -199,7 +288,10 @@ def trigger_matches(
     Pure function — no engine state. Unknown / inert codes return ``False``.
     """
     spec = TRIGGER_EVENT_MAP.get(trigger_code)
-    if spec is None or spec.kind != event.kind:
+    if spec is None:
+        return False
+    kinds = spec.kind if isinstance(spec.kind, tuple) else (spec.kind,)
+    if event.kind not in kinds:
         return False
     if spec.scope == ANY:
         return True
@@ -219,4 +311,7 @@ def trigger_matches(
             and event.battlefield is not None
             and owner_location == event.battlefield
         )
+    if spec.scope == ORIGIN_HERE:
+        origin = event.data.get("origin")
+        return owner_location is not None and origin is not None and owner_location == origin
     return False

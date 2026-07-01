@@ -120,5 +120,78 @@ class DiscardChoiceTests(unittest.TestCase):
         self.assertIsNone(gs.pending_effect_choice)
 
 
+class DiscardDraw2Tests(unittest.TestCase):
+    def test_pick_discards_one_and_draws_two(self) -> None:
+        eng, patch = _engine_with_ability(
+            "Tester",
+            ("DISCARD_1_DRAW_2",),
+            hand=["Scuttle Crab", "Lonely Poro"],
+            library=["En Garde", "Cleave"],
+        )
+        _fire(eng, patch)
+        choice = eng._game_state.pending_effect_choice
+        self.assertEqual(choice.options, ["h-0", "h-1"])
+        self.assertFalse(choice.optional)  # forced, same as DRAW_1
+        eng.apply_action("play:choose_effect_target:h-0", RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIn("Scuttle Crab", gs.player_1_trash)
+        # kept Lonely Poro, drew both library cards
+        self.assertEqual(gs.player_1_hand, ["Lonely Poro", "En Garde", "Cleave"])
+        self.assertEqual(gs.player_1_library, [])
+        self.assertIsNone(gs.pending_effect_choice)
+
+    def test_short_deck_draws_only_what_is_left(self) -> None:
+        # One card left: discard resolves, draw 2 pulls just the single card.
+        eng, patch = _engine_with_ability(
+            "Tester",
+            ("DISCARD_1_DRAW_2",),
+            hand=["Scuttle Crab", "Lonely Poro"],
+            library=["En Garde"],
+        )
+        _fire(eng, patch)
+        eng.apply_action("play:choose_effect_target:h-1", RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIn("Lonely Poro", gs.player_1_trash)
+        self.assertEqual(gs.player_1_hand, ["Scuttle Crab", "En Garde"])
+        self.assertEqual(gs.player_1_library, [])
+
+    def test_empty_hand_still_draws_two(self) -> None:
+        # Nothing to discard ⇒ no choice opened, but "then draw 2" still runs
+        # via on_empty.
+        eng, patch = _engine_with_ability(
+            "Tester", ("DISCARD_1_DRAW_2",), hand=[], library=["En Garde", "Cleave", "Gust"]
+        )
+        _fire(eng, patch)
+        gs = eng._game_state
+        self.assertIsNone(gs.pending_effect_choice)
+        self.assertEqual(gs.player_1_hand, ["En Garde", "Cleave"])
+        self.assertEqual(gs.player_1_library, ["Gust"])
+
+
+class DiscardDrawPatternTests(unittest.TestCase):
+    """The DISCARD_1_DRAW_<n> family is pattern-registered, so an N never
+    explicitly listed still resolves — no new registration needed."""
+
+    def test_unregistered_count_draws_via_pattern(self) -> None:
+        from riftbound_engine import effects as E
+
+        # DRAW_3 is not enumerated anywhere, yet the pattern recognizes it.
+        self.assertTrue(E.is_choice_effect("DISCARD_1_DRAW_3"))
+        eng, patch = _engine_with_ability(
+            "Tester",
+            ("DISCARD_1_DRAW_3",),
+            hand=["Scuttle Crab", "Lonely Poro"],
+            library=["En Garde", "Cleave", "Gust", "Defy"],
+        )
+        _fire(eng, patch)
+        eng.apply_action("play:choose_effect_target:h-0", RequiredTo.PLAYER_1)
+        gs = eng._game_state
+        self.assertIn("Scuttle Crab", gs.player_1_trash)
+        # kept Lonely Poro, drew 3 (Defy stays in library)
+        self.assertEqual(gs.player_1_hand, ["Lonely Poro", "En Garde", "Cleave", "Gust"])
+        self.assertEqual(gs.player_1_library, ["Defy"])
+        self.assertIsNone(gs.pending_effect_choice)
+
+
 if __name__ == "__main__":
     unittest.main()

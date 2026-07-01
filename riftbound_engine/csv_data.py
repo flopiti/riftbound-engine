@@ -517,6 +517,34 @@ def shield_amount_in_text(text: str) -> int:
     return int(m.group(1)) if (m and m.group(1)) else 1
 
 
+_DEFLECT_KW_RE = re.compile(r"\[Deflect(?:\s+(\d+))?\]", re.IGNORECASE)
+
+
+def card_printed_deflect(name: str) -> int:
+    """The unit's OWN printed [Deflect] amount, or 0. Bare ``[Deflect]`` is 1,
+    ``[Deflect N]`` is N; multiple instances STACK (summed).
+
+    Deflect taxes an OPPONENT for choosing this unit as a target of an ability
+    going on the chain (1 Power per stack, or the target is dropped). Skips a
+    ``[Deflect]`` the card GRANTS to OTHER units ("…have/give/gain [Deflect]")
+    — that's a separate granted-keyword effect, not this card's own keyword."""
+    ab = card_ability_of(name)
+    total = 0
+    for m in _DEFLECT_KW_RE.finditer(ab):
+        pre = ab[max(0, m.start() - 14) : m.start()].lower()
+        if any(w in pre for w in ("have", "give", "gain")):
+            continue
+        total += int(m.group(1) or 1)
+    return total
+
+
+def deflect_amount_in_text(text: str) -> int:
+    """First ``[Deflect N]`` amount anywhere in ``text`` (bare = 1), else 1.
+    Used to size a GRANTED [Deflect] from the granting card's reminder text."""
+    m = _DEFLECT_KW_RE.search(text or "")
+    return int(m.group(1)) if (m and m.group(1)) else 1
+
+
 # Ability-cost codes the engine can charge out of the Energy + Power pools.
 #   PAY_<N>_ENERGY   → N Energy
 #   PAY_<N>P         → N Power of ANY domain (the card text's "N runes of any type")

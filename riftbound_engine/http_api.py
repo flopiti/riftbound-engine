@@ -20,7 +20,7 @@ from .action_label import label_for_action
 from .abilities import attached_might_bonus
 from .csv_data import card_domains_of, card_energy_of, card_might_of, card_power_of
 from .deck_files import DECKS_DIR, deck_file_path, list_deck_ids, load_deck_file
-from .engine import Deck, EngineOutput, GameEngine, GameState, RequiredTo
+from .engine import VICTORY_SCORE, Deck, EngineOutput, GameEngine, GameState, RequiredTo
 from .fake_fill import (
     FakeFillConfig,
     FakeFillMode,
@@ -38,7 +38,11 @@ from .saved_games import (
     list_saved_games,
     update_saved_game,
 )
-from .search import SearchResult, bfs_search, evaluate_predicate, state_view
+from .search import (
+    SearchResult,
+    apply_deck_changes,
+    bfs_search,
+)
 
 
 def _search_worker(start, predicate, max_depth, node_budget, time_budget_s, out_q):
@@ -134,6 +138,13 @@ _last_shuffle_seed: int | None = None
 # matches the new fork. The visited set still remembers prefixes from
 # discarded branches for connector-line highlighting.
 _initial_state: GameState | None = None
+# The post-setup, start-of-action-turn baseline (decks/battlefields/mulligan
+# resolved, nothing played). This is the CLEAN ROOT that /branch/search generates
+# examples from — distinct from `_initial_state`, which is now the empty
+# pre-setup state used as the rewind floor for the recorded setup nodes. Keeping
+# them separate means "reach a state" still searches from a real turn-1 game (so
+# e.g. "X in hand" just stacks the opening hand) instead of from a deckless game.
+_post_setup_state: GameState | None = None
 _branch_states: list[GameState] = []
 
 # ---------------------------------------------------------------------------
@@ -172,10 +183,6 @@ _branch_visited: set[str] = set()
 # rewinds. Powers the "Visited N" header chip.
 _branch_nodes_visited: int = 0
 
-# A throwaway scratch engine the AI agent drives WITHOUT touching the live
-# game/branch. The reach flow explores moves here, then applies only the final
-# sequence to the live branch in one shot (see /sandbox/* + /branch/apply-sequence).
-_sandbox: GameEngine | None = None
 
 
 def _branch_path_key(steps: list[BranchStep]) -> str:
@@ -573,35 +580,38 @@ def _auto_fake_fill(engine: GameEngine, output: EngineOutput) -> EngineOutput:
             deck_id = choices.get(actor)
             if not deck_id:
                 break
-            output = engine.apply_action(action=f"{ApplyVerb.CHOOSE_DECK.value}:{deck_id}", actor=actor)
+            output = _apply(engine, f"{ApplyVerb.CHOOSE_DECK.value}:{deck_id}", actor)
             continue
 
         if step == RequiredStep.CHOOSE_FIRST_TURN:
-            output = engine.apply_action(
-                action=f"{ApplyVerb.CHOOSE_FIRST_TURN.value}:{first_turn.value}",
-                actor=actor,
-            )
+            output = _apply(engine, f"{ApplyVerb.CHOOSE_FIRST_TURN.value}:{first_turn.value}", actor)
             continue
 
         if step == RequiredStep.CHOOSE_BATTLEFIELDS:
             gs = output.game_state
+            # A configured battlefield that isn't in that side's deck (e.g. a
+            # stale fake_fill_config left over from a different deck) makes
+            # apply_action raise. Auto-fill must NEVER crash the engine over a
+            # bad config — catch it and just stop auto-resolving, leaving the
+            # game at the (manual) battlefield-choice step instead of failing
+            # startup / every poll.
             if gs.battlefield_1 is None:
                 bf = battlefields.get(RequiredTo.PLAYER_1) or ""
                 if not bf:
                     break
-                output = engine.apply_action(
-                    action=f"{ApplyVerb.CHOOSE_BATTLEFIELD_1.value}:{bf}",
-                    actor=RequiredTo.PLAYER_1,
-                )
+                try:
+                    output = _apply(engine, f"{ApplyVerb.CHOOSE_BATTLEFIELD_1.value}:{bf}", RequiredTo.PLAYER_1)
+                except ValueError:
+                    break
                 continue
             if gs.battlefield_2 is None:
                 bf = battlefields.get(RequiredTo.PLAYER_2) or ""
                 if not bf:
                     break
-                output = engine.apply_action(
-                    action=f"{ApplyVerb.CHOOSE_BATTLEFIELD_2.value}:{bf}",
-                    actor=RequiredTo.PLAYER_2,
-                )
+                try:
+                    output = _apply(engine, f"{ApplyVerb.CHOOSE_BATTLEFIELD_2.value}:{bf}", RequiredTo.PLAYER_2)
+                except ValueError:
+                    break
                 continue
             break
 
@@ -609,15 +619,13 @@ def _auto_fake_fill(engine: GameEngine, output: EngineOutput) -> EngineOutput:
             gs = output.game_state
             bottom = mulligan_bottom.strip()
             if not gs.mulligan_player_1_resolved:
-                output = engine.apply_action(
-                    action=f"{ApplyVerb.MULLIGAN_RESOLVE.value}:{RequiredTo.PLAYER_1.value}:{bottom}",
-                    actor=RequiredTo.PLAYER_1,
+                output = _apply(
+                    engine, f"{ApplyVerb.MULLIGAN_RESOLVE.value}:{RequiredTo.PLAYER_1.value}:{bottom}", RequiredTo.PLAYER_1
                 )
                 continue
             if not gs.mulligan_player_2_resolved:
-                output = engine.apply_action(
-                    action=f"{ApplyVerb.MULLIGAN_RESOLVE.value}:{RequiredTo.PLAYER_2.value}:{bottom}",
-                    actor=RequiredTo.PLAYER_2,
+                output = _apply(
+                    engine, f"{ApplyVerb.MULLIGAN_RESOLVE.value}:{RequiredTo.PLAYER_2.value}:{bottom}", RequiredTo.PLAYER_2
                 )
                 continue
             break
@@ -713,7 +721,10 @@ def _capture_current_save() -> tuple[dict[str, Any], list[dict[str, Any]]]:
             "chain": s.get("chain") or [{"actor": s["actor"], "action": s["action"]}],
         }
         for s in _branch_path
-        if not s.get("intent_only")
+        # Skip the auto-resolved setup nodes (deck / first-turn / battlefield /
+        # mulligan): the saved `setup` block already reproduces them via the
+        # fake-fill config on load, so replaying them too would double-apply.
+        if not s.get("intent_only") and not s.get("setup")
     ]
     return setup, moves
 
@@ -760,6 +771,7 @@ def reset_engine(
     deterministic.
     """
     global _engine, _last_output, _initial_state, _branch_states, _last_shuffle_seed
+    global _branch_path, _branch_visited, _branch_nodes_visited, _step_recorder, _post_setup_state
     cfg = get_fake_fill_config()
     if seed_override is not None:
         seed = seed_override
@@ -770,13 +782,48 @@ def reset_engine(
     _last_shuffle_seed = seed
     _engine = GameEngine(rng=random.Random(seed))
     _last_output = _engine.start()
-    _last_output = _auto_fake_fill(_engine, _last_output)
-    # Branch-tree ROOT = the state at the start of the action turn (setup
-    # auto-resolved, nothing played yet). /branch/back to an empty path
-    # restores this.
+    # Branch-tree ROOT = the truly EMPTY pre-setup state (before any deck /
+    # first-turn / battlefield / mulligan choice). /branch/back to an empty path
+    # restores this, so the setup decisions below are rewindable nodes IN FRONT
+    # of the root rather than being collapsed away.
     _initial_state = _capture_state()
-    _branch_states = []
     _reset_branch_tree()
+    _branch_states = []
+
+    # Auto-resolve setup, but RECORD each choice as a branch node (flagged
+    # `setup`) with its post-choice snapshot — routed through `_apply`, which
+    # reports to the active step recorder. The live tip ends at the start of the
+    # action turn, so a reset still LANDS there; you can simply rewind behind it.
+    _setup_path: list[BranchStep] = []
+    _setup_states: list[GameState] = []
+
+    def _rec_setup(actor_val: str, action: str, label: str) -> None:
+        _setup_path.append(
+            {
+                "actor": actor_val,
+                "action": action,
+                "label": label,
+                "intent_only": False,
+                "shortcut": None,
+                "intent": None,
+                "setup": True,
+            }
+        )
+        _setup_states.append(_capture_state())
+
+    _step_recorder = _rec_setup
+    try:
+        _last_output = _auto_fake_fill(_engine, _last_output)
+    finally:
+        _step_recorder = None
+    _branch_path = _setup_path
+    _branch_states = _setup_states
+    _branch_nodes_visited = len(_setup_path)
+    for i in range(1, len(_setup_path) + 1):
+        _branch_visited.add(_branch_path_key(_setup_path[:i]))
+    # The action-turn baseline (setup done, nothing played) — the clean root that
+    # /branch/search generates "reach a state" examples from.
+    _post_setup_state = _capture_state()
 
     if replay_moves:
         # Loaded saved game with an explicit move list: replay exactly those,
@@ -854,11 +901,13 @@ def _replay_moves_as_branch(
     finally:
         _step_recorder = None
 
-    _branch_path = path
-    _branch_states = states
-    _branch_nodes_visited = len(path)
-    for i in range(1, len(path) + 1):
-        _branch_visited.add(_branch_path_key(path[:i]))
+    # Append AFTER the setup nodes recorded at reset, so the path reads
+    # setup → gameplay and rewinding walks back through both.
+    _branch_path = [*_branch_path, *path]
+    _branch_states = [*_branch_states, *states]
+    _branch_nodes_visited += len(path)
+    for i in range(1, len(_branch_path) + 1):
+        _branch_visited.add(_branch_path_key(_branch_path[:i]))
     return output
 
 
@@ -889,11 +938,13 @@ def _record_advanced_fast_forward(output: EngineOutput) -> EngineOutput:
     finally:
         _step_recorder = None
 
-    _branch_path = path
-    _branch_states = states
-    _branch_nodes_visited = len(path)
-    for i in range(1, len(path) + 1):
-        _branch_visited.add(_branch_path_key(path[:i]))
+    # Append AFTER the setup nodes recorded at reset, so the path reads
+    # setup → gameplay and rewinding walks back through both.
+    _branch_path = [*_branch_path, *path]
+    _branch_states = [*_branch_states, *states]
+    _branch_nodes_visited += len(path)
+    for i in range(1, len(_branch_path) + 1):
+        _branch_visited.add(_branch_path_key(_branch_path[:i]))
     return output
 
 
@@ -951,7 +1002,13 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
             for e in gs.action_log
         ],
         "event_feed": [
-            {"sequence": e.sequence, "kind": e.kind, "text": e.text}
+            {
+                "sequence": e.sequence,
+                "kind": e.kind,
+                "text": e.text,
+                "code": e.code,
+                "card": e.card,
+            }
             for e in gs.event_feed
         ],
         "started": gs.started,
@@ -993,11 +1050,19 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 "location": u.location,
                 "exhausted": u.exhausted,
                 "bonus_might": u.bonus_might,
-                # CURRENT Might shown on the board = printed + buffs + Might
-                # granted by EFFECT-TEXT equipment attached to this unit.
+                # Whether the unit carries a [Buff] (drives the buff overlay in
+                # the UI and the +1 below).
+                "buffed": u.buffed,
+                # CURRENT Might shown on the board = printed + buffs + [Buff] +1
+                # + Might granted by EFFECT-TEXT equipment attached to this unit.
                 "effective_might": (card_might_of(u.card) or 0)
                 + u.bonus_might
+                + (1 if u.buffed else 0)
                 + attached_might_bonus(gs.player_1_gears, f"player_1:{i}", gs.total_turn_number),
+                "token": u.token,
+                # Marked damage (rules 142/143.3); the unit dies at cleanup once
+                # this is ≥ its effective Might. Surfaced so the UI can show it.
+                "damage": u.damage,
             }
             for i, u in enumerate(gs.player_1_units)
         ],
@@ -1007,9 +1072,13 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 "location": u.location,
                 "exhausted": u.exhausted,
                 "bonus_might": u.bonus_might,
+                "buffed": u.buffed,
                 "effective_might": (card_might_of(u.card) or 0)
                 + u.bonus_might
+                + (1 if u.buffed else 0)
                 + attached_might_bonus(gs.player_2_gears, f"player_2:{i}", gs.total_turn_number),
+                "token": u.token,
+                "damage": u.damage,
             }
             for i, u in enumerate(gs.player_2_units)
         ],
@@ -1039,6 +1108,7 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 # Recomputed from the stable uid so it's the host's CURRENT
                 # position (or None if the host has left play).
                 "attached_to": _gear_attached_ref(gs, g),
+                "token": g.token,
             }
             for g in gs.player_1_gears
         ],
@@ -1048,6 +1118,7 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 "location": g.location,
                 "exhausted": g.exhausted,
                 "attached_to": _gear_attached_ref(gs, g),
+                "token": g.token,
             }
             for g in gs.player_2_gears
         ],
@@ -1094,6 +1165,19 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
                 # How many times the effect will have happened so far (base +
                 # repeats already paid). Lets the UI show "Repeat (x2)?".
                 "rounds": len(gs.pending_spell_repeat.rounds),
+            }
+        ),
+        "pending_deflect": (
+            None
+            if getattr(gs, "pending_deflect", None) is None
+            else {
+                "actor": gs.pending_deflect.actor.value,
+                # The target currently awaiting a pay-or-drop decision, plus how
+                # many more decisions remain — lets the UI show "Pay 2 Power to
+                # target <card>? (1 of N)".
+                "card": gs.pending_deflect.queue[0][2] if gs.pending_deflect.queue else None,
+                "stacks": gs.pending_deflect.queue[0][1] if gs.pending_deflect.queue else 0,
+                "remaining": len(gs.pending_deflect.queue),
             }
         ),
         "pending_accelerate": (
@@ -1217,6 +1301,10 @@ def _serialize_state(gs: GameState) -> dict[str, Any]:
         "player_2_power": dict(gs.player_2_power),
         "player_1_score": gs.player_1_score,
         "player_2_score": gs.player_2_score,
+        # The point total needed to win, and the winner once the game is decided
+        # (null while it's still going).
+        "victory_score": VICTORY_SCORE,
+        "winner": gs.winner,
         "scored_bfs_this_turn": sorted(gs.scored_bfs_this_turn),
         "player_1_rune_library_len": len(gs.player_1_rune_library) if gs.player_1_rune_library else None,
         "player_2_rune_library_len": len(gs.player_2_rune_library) if gs.player_2_rune_library else None,
@@ -1281,12 +1369,31 @@ def _serialize_output(out: EngineOutput) -> dict[str, Any]:
     }
 
 
+# Setup steps that reset_engine auto-resolves (and records as rewindable nodes).
+# When the engine is parked on one of these — i.e. the user/agent deliberately
+# rewound BEHIND the setup nodes — get_snapshot must NOT re-resolve it, or every
+# poll would snap the game forward again and the rewind wouldn't hold.
+_SETUP_STEPS = frozenset(
+    {
+        RequiredStep.CHOOSE_DECK,
+        RequiredStep.CHOOSE_FIRST_TURN,
+        RequiredStep.CHOOSE_BATTLEFIELDS,
+        RequiredStep.CHOOSE_MULLIGAN,
+    }
+)
+
+
 def get_snapshot() -> dict[str, Any]:
     """Always run `start()` so ABCD auto-completion and any logic upgrades apply to every poll."""
     with _engine_lock:
         global _last_output
         _last_output = _engine.start()
-        _last_output = _auto_fake_fill(_engine, _last_output)
+        # Setup is resolved once in reset_engine (and recorded as branch nodes).
+        # Skip the per-poll auto-fill while parked on a setup step so a rewind to
+        # "before the mulligan/battlefield" stays put instead of re-resolving.
+        ra = _last_output.required_action
+        if ra is None or ra.name not in _SETUP_STEPS:
+            _last_output = _auto_fake_fill(_engine, _last_output)
         return _serialize_output(_last_output)
 
 
@@ -1310,34 +1417,6 @@ def _serialize_branch() -> dict[str, Any]:
         # an unrelated random game.
         "shuffle_seed": _last_shuffle_seed,
         "snapshot": get_snapshot(),
-    }
-
-
-def _engine_snapshot(engine: GameEngine) -> dict[str, Any]:
-    """Legal-move + state snapshot for an ARBITRARY engine (e.g. the sandbox),
-    in the same shape /branch's snapshot uses: state + per-player options +
-    play intents. Lets the agent read a forked engine's moves without touching
-    the live game."""
-    out = engine.start()
-
-    def _intents(actor: RequiredTo) -> list[dict[str, Any]]:
-        return [
-            serialize_play_intent(i)
-            for i in (
-                *compute_play_intents(engine, actor),
-                *compute_move_intents(engine, actor),
-                *compute_equip_intents(engine, actor),
-                *compute_repeat_intents(engine, actor),
-                *compute_accelerate_intents(engine, actor),
-            )
-        ]
-
-    return {
-        "state": _serialize_state(engine.game_state),
-        "player_1_options": list(out.player_1_options),
-        "player_2_options": list(out.player_2_options),
-        "player_1_intents": _intents(RequiredTo.PLAYER_1),
-        "player_2_intents": _intents(RequiredTo.PLAYER_2),
     }
 
 
@@ -1427,15 +1506,18 @@ class BranchSearchBody(BaseModel):
     node_budget: int = Field(default=20000, ge=1, le=500000, description="max nodes to expand")
     time_budget_s: float = Field(default=20.0, gt=0, le=120, description="wall-clock cap (seconds)")
     label: str = Field(default="AI search", description="label for the single branch node")
-
-
-class ApplySequenceBody(BaseModel):
-    """Apply a whole pre-computed atomic-action sequence to the LIVE engine and
-    record it as ONE branch node (used to land an AI-found state in one shot,
-    no move-by-move stepping)."""
-
-    steps: list[BranchChainStep] = Field(default_factory=list, description="atomic {actor,action} in order")
-    label: str = Field(default="AI: reach", description="label for the single branch node")
+    forward_search: bool = Field(
+        default=False,
+        description=(
+            "When True, search FORWARD from the current live position and append "
+            "the found moves to the existing branch — decisions already made "
+            "(deck choice, prior moves) are never revisited, and the result "
+            "persists. When False (default), search from the clean root and, if a "
+            "named card isn't in the loaded decks, change decks (sideboard swap or "
+            "deck switch) to bring it into reach — i.e. it may go all the way back "
+            "to the deck-choice decision."
+        ),
+    )
 
 
 class FakeFillUpdateBody(BaseModel):
@@ -1514,6 +1596,36 @@ def create_app() -> FastAPI:
             global _last_output
             _last_output = reset_engine()
             return _serialize_output(_last_output)
+
+    @app.post("/reroll-until")
+    def reroll_until(body: BranchSearchBody) -> dict[str, Any]:
+        """Re-DEAL the opening (reset with a fresh shuffle) until ``predicate``
+        holds at the turn-1 opening — the legitimate "reset until I have X in
+        hand". NO moves are played and NO cards are injected: it just keeps
+        dealing fresh openings until the shuffle delivers the goal, then keeps
+        that deal as the live branch. Bounded by attempts + a time budget."""
+        import time as _time
+
+        from .search import evaluate_predicate, state_view
+
+        global _last_output
+        max_attempts = 800
+        time_budget_s = 20.0
+        with _engine_lock:
+            t0 = _time.time()
+            found = False
+            attempts = 0
+            for attempts in range(1, max_attempts + 1):
+                # Force a fresh shuffle every attempt (seed_override overrides the
+                # mode's fixed/advanced seed), so each reset is a new deal.
+                _last_output = reset_engine(seed_override=random.randrange(2**32))
+                opening = _post_setup_state if _post_setup_state is not None else _engine.game_state
+                if evaluate_predicate(body.predicate, state_view(opening)):
+                    found = True
+                    break
+                if _time.time() - t0 > time_budget_s:
+                    break
+            return {"found": found, "attempts": attempts, "branch": _serialize_branch()}
 
     @app.get("/decks")
     def decks_list() -> dict[str, Any]:
@@ -1752,7 +1864,15 @@ def create_app() -> FastAPI:
                 try:
                     for actor, action in steps_to_run:
                         _last_output = _engine.apply_action(action=action, actor=actor)
-                    _last_output = _auto_fake_fill(_engine, _last_output)
+                    # Don't auto-resolve the REST of setup after a manual setup
+                    # step: if the user rewound to (say) battlefield 1 and picks
+                    # it, leave battlefield 2 / mulligans for them to step too,
+                    # instead of fast-forwarding straight past them. Mirrors the
+                    # get_snapshot gate. (In normal play this is a no-op, since
+                    # the result isn't a setup step.)
+                    ra = _last_output.required_action
+                    if ra is None or ra.name not in _SETUP_STEPS:
+                        _last_output = _auto_fake_fill(_engine, _last_output)
                 except ValueError as e:
                     raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -1802,30 +1922,100 @@ def create_app() -> FastAPI:
         each call starts from a fresh game. Searching from the drifted live
         state would compound prior searches until the game ran out of legal
         moves (explored=1, frontier=0). Returns the transcript and stats."""
-        global _branch_path, _branch_states, _branch_visited, _branch_nodes_visited, _last_output
+        global _branch_path, _branch_states, _branch_visited, _branch_nodes_visited, _last_output, _initial_state, _post_setup_state
         with _engine_lock:
-            # Start from the clean root when we have it; fall back to the live
-            # state only if setup somehow never captured a root.
-            start = copy.deepcopy(
-                _initial_state if _initial_state is not None else _engine.game_state
-            )
-            result = bfs_search(
-                start,
-                body.predicate,
-                max_depth=body.max_depth,
-                node_budget=body.node_budget,
-                time_budget_s=body.time_budget_s,
-                verbose=True,
-            )
+            forward = body.forward_search
+            if forward:
+                # FORWARD search: continue from the current live position and
+                # only ever go forward — decisions already made (deck choice,
+                # prior branch moves) are never revisited, so deck changes are
+                # off. The found path appends to the existing branch.
+                start = copy.deepcopy(_engine.game_state)
+                result = bfs_search(
+                    start,
+                    body.predicate,
+                    max_depth=body.max_depth,
+                    node_budget=body.node_budget,
+                    time_budget_s=body.time_budget_s,
+                    verbose=True,
+                    allow_deck_changes=False,
+                )
+            else:
+                # Search from the clean root. If a named card isn't in the
+                # loaded decks, change decks (sideboard swap / deck switch) to
+                # bring it into reach — i.e. revisit the deck-choice decision.
+                # Search from the POST-SETUP turn-1 baseline (decks chosen,
+                # nothing played) — NOT the empty pre-setup floor — so "X in
+                # hand" just stacks the opening hand instead of grinding out the
+                # whole setup + draws.
+                base = (
+                    _post_setup_state
+                    if _post_setup_state is not None
+                    else _initial_state
+                    if _initial_state is not None
+                    else _engine.game_state
+                )
+                start, deck_changes = apply_deck_changes(copy.deepcopy(base), body.predicate)
+                result = bfs_search(
+                    start,
+                    body.predicate,
+                    max_depth=body.max_depth,
+                    node_budget=body.node_budget,
+                    time_budget_s=body.time_budget_s,
+                    verbose=True,
+                    allow_deck_changes=False,
+                )
+                result.deck_changes = deck_changes
             steps_out: list[dict[str, Any]] = []
-            if result.found and result.moves:
-                # Reset the live engine + branch to the clean root the search
-                # ran from, so the example we land is exactly the path found
-                # (and doesn't pile onto whatever branch was there before).
-                if _initial_state is not None:
-                    _restore_state(_initial_state)
-                    _reset_branch_tree()
-                    _branch_states = []
+            # Land on found even with ZERO moves: a deck change can satisfy the
+            # goal at the (new) root (e.g. the wanted card is now in hand), so
+            # we still need to restore + persist that root for the live game.
+            if result.found:
+                if not forward:
+                    # Land the live engine on the (possibly deck-changed /
+                    # hand-stacked) example baseline, and PERSIST it as the
+                    # search baseline for later searches.
+                    _restore_state(start)
+                    _post_setup_state = copy.deepcopy(start)
+                    # PRESERVE the recorded setup nodes (deck / first-turn /
+                    # battlefield / mulligan) so you can still rewind to those
+                    # decisions after landing. Keep only the leading setup
+                    # prefix (drop any prior gameplay), then, if this example
+                    # adjusted the deal (deck change / stacked opening hand),
+                    # record ONE setup-flagged node capturing the example
+                    # baseline so the live tip is rewindable too.
+                    n_setup = 0
+                    for s in _branch_path:
+                        if s.get("setup"):
+                            n_setup += 1
+                        else:
+                            break
+                    if n_setup == 0:
+                        # No setup nodes recorded (e.g. fake-fill disabled) —
+                        # fall back to a clean single-root branch.
+                        _initial_state = copy.deepcopy(start)
+                        _reset_branch_tree()
+                        _branch_states = []
+                    else:
+                        _branch_path = _branch_path[:n_setup]
+                        _branch_states = _branch_states[:n_setup]
+                        if result.deck_changes:
+                            _branch_path = [
+                                *_branch_path,
+                                {
+                                    "actor": "both",
+                                    "action": "setup_adjust",
+                                    "label": "; ".join(result.deck_changes),
+                                    "intent_only": False,
+                                    "shortcut": None,
+                                    "intent": None,
+                                    "setup": True,
+                                },
+                            ]
+                            _branch_states = [*_branch_states, copy.deepcopy(start)]
+                        _branch_nodes_visited = len(_branch_path)
+                # In forward mode we leave the live engine where it is and just
+                # append the found moves onto the current branch.
                 # Apply the found path and record each move as its OWN real
                 # branch node — exactly the nodes you'd get by clicking those
                 # moves yourself. The search ran silently off to the side, so
@@ -1869,94 +2059,10 @@ def create_app() -> FastAPI:
                 "depth": result.depth,
                 "nodes_explored": result.nodes_explored,
                 "reason": result.reason,
+                "deck_changes": result.deck_changes,
                 "steps": steps_out,
                 "branch": _serialize_branch(),
             }
-
-    @app.post("/branch/check")
-    def branch_check(body: BranchSearchBody) -> dict[str, Any]:
-        """Does the CURRENT live state satisfy ``predicate``? Used by the
-        agent fallback as a deterministic 'are we there yet' test."""
-        with _engine_lock:
-            return {"satisfied": evaluate_predicate(body.predicate, state_view(_engine.game_state))}
-
-    # --- Sandbox: a forked engine the agent drives WITHOUT touching the live
-    #     game/branch. Reach explores here, then commits the final sequence in
-    #     one shot via /branch/apply-sequence. -----------------------------------
-    @app.post("/sandbox/start")
-    def sandbox_start() -> dict[str, Any]:
-        """Fork the current live state into the scratch sandbox and return its
-        legal-move snapshot. The live game is untouched."""
-        global _sandbox
-        with _engine_lock:
-            _sandbox = GameEngine(game_state=copy.deepcopy(_engine.game_state))
-            return {"snapshot": _engine_snapshot(_sandbox)}
-
-    @app.post("/sandbox/forward")
-    def sandbox_forward(body: BranchForwardBody) -> dict[str, Any]:
-        """Apply one move (raw action or expanded chain) to the SANDBOX and
-        return its new snapshot. Never touches the live game."""
-        with _engine_lock:
-            if _sandbox is None:
-                raise HTTPException(status_code=400, detail="no sandbox; call /sandbox/start first")
-            if body.chain:
-                steps = [(RequiredTo(s.actor), s.action) for s in body.chain]
-            else:
-                steps = [(RequiredTo(body.actor), body.action)]
-            try:
-                for actor, action in steps:
-                    _sandbox.apply_action(action=action, actor=actor)
-                    _sandbox.start()  # settle ABCD (e.g. after end_turn) before the next move
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e)) from e
-            return {"snapshot": _engine_snapshot(_sandbox)}
-
-    @app.post("/sandbox/check")
-    def sandbox_check(body: BranchSearchBody) -> dict[str, Any]:
-        """Does the SANDBOX state satisfy ``predicate``?"""
-        with _engine_lock:
-            if _sandbox is None:
-                raise HTTPException(status_code=400, detail="no sandbox; call /sandbox/start first")
-            return {"satisfied": evaluate_predicate(body.predicate, state_view(_sandbox.game_state))}
-
-    @app.post("/branch/apply-sequence")
-    def branch_apply_sequence(body: ApplySequenceBody) -> dict[str, Any]:
-        """Apply a full atomic-action sequence to the LIVE engine and record it
-        as ONE branch node — landing an AI-found state in a single step (no
-        move-by-move stepping in the UI)."""
-        global _branch_path, _branch_states, _branch_visited, _branch_nodes_visited, _last_output, _sandbox
-        with _engine_lock:
-            chain: list[dict[str, str]] = []
-            for s in body.steps:
-                try:
-                    actor = RequiredTo(s.actor)
-                except ValueError as e:
-                    raise HTTPException(status_code=400, detail=f"bad actor {s.actor}") from e
-                try:
-                    _last_output = _engine.apply_action(action=s.action, actor=actor)
-                    _last_output = _engine.start()  # settle between steps (turn boundaries)
-                except ValueError as e:
-                    raise HTTPException(status_code=400, detail=f"apply '{s.action}': {e}") from e
-                chain.append({"actor": s.actor, "action": s.action})
-            _last_output = _auto_fake_fill(_engine, _last_output)
-            primary_actor = body.steps[0].actor if body.steps else _engine.game_state.current_player.value
-            saved = _capture_state()
-            step: BranchStep = {
-                "actor": primary_actor,
-                "action": body.label,
-                "label": body.label,
-                "intent_only": False,
-                "shortcut": None,
-                "intent": None,
-                "chain": chain,
-            }
-            _branch_path = [*_branch_path, step]
-            _branch_states = [*_branch_states, saved]
-            for i in range(1, len(_branch_path) + 1):
-                _branch_visited.add(_branch_path_key(_branch_path[:i]))
-            _branch_nodes_visited += 1
-            _sandbox = None  # done with the scratch engine
-            return _serialize_branch()
 
     @app.post("/branch/back")
     def branch_back(body: BranchBackBody) -> dict[str, Any]:

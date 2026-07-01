@@ -229,6 +229,139 @@ def attached_shield_bonus(gears, host_uid: int | None, current_turn: int | None 
     return total
 
 
+#: An EFFECT-TEXT equipment passive granting the host [Deflect N], or a bare
+#: ``DEFLECT`` grant (= 1, e.g. Hexdrinker). Mirrors _ATTACH_SHIELD_RE.
+_ATTACH_DEFLECT_RE = re.compile(r"^DEFLECT(?:_(\d+))?$")
+
+
+def attached_deflect_bonus(gears, host_uid: int | None, current_turn: int | None = None) -> int:
+    """Sum the [Deflect] that EFFECT-TEXT equipment attached to ``host_uid``
+    grants it (passive codes ``DEFLECT`` = 1 or ``DEFLECT_N`` = N — Hexdrinker
+    grants a bare ``DEFLECT``). Mirrors :func:`attached_shield_bonus`; the caller
+    adds this to the unit's printed + this-turn Deflect for its total stack.
+    ``gears`` is the host controller's PlayedGear list."""
+    if not host_uid:
+        return 0
+    total = 0
+    for g in gears or []:
+        if getattr(g, "attached_uid", None) != host_uid:
+            continue
+        for ability in triggered_abilities_for(g.card):
+            if not ability.effect_text:
+                continue
+            if not _gear_conditions_met(ability, g, current_turn):
+                continue
+            for code in ability.passive_effects:
+                m = _ATTACH_DEFLECT_RE.match(code or "")
+                if m:
+                    total += int(m.group(1) or 1)
+    return total
+
+
+# --------------------------------------------------------------------------- #
+# Continuous AURAS — a permanent granting a property to a SET of OTHER units
+# (e.g. "your other units here have [Deflect]", "units here have +1 Might").
+# These are the fourth source of a unit's property total, alongside its printed
+# keyword, this-turn grants, and attached equipment. One declarative table maps
+# each granting CODE to what it confers and to whom, so a new aura is one line
+# and several sources STACK (the engine just sums them). The numeric grant model
+# also covers boolean keyword auras (Ganking, …): "has it" ⇔ total ≥ 1.
+# --------------------------------------------------------------------------- #
+# scope "where" — which locations the aura reaches, relative to its source
+WHERE_HERE = "here"  # only units at the source's own location
+WHERE_ANY = "any"  # any location
+# scope "who" — which controller's units, relative to the source's controller
+WHO_FRIENDLY = "friendly"
+WHO_ENEMY = "enemy"
+WHO_ANY = "any"
+
+
+@dataclass(frozen=True)
+class GrantSpec:
+    """One continuous grant: ``code`` confers ``amount`` of ``property`` to every
+    unit matching its scope. ``where``/``who`` are relative to the source; a
+    numeric ``property`` (might/shield/deflect) sums, a keyword one reads as
+    present when its total ≥ 1."""
+
+    code: str
+    property: str
+    amount: int = 1
+    where: str = WHERE_HERE
+    who: str = WHO_FRIENDLY
+    include_self: bool = False
+    #: The source must itself be at a battlefield (e.g. Allay's "while I'm at a
+    #: battlefield, your other units here have [Deflect]").
+    require_source_at_bf: bool = False
+
+    def applies(
+        self,
+        *,
+        src_controller: str | None,
+        src_location: str,
+        src_index: int | None,
+        tgt_controller: str,
+        tgt_location: str,
+        tgt_index: int,
+    ) -> bool:
+        """Whether this grant reaches the target unit, given source + target
+        controller/location (and the source's unit index, ``None`` for a
+        battlefield source so the self-exclusion only applies to unit sources)."""
+        if self.require_source_at_bf and src_location not in ("battlefield_1", "battlefield_2"):
+            return False
+        if self.where == WHERE_HERE and tgt_location != src_location:
+            return False
+        if self.who == WHO_FRIENDLY and tgt_controller != src_controller:
+            return False
+        if self.who == WHO_ENEMY and tgt_controller == src_controller:
+            return False
+        if (
+            not self.include_self
+            and src_index is not None
+            and src_controller == tgt_controller
+            and src_index == tgt_index
+        ):
+            return False
+        return True
+
+
+#: code → GrantSpec. New "units here/there have X" auras are one entry each.
+AURA_GRANTS: dict[str, GrantSpec] = {
+    # Allay, Eager Admirer: "While I'm at a battlefield, your other units here
+    # have [Deflect]." (Allay's OWN [Deflect] is its printed keyword, read from
+    # text — NOT this aura, so there's no double count.)
+    "OTHER_AT_THS_BF_DEFLECT": GrantSpec(
+        "OTHER_AT_THS_BF_DEFLECT",
+        "deflect",
+        amount=1,
+        where=WHERE_HERE,
+        who=WHO_FRIENDLY,
+        include_self=False,
+        require_source_at_bf=True,
+    ),
+    # Trifarian War Camp (battlefield): "Units here have +1 might."
+    "UNITS_HERE_HAVE_+1M": GrantSpec(
+        "UNITS_HERE_HAVE_+1M",
+        "might",
+        amount=1,
+        where=WHERE_HERE,
+        who=WHO_ANY,
+        include_self=True,
+    ),
+}
+
+
+def aura_specs_for_card(card: str) -> list[GrantSpec]:
+    """Every continuous GrantSpec a card's passive abilities confer (empty for a
+    card with no aura codes). Used by the engine to scan in-play sources."""
+    out: list[GrantSpec] = []
+    for ability in triggered_abilities_for(card):
+        for code in ability.passive_effects:
+            spec = AURA_GRANTS.get(code)
+            if spec is not None:
+                out.append(spec)
+    return out
+
+
 def activated_abilities_for(name: str) -> tuple[Ability, ...]:
     """Abilities on ``name`` that are ACTIVATED — the player chooses to use
     them by paying a cost. Shape: has costs + active effects, NO triggers, and

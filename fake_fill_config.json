@@ -1,9 +1,9 @@
 {
   "enabled": true,
-  "player_1_deck": "ezreal_prodigal_explorer",
-  "player_2_deck": "irelia_nates",
-  "player_1_battlefield": "Abandoned Hall",
-  "player_2_battlefield": "Sunken Temple",
+  "player_1_deck": "ahri_nine_tailed_fox",
+  "player_2_deck": "annie_dark_child",
+  "player_1_battlefield": "Grove of the God-Willow",
+  "player_2_battlefield": "Seat of Power",
   "first_turn": "player_1",
   "mulligan_bottom": "",
   "mode": "early",

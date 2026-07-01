@@ -745,12 +745,16 @@ class MultiPhrasePlanTests(unittest.TestCase):
         self.assertEqual(spell_target_plan("ANY UNIT (2)||||ANY UNIT (1)"), [])
         self.assertEqual(spell_target_plan("ANY UNIT (1)||ANY UNIT (1)"), [])
 
-    def test_unknown_and_min0_phrases_are_skipped(self):
+    def test_unknown_phrases_are_skipped_min0_is_an_optional_pick(self):
         # Fading Memories: the GEAR phrase forces no pick, only the unit does.
         self.assertEqual(len(spell_target_plan("ANY UNIT (1[BF])|GEAR")), 1)
-        # All-min0 / unknown → no picks at all.
-        self.assertEqual(spell_target_plan("ANY UNIT (n)[SUM <= 4M]"), [])
-        self.assertEqual(spell_target_plan("ANY SPELL"), [])  # unknown selector
+        # A min-0 ("up to N" / n) UNIT phrase is now an OPTIONAL pick — it stays
+        # in the plan so the picker can offer up-to-N targets (Bellows Breath,
+        # Singularity). Whether casting actually pauses for it is decided at
+        # cast time by spell_needs_target_choice (only if eligible units exist).
+        self.assertEqual(len(spell_target_plan("ANY UNIT (n)[SUM <= 4M]")), 1)
+        # Unknown selectors still force no pick at all.
+        self.assertEqual(spell_target_plan("ANY SPELL"), [])
 
 
 class DistinctTargetGateTests(unittest.TestCase):

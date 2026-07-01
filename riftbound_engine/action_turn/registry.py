@@ -101,6 +101,11 @@ def dispatch_turn_play(engine, actor, action: str) -> None:
     # decide AND bank runes to pay; handlers validate the actor themselves.
     repeat = getattr(gs, "pending_spell_repeat", None)
     holder_has_repeat = repeat is not None and actor == repeat.actor
+    # A pending [Deflect] decision belongs to the ability's controller, who may
+    # be the non-active player (a Reaction cast on the opponent's turn that chose
+    # a Deflect unit). Let them decide; the handler validates the actor itself.
+    deflect = getattr(gs, "pending_deflect", None)
+    holder_has_deflect = deflect is not None and actor == deflect.actor
     if (
         verb not in _OPPONENT_OK_VERBS
         and actor != gs.current_player
@@ -108,6 +113,7 @@ def dispatch_turn_play(engine, actor, action: str) -> None:
         and not holder_has_focus
         and not holder_has_effect_choice
         and not holder_has_repeat
+        and not holder_has_deflect
     ):
         raise ValueError("only the active player may take action-turn plays")
     if actor not in (RT.PLAYER_1, RT.PLAYER_2):

@@ -264,7 +264,13 @@ class EndOfTurnEquipmentTests(unittest.TestCase):
         effects.execute_effect(
             effects.EffectContext(engine=eng, controller=RequiredTo.PLAYER_1, source=src, code="DEAL_4_SELF")
         )
-        # 4 >= 2 Might → the unit dies to its owner's trash.
+        # Persistent-damage model: DEAL_4_SELF MARKS 4 damage (rule 417); the
+        # unit is not removed at the instant the damage lands.
+        self.assertEqual(eng._game_state.player_1_units[0].damage, 4)
+        # Death is resolved by the cleanup lethal sweep (323.4/323.5) — which
+        # _resolve_chain runs in real play after the ability resolves. 4 >= the
+        # 2-Might host → it dies to its owner's trash.
+        eng._lethal_sweep()
         self.assertEqual(eng._game_state.player_1_units, [])
         self.assertEqual(eng._game_state.player_1_trash, ["Ravenbloom Student"])
 

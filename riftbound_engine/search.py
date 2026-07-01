@@ -28,7 +28,9 @@ def _log(msg: str) -> None:
     flushed, regardless of logging config)."""
     print(f"[search] {msg}", file=sys.stderr, flush=True)
 
-from .engine import GameEngine, GameState, RequiredTo
+from .deck_files import deck_data_for_id, deck_ids
+from .engine import Deck, GameEngine, GameState, Rune, RequiredTo
+from .action_label import label_for_action
 from .shortcuts import (
     compute_equip_intents,
     compute_move_intents,
@@ -59,6 +61,9 @@ class SearchResult:
     nodes_explored: int = 0
     depth: int = 0
     reason: str = ""
+    #: Human-readable deck edits the search made to bring a named card into
+    #: reach (sideboard swap or deck switch). Empty when nothing was changed.
+    deck_changes: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -300,6 +305,21 @@ def goal_distance(pred: dict, view: dict) -> float:
         return min(ds) if ds else 0.0
     if "units" in pred:
         return _units_distance(pred, view)
+    # A turn-number goal gets a gradient = turns remaining, so the search
+    # deliberately ends turns toward the target instead of treating every
+    # unsatisfied state as equidistant (flat 1.0), which made "reach turn N"
+    # exhaust the budget. Only applies to total_turn_number with >, >=, ==.
+    if "field" in pred and "op" in pred:
+        field = _FIELD_ALIASES.get(pred.get("field"), pred.get("field"))
+        if field == "total_turn_number" and pred.get("op") in (">", ">=", "=="):
+            try:
+                cur = int(_get_path(view, pred["field"]) or 0)
+                target = int(pred.get("value"))
+            except (TypeError, ValueError):
+                return 0.0 if evaluate_predicate(pred, view) else 1.0
+            if pred["op"] == ">":
+                target += 1
+            return float(max(0, target - cur))
     return 0.0 if evaluate_predicate(pred, view) else 1.0
 
 
@@ -359,6 +379,173 @@ def _units_distance(pred: dict, view: dict) -> float:
                 best = i if best is None else min(best, i)
                 break
     return 1.5 + best * 0.05 if best is not None else 5.0
+
+
+# --------------------------------------------------------------------------- #
+# Deck changes — bring a NAMED card into reach when the loaded decks can't.
+#
+# A goal like "play Disarming Rake" is unreachable if the card isn't in the
+# library or on the board (goal_distance pins at 5.0 and the search exhausts).
+# When deck changes are allowed, we make each named card reachable by, in order
+# of least disruption:
+#   1. nothing — it's already in that side's hand/library,
+#   2. SIDEBOARD swap — the card sits in the CURRENT deck's sideboard, so swap
+#      it into the main deck (preserving the chosen deck), or
+#   3. DECK SWITCH — no loaded deck on that side has it, so switch that side to
+#      a deck that lists it (preferring one with it in the MAIN deck, else
+#      sideboarding it in from the switched-to deck).
+# The swapped-in card is placed on TOP of that side's library so the example is
+# a short, real line (the player just draws it), not a 38-turn deck-dig.
+# --------------------------------------------------------------------------- #
+#: Opening-hand size used when a deck change rebuilds a side's opening (matches
+#: the engine's mulligan draw count, so the rebuilt hand looks like a real one).
+from .engine import MULLIGAN_DRAW_COUNT as _OPENING_HAND
+
+
+def _named_targets(pred: dict) -> list[tuple[str, str]]:
+    """(name_fragment, side) for every units clause that NAMES a card. ``side``
+    is the clause's controller, or ``"player_1"`` when unscoped (the requester).
+    De-duplicated, preserving order."""
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for spec in predicate_unit_specs(pred):
+        name = spec.get("name")
+        if not name:
+            continue
+        ctrl = spec.get("controller")
+        side = ctrl if ctrl in ("player_1", "player_2") else "player_1"
+        key = (_norm_name(name), side)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _find_named(cards, frag: str) -> str | None:
+    """The first actual card name in ``cards`` matching name-fragment ``frag``."""
+    for c in cards or []:
+        if frag in _norm_name(c):
+            return c
+    return None
+
+
+def _swap_into_main(main: list[str], card: str) -> tuple[str, ...]:
+    """A 39-card main deck containing ``card``: drop one copy of the most-
+    duplicated existing card (so a singleton tech card isn't lost) and add
+    ``card``. Keeps the deck-size and ≤3-copies invariants."""
+    new = list(main)
+    from collections import Counter
+
+    counts = Counter(new)
+    # Prefer removing a card we have multiple of; fall back to the last card.
+    drop = max(new, key=lambda c: (counts[c], new.index(c))) if new else None
+    if drop is not None:
+        new.remove(drop)
+    new.append(card)
+    return tuple(new)
+
+
+def _deck_object(deck_id: str, cards: tuple[str, ...]) -> Deck:
+    """Build a Deck for ``deck_id`` but with its main deck replaced by ``cards``
+    (battlefields / champion / legend / runes taken from the deck file)."""
+    dd = deck_data_for_id(deck_id)
+    return Deck(
+        battlefields=list(dd["battlefields"]),
+        chosen_champion=str(dd["chosen_champion"]),
+        legend=str(dd["legend"]),
+        cards=cards,
+        runes=tuple(Rune(domain=str(r["domain"])) for r in dd["runes"]),
+    )
+
+
+def _provider_for(frag: str, current_deck_id: str | None) -> tuple[str, tuple[str, ...], str] | None:
+    """Find a deck that can supply a card matching ``frag``. Returns
+    ``(deck_id, main_cards_including_it, how)`` where ``how`` is "sideboard" or
+    "main", or ``None`` if no loaded deck lists it.
+
+    Preference order: the CURRENT deck's sideboard (keep the chosen deck) →
+    another deck with it in its MAIN → another deck with it in its sideboard."""
+    # 1. current deck's sideboard
+    if current_deck_id:
+        try:
+            dd = deck_data_for_id(current_deck_id)
+        except Exception:
+            dd = None
+        if dd is not None:
+            hit = _find_named(dd.get("sideboard") or [], frag)
+            if hit and _find_named(dd.get("cards") or [], frag) is None:
+                return current_deck_id, _swap_into_main(list(dd["cards"]), hit), "sideboard"
+    # 2. another deck with it in MAIN, then 3. another deck's sideboard
+    sideboard_fallback: tuple[str, tuple[str, ...], str] | None = None
+    for did in deck_ids():
+        if did == current_deck_id:
+            continue
+        try:
+            dd = deck_data_for_id(did)
+        except Exception:
+            continue
+        main_hit = _find_named(dd.get("cards") or [], frag)
+        if main_hit:
+            return did, tuple(dd["cards"]), "main"
+        if sideboard_fallback is None:
+            side_hit = _find_named(dd.get("sideboard") or [], frag)
+            if side_hit:
+                sideboard_fallback = (did, _swap_into_main(list(dd["cards"]), side_hit), "sideboard")
+    return sideboard_fallback
+
+
+def apply_deck_changes(start: GameState, pred: dict) -> tuple[GameState, list[str]]:
+    """Return a COPY of ``start`` in which each of the predicate's named cards is
+    REACHABLE in its target side's deck (hand or library), plus human-readable
+    change descriptions.
+
+    This NEVER injects a card into the opening hand. A card already in the deck
+    is left exactly where the shuffle put it — it's reached through the engine
+    (drawn, played, or by re-dealing the opening, see ``/reroll-until``). Only a
+    card NO loaded deck contains is brought into the deck via a sideboard swap or
+    deck switch, so it can then be reached legitimately."""
+    state = copy.deepcopy(start)
+    changes: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for spec in predicate_unit_specs(pred):
+        name = spec.get("name")
+        if not name:
+            continue
+        frag = _norm_name(name)
+        ctrl = spec.get("controller")
+        side = ctrl if ctrl in ("player_1", "player_2") else "player_1"
+        if (frag, side) in seen:
+            continue
+        seen.add((frag, side))
+        hand = getattr(state, f"{side}_hand") or []
+        lib = getattr(state, f"{side}_library") or []
+        if _find_named(hand, frag) or _find_named(lib, frag):
+            continue  # already in this deck — reachable WITHOUT injecting it.
+        current_id = getattr(state, f"{side}_deck_id", None)
+        provider = _provider_for(frag, current_id)
+        if provider is None:
+            continue  # no loaded deck lists it — search will report not-found
+        deck_id, cards, how = provider
+        actual = _find_named(cards, frag) or frag
+        # Rebuild that side's opening from the new deck with the wanted card IN
+        # HAND, so it's immediately usable: a "card in hand" goal is satisfied at
+        # once and a board goal is just a play away — independent of the live
+        # position's turn order, runes, or draw timing (which is what made a
+        # "draw it over several turns" approach fail from a drifted root).
+        rest = list(cards)
+        rest.remove(actual)
+        opening = rest[:_OPENING_HAND]
+        setattr(state, f"{side}_hand", [actual, *opening])
+        setattr(state, f"{side}_library", rest[_OPENING_HAND:])
+        setattr(state, f"{side}_deck", _deck_object(deck_id, cards))
+        setattr(state, f"{side}_deck_id", deck_id)
+        if deck_id == current_id:
+            changes.append(f"{side}: sideboarded in {actual}")
+        elif how == "sideboard":
+            changes.append(f"{side}: switched deck to {deck_id}, sideboarded in {actual}")
+        else:
+            changes.append(f"{side}: switched deck to {deck_id} (has {actual})")
+    return state, changes
 
 
 # --------------------------------------------------------------------------- #
@@ -450,7 +637,12 @@ def enumerate_moves(
             else output.player_2_options
         )
         for a in opts:
-            out.append(Move(label=f"{actor.value}:{a}", steps=[(actor, a)], actor=actor.value))
+            # Human-readable label (same translator the UI uses), computed from
+            # the PRE-action state — otherwise raw options would land on the
+            # branch tree as e.g. "player_1:play:choose_location:base".
+            out.append(
+                Move(label=label_for_action(engine.game_state, actor, a), steps=[(actor, a)], actor=actor.value)
+            )
         seen: set[tuple[str, int]] = set()
         # These are the SAME intents the Branch UI offers — including MOVE
         # (unit → battlefield). A move opens a SHOWDOWN, but we do NOT branch on
@@ -536,6 +728,7 @@ def _signature(gs: GameState):
         gs.pending_combat is not None,
         getattr(gs, "pending_effect_choice", None) is not None,
         getattr(gs, "pending_spell_repeat", None) is not None,
+        getattr(gs, "pending_deflect", None) is not None,
         getattr(gs, "pending_accelerate", None) is not None,
         getattr(gs, "pending_ability_cost", None) is not None,
         getattr(gs, "pending_ability_payment", None) is not None,
@@ -603,13 +796,27 @@ def bfs_search(
     node_budget: int = 20000,
     time_budget_s: float = 20.0,
     verbose: bool = False,
+    allow_deck_changes: bool = False,
 ) -> SearchResult:
     """Breadth-first search for the shortest move path whose resulting state
     satisfies ``predicate``. Returns the first (shortest) hit, or not-found
     once the depth / node budget is exhausted.
 
+    When ``allow_deck_changes`` is set, a named card the loaded decks can't
+    reach is brought into play first via a sideboard swap or deck switch (see
+    ``apply_deck_changes``); the edits made are reported on ``SearchResult``.
+
     When ``verbose`` is set, every node expanded and every new path enqueued
     is logged to stderr (the engine terminal), plus a final summary."""
+    deck_changes: list[str] = []
+    if allow_deck_changes:
+        start, deck_changes = apply_deck_changes(start, predicate)
+        if verbose and deck_changes:
+            _log(f"deck changes: {deck_changes}")
+
+    def _result(**kw) -> SearchResult:
+        return SearchResult(deck_changes=deck_changes, **kw)
+
     start_view = state_view(start)
     start_dist = goal_distance(predicate, start_view)
     if verbose:
@@ -620,7 +827,7 @@ def bfs_search(
     if evaluate_predicate(predicate, start_view):
         if verbose:
             _log("already satisfied at start")
-        return SearchResult(found=True, moves=[], nodes_explored=0, depth=0, reason="already satisfied")
+        return _result(found=True, moves=[], nodes_explored=0, depth=0, reason="already satisfied")
 
     # Best-first (greedy) search: a priority queue ordered by goal_distance,
     # then by shallower depth, so the most-promising states (closest to the
@@ -663,11 +870,11 @@ def bfs_search(
         if nodes > node_budget:
             if verbose:
                 _progress("STOP node budget exhausted —")
-            return SearchResult(found=False, nodes_explored=nodes, reason="node budget exhausted")
+            return _result(found=False, nodes_explored=nodes, reason="node budget exhausted")
         if time.time() - t0 > time_budget_s:
             if verbose:
                 _progress("STOP time budget exhausted —")
-            return SearchResult(found=False, nodes_explored=nodes, reason="time budget exhausted")
+            return _result(found=False, nodes_explored=nodes, reason="time budget exhausted")
         if depth >= max_depth:
             continue
         fork = GameEngine(game_state=copy.deepcopy(state))
@@ -678,7 +885,7 @@ def bfs_search(
             if time.time() - t0 > time_budget_s:
                 if verbose:
                     _progress("STOP time budget exhausted (mid-node) —")
-                return SearchResult(found=False, nodes_explored=nodes, reason="time budget exhausted")
+                return _result(found=False, nodes_explored=nodes, reason="time budget exhausted")
             ns = _apply_move(state, move)
             if ns is None:
                 continue
@@ -689,7 +896,7 @@ def bfs_search(
                         f"FOUND at depth {depth + 1} after exploring {nodes} states "
                         f"(of {enqueued} seen): {_path_str([*path, move])}"
                     )
-                return SearchResult(
+                return _result(
                     found=True, moves=[*path, move], nodes_explored=nodes, depth=depth + 1
                 )
             sg = _signature(ns)
@@ -702,4 +909,4 @@ def bfs_search(
                 )
     if verbose:
         _progress("STOP exhausted reachable states (not found) —")
-    return SearchResult(found=False, nodes_explored=nodes, reason="exhausted reachable states")
+    return _result(found=False, nodes_explored=nodes, reason="exhausted reachable states")

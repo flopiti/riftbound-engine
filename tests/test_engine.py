@@ -20,6 +20,32 @@ from riftbound_engine.deck_files import list_deck_ids
 from riftbound_engine.engine import PlayedSpell, Rune
 from riftbound_engine.requirements import spell_playable, spell_target_plan
 
+# Known cards for the play-option assertions. These tests pin the engine's
+# option ordering against an EXPLICIT hand (set directly on game state) instead
+# of a random deal, so the expected list is exact and deterministic — no
+# parallel re-derivation of the engine's logic. Each card is chosen for one
+# stable, documented property; if the CSV ever changes one, the test fails
+# loudly (which is the point). Verified against riftbound_cards.csv.
+HAND_UNIT_CHEAP = "Determined Sentry"     # Unit — 1 Energy, 0 Power
+HAND_UNIT = "Scuttle Crab"                # Unit — 2 Energy, 0 Power
+HAND_SPELL_NO_REQ = "Acceptable Losses"   # Spell — 1 Energy, no Choice Requirement (always offered)
+HAND_SPELL_UNIT_TARGET = "Cleave"         # Spell — 1 Energy, "ANY UNIT (1)" (gated with no unit in play)
+HAND_GEAR_CHEAP = "Orb of Regret"         # Gear — 1 Energy, 0 Power
+HAND_GEAR = "Garbage Grabber"             # Gear — 2 Energy, 0 Power
+
+# A deterministic starting hand for the test scaffolds (`_drive_to_action_turn`).
+# Replaces the random deal so tests never skip for lack of a needed card type:
+# it always contains a cheap Unit, a costlier Unit, a directly-castable Spell, a
+# unit-target Spell, and a Gear — covering every "first <type>" lookup the tests
+# do. Individual tests that assert an exact option list still set their own hand.
+CANONICAL_HAND = [
+    HAND_UNIT_CHEAP,         # 0 — Unit, 1 Energy, 0 Power
+    HAND_UNIT,               # 1 — Unit, 2 Energy, 0 Power (positive-cost)
+    HAND_SPELL_NO_REQ,       # 2 — Spell, directly castable (no requirement)
+    HAND_SPELL_UNIT_TARGET,  # 3 — Spell, needs a unit target
+    HAND_GEAR_CHEAP,         # 4 — Gear, 1 Energy, 0 Power
+]
+
 
 def _flood_runes(engine: GameEngine, actor: RequiredTo, count: int = 20) -> None:
     """Replace the active rune pool with ``count`` fresh, ready runes.
@@ -220,15 +246,20 @@ class GameEngineTests(unittest.TestCase):
 
         sixth = engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
         self.assertEqual(sixth.required_action.name, RequiredStep.CHOOSE_MULLIGAN)
-        self.assertEqual(sixth.required_action.actor, RequiredTo.BOTH)
-        # Mulligan options are full `mulligan_resolve:player_N:<csv>` actions:
-        # keep-all + bottom-each-single + bottom-each-pair = 1 + 4 + C(4,2) = 11.
-        self.assertEqual(len(sixth.player_1_options), 11)
-        self.assertEqual(len(sixth.player_2_options), 11)
+        # SEQUENTIAL mulligan: player_1 resolves first, so only player_1 is on
+        # the clock here (player_2 has no options until player_1 is done).
+        self.assertEqual(sixth.required_action.actor, RequiredTo.PLAYER_1)
+        # One-card-at-a-time mulligan: keep-all + bottom each of the 4 opening
+        # cards = 5 `mulligan_resolve:player_1:<csv>` actions.
+        self.assertEqual(len(sixth.player_1_options), 5)
+        self.assertEqual(len(sixth.player_2_options), 0)
         self.assertTrue(
-            all(o.startswith("mulligan_resolve:player_1:") for o in sixth.player_1_options)
+            all(
+                o.startswith("mulligan_bottom:player_1:") or o == "mulligan_done:player_1"
+                for o in sixth.player_1_options
+            )
         )
-        self.assertIn("mulligan_resolve:player_1:", sixth.player_1_options)  # keep-all
+        self.assertIn("mulligan_done:player_1", sixth.player_1_options)  # keep-all / finish
         self.assertEqual(sixth.game_state.battlefield_2, fifth.player_2_options[0])
         self.assertEqual(sixth.game_state.player_2_base, fifth.player_2_options[0])
         self.assertFalse(sixth.game_state.is_mulligan_done)
@@ -321,59 +352,39 @@ class GameEngineTests(unittest.TestCase):
             actor=RequiredTo.PLAYER_2,
         )
 
-        # P1 went first; after ABCD they're sitting in the action turn with 5 cards in hand.
+        # P1 went first; after ABCD they're sitting in the action turn.
         self.assertEqual(ready.required_action.name, RequiredStep.ACTION_TURN)
         self.assertEqual(ready.required_action.actor, RequiredTo.PLAYER_1)
-        self.assertEqual(len(ready.game_state.player_1_hand or []), 5)
 
-        # Give the player a single Fury rune pool + max Energy so every Unit
-        # is affordable. This keeps the assertion focused on
-        # play_unit/play_spell/end_turn surfacing — the Energy cost gate is
-        # covered separately in PlayUnitEnergyCostTests.
+        # Flood resources so affordability never gates — this test isolates the
+        # ORDERING rule. Then deal an EXPLICIT hand so the expected option list
+        # is exact: two Units (one duplicated), a no-requirement Spell, a
+        # unit-target Spell (gated — no units are in play to target), and a
+        # Gear. The engine offers units → spells → gears → champion → end_turn,
+        # in hand order, collapsing duplicate card names to the leftmost copy.
         _flood_runes(engine, RequiredTo.PLAYER_1)
-        # Bank an absurd amount of Energy AND Power across every domain
-        # without exhausting any runes so every Unit in hand clears both the
-        # Energy and Power gates.
         _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        engine._game_state.player_1_hand = [
+            HAND_UNIT_CHEAP,         # 0 → play_unit:0
+            HAND_UNIT,               # 1 → play_unit:1
+            HAND_SPELL_NO_REQ,       # 2 → play_spell:2
+            HAND_SPELL_UNIT_TARGET,  # 3 → gated out (no unit in play to target)
+            HAND_GEAR_CHEAP,         # 4 → play_gear:4
+            HAND_UNIT_CHEAP,         # 5 → duplicate of index 0, collapses away
+        ]
         ready = engine.start()
 
-        # The engine no longer surfaces rune-resource actions
-        # (exhaust_rune / recycle_rune / exhaust_and_recycle_rune) as
-        # standalone options — clients drive payments via the
-        # shortcuts.ts plan and just receive the final play_unit /
-        # play_spell call back here. So the option list is just play_unit
-        # for each affordable unique Unit, play_spell for each affordable
-        # unique Spell, then end_turn. Duplicate card names in hand
-        # collapse to the leftmost occurrence since only one action can
-        # be taken at a time.
-        hand = ready.game_state.player_1_hand or []
-        seen: set[str] = set()
-        unit_opts: list[str] = []
-        for i, card in enumerate(hand):
-            if card in seen:
-                continue
-            if card_type_of(card) != "Unit":
-                continue
-            seen.add(card)
-            unit_opts.append(f"play:play_unit:{i}")
-        spell_opts: list[str] = []
-        for i, card in enumerate(hand):
-            if card in seen:
-                continue
-            if card_type_of(card) != "Spell":
-                continue
-            # A spell is only offered if its Spell Choice Requirement can be
-            # met on the current board (no units are in play here, so any
-            # spell needing a unit target is correctly gated out).
-            if not spell_playable(ready.game_state, card):
-                continue
-            seen.add(card)
-            spell_opts.append(f"play:play_spell:{i}")
-        # The chosen champion plays like a hand unit and is surfaced as a flat
-        # option here too (resources are flooded, so it's affordable and not
-        # yet played). It comes after the hand plays, before end_turn.
-        expected = unit_opts + spell_opts + ["play:play_champion", "play:end_turn"]
-        self.assertEqual(ready.player_1_options, expected)
+        self.assertEqual(
+            ready.player_1_options,
+            [
+                "play:play_unit:0",
+                "play:play_unit:1",
+                "play:play_spell:2",
+                "play:play_gear:4",
+                "play:play_champion",
+                "play:end_turn",
+            ],
+        )
         # Sanity: none of the rune-resource verbs are surfaced anywhere
         # in the option list any more.
         for opt in ready.player_1_options:
@@ -396,10 +407,14 @@ class GameEngineTests(unittest.TestCase):
         fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
         engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
         engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
-        ready = engine.apply_action(
+        engine.apply_action(
             action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
             actor=RequiredTo.PLAYER_2,
         )
+        # Replace the random deal with a deterministic, explicit hand so tests
+        # never depend on what was shuffled (and never skip for a missing type).
+        engine._game_state.player_1_hand = list(CANONICAL_HAND)
+        ready = engine.start()
         return engine, ready
 
     def _first_unit_index(self, hand: list[str]) -> int:
@@ -416,11 +431,20 @@ class GameEngineTests(unittest.TestCase):
         # flood runes so the engine can show exhaust_rune options afterwards.
         _flood_runes(engine, RequiredTo.PLAYER_1)
         _bank_all_resources(engine, RequiredTo.PLAYER_1, 99)
+        # Explicit hand so the post-commit option list is exact. Index 0 is the
+        # Unit we play; index 4 duplicates it (it becomes a distinct offer once
+        # index 0 leaves the hand).
+        engine._game_state.player_1_hand = [
+            HAND_UNIT,           # 0 → played in this test
+            HAND_UNIT_CHEAP,     # 1
+            HAND_SPELL_NO_REQ,   # 2
+            HAND_GEAR_CHEAP,     # 3
+            HAND_UNIT,           # 4 → duplicate of index 0
+        ]
         ready = engine.start()
         original_hand = list(ready.game_state.player_1_hand or [])
-        self.assertGreaterEqual(len(original_hand), 1)
 
-        unit_idx = self._first_unit_index(original_hand)
+        unit_idx = 0
         unit_card = original_hand[unit_idx]
         hand_after_pop = original_hand[:unit_idx] + original_hand[unit_idx + 1 :]
         cost = engine.card_energy_cost(unit_card)
@@ -478,45 +502,22 @@ class GameEngineTests(unittest.TestCase):
         self.assertEqual(settled.game_state.player_1_units[0].card, unit_card)
         self.assertEqual(settled.game_state.player_1_units[0].location, "base")
 
-        # Options now list the remaining unique Unit cards (all still
-        # affordable thanks to the Energy headroom), the remaining unique
-        # Spell cards, and end_turn. Rune-resource actions are no longer
-        # surfaced — clients drive payment through the shortcuts plan.
-        # Duplicate cards in hand collapse to the leftmost occurrence.
-        seen: set[str] = set()
-        unit_opts: list[str] = []
-        for i, card in enumerate(hand_after_pop):
-            if card in seen:
-                continue
-            if card_type_of(card) != "Unit":
-                continue
-            seen.add(card)
-            unit_opts.append(f"play:play_unit:{i}")
-        spell_opts: list[str] = []
-        for i, card in enumerate(hand_after_pop):
-            if card in seen:
-                continue
-            if card_type_of(card) != "Spell":
-                continue
-            # Mirror the engine's requirement gate (a unit is now on the
-            # board, so unit-target spells may or may not qualify depending
-            # on their per-unit filters).
-            if not spell_playable(settled.game_state, card):
-                continue
-            seen.add(card)
-            spell_opts.append(f"play:play_spell:{i}")
-        # Gears are offered after spells (same cost gates, no requirement).
-        gear_opts: list[str] = []
-        for i, card in enumerate(hand_after_pop):
-            if card in seen:
-                continue
-            if card_type_of(card) != "Gear":
-                continue
-            seen.add(card)
-            gear_opts.append(f"play:play_gear:{i}")
-        # Champion still available + affordable (resources flooded) → offered.
-        expected = unit_opts + spell_opts + gear_opts + ["play:play_champion", "play:end_turn"]
-        self.assertEqual(settled.player_1_options, expected)
+        # With the played Unit committed, the hand is now
+        # [Determined Sentry, Acceptable Losses, Orb of Regret, Scuttle Crab]
+        # (the index-4 duplicate is now the only Scuttle Crab left). Options are
+        # the remaining units, then the spell, then the gear, then champion and
+        # end_turn — all still affordable thanks to the flooded resources.
+        self.assertEqual(
+            settled.player_1_options,
+            [
+                "play:play_unit:0",   # Determined Sentry
+                "play:play_unit:3",   # Scuttle Crab (former duplicate)
+                "play:play_spell:1",  # Acceptable Losses
+                "play:play_gear:2",   # Orb of Regret
+                "play:play_champion",
+                "play:end_turn",
+            ],
+        )
 
     def test_play_unit_rejects_bad_indices_and_inactive_player(self) -> None:
         engine, ready = self._drive_to_action_turn()
@@ -795,6 +796,10 @@ class PlayUnitEnergyCostTests(unittest.TestCase):
         )
         # Unused for now — kept in case future tests want the post-P1-deck output.
         _ = third
+        # Deterministic, explicit hand (see CANONICAL_HAND) so tests never depend
+        # on the random deal or skip for a missing card type.
+        engine._game_state.player_1_hand = list(CANONICAL_HAND)
+        ready = engine.start()
         return engine, ready
 
     def _first_affordable_unit_index(self, hand: list[str], ready_runes: int) -> int:
@@ -822,44 +827,24 @@ class PlayUnitEnergyCostTests(unittest.TestCase):
         pool.clear()
         pool.append(Rune(domain="Fury"))
         engine.add_energy(RequiredTo.PLAYER_1, 1)
+        # Explicit hand exercising the 1-Energy affordability gate. The cheap
+        # (1-Energy, 0-Power) Unit, Spell, and Gear stay; the 2-Energy Unit and
+        # Gear drop off. The Spell has no Choice Requirement so it survives on an
+        # empty board. The champion costs more than 1 Energy, so it's correctly
+        # absent here (unlike the flooded-resource test above).
+        engine._game_state.player_1_hand = [
+            HAND_UNIT_CHEAP,    # 0 → play_unit:0  (1 Energy)
+            HAND_UNIT,          # 1 → dropped      (2 Energy)
+            HAND_SPELL_NO_REQ,  # 2 → play_spell:2 (1 Energy, no requirement)
+            HAND_GEAR_CHEAP,    # 3 → play_gear:3  (1 Energy)
+            HAND_GEAR,          # 4 → dropped      (2 Energy)
+        ]
         ready = engine.start()
 
-        hand = ready.game_state.player_1_hand or []
-        # The same affordability gate applies to Spells — only ones whose
-        # Energy cost <= 1 and Power cost == 0 (since we banked no Power)
-        # are offered. Identical cards in hand collapse to one option at
-        # the leftmost index.
-        seen: set[str] = set()
-        unit_opts: list[str] = []
-        for i, card in enumerate(hand):
-            if card in seen:
-                continue
-            if card_type_of(card) != "Unit":
-                continue
-            if (card_energy_of(card) or 0) > 1:
-                continue
-            if (card_power_of(card) or 0) > 0:
-                continue
-            seen.add(card)
-            unit_opts.append(f"play:play_unit:{i}")
-        spell_opts: list[str] = []
-        for i, card in enumerate(hand):
-            if card in seen:
-                continue
-            if card_type_of(card) != "Spell":
-                continue
-            if (card_energy_of(card) or 0) > 1:
-                continue
-            if (card_power_of(card) or 0) > 0:
-                continue
-            # Beyond affordability, the spell must also have a valid target
-            # (empty board here ⇒ unit-target spells are gated out).
-            if not spell_playable(ready.game_state, card):
-                continue
-            seen.add(card)
-            spell_opts.append(f"play:play_spell:{i}")
-        expected = unit_opts + spell_opts + ["play:end_turn"]
-        self.assertEqual(ready.player_1_options, expected)
+        self.assertEqual(
+            ready.player_1_options,
+            ["play:play_unit:0", "play:play_spell:2", "play:play_gear:3", "play:end_turn"],
+        )
 
     def test_play_unit_rejects_card_more_expensive_than_available_energy(self) -> None:
         engine, ready = self._drive_to_action_turn()
@@ -1236,6 +1221,10 @@ class PlayUnitPowerCostTests(unittest.TestCase):
             actor=RequiredTo.PLAYER_2,
         )
         _ = third
+        # Deterministic, explicit hand (see CANONICAL_HAND) so tests never depend
+        # on the random deal or skip for a missing card type.
+        engine._game_state.player_1_hand = list(CANONICAL_HAND)
+        ready = engine.start()
         return engine, ready
 
     def _inject_power_unit(self, engine: GameEngine) -> tuple[int, str, int, int, tuple[str, ...]]:
@@ -1387,6 +1376,10 @@ class UnitSummoningSicknessTests(unittest.TestCase):
             actor=RequiredTo.PLAYER_2,
         )
         _ = third
+        # Deterministic, explicit hand (see CANONICAL_HAND) so tests never depend
+        # on the random deal or skip for a missing card type.
+        engine._game_state.player_1_hand = list(CANONICAL_HAND)
+        ready = engine.start()
         return engine, ready
 
     def _play_one_unit_to_base(self, engine: GameEngine) -> str:
@@ -1478,6 +1471,10 @@ class MoveUnitTests(unittest.TestCase):
             actor=RequiredTo.PLAYER_2,
         )
         _ = third
+        # Deterministic, explicit hand (see CANONICAL_HAND) so tests never depend
+        # on the random deal or skip for a missing card type.
+        engine._game_state.player_1_hand = list(CANONICAL_HAND)
+        ready = engine.start()
         return engine, ready
 
     def _place_ready_unit(
@@ -1745,6 +1742,10 @@ class ShowdownTests(unittest.TestCase):
             actor=RequiredTo.PLAYER_2,
         )
         _ = third
+        # Deterministic, explicit hand (see CANONICAL_HAND) so tests never depend
+        # on the random deal or skip for a missing card type.
+        engine._game_state.player_1_hand = list(CANONICAL_HAND)
+        ready = engine.start()
         return engine, ready
 
     def _start_showdown_on_bf1(self, engine: GameEngine) -> int:
@@ -1940,6 +1941,10 @@ class ScoringTests(unittest.TestCase):
             actor=RequiredTo.PLAYER_2,
         )
         _ = third
+        # Deterministic, explicit hand (see CANONICAL_HAND) so tests never depend
+        # on the random deal or skip for a missing card type.
+        engine._game_state.player_1_hand = list(CANONICAL_HAND)
+        ready = engine.start()
         return engine, ready
 
     def _open_and_win_showdown(
@@ -2049,10 +2054,14 @@ class PlayGearTests(unittest.TestCase):
         fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
         engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
         engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
-        ready = engine.apply_action(
+        engine.apply_action(
             action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:",
             actor=RequiredTo.PLAYER_2,
         )
+        # Deterministic, explicit hand (see CANONICAL_HAND) so tests never depend
+        # on the random deal or skip for a missing card type.
+        engine._game_state.player_1_hand = list(CANONICAL_HAND)
+        ready = engine.start()
         return engine, ready
 
     def test_gear_card_is_recognized_as_gear_type(self) -> None:

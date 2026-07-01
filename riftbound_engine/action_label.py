@@ -211,6 +211,18 @@ def label_for_action(game_state: Any, actor: Any, action: str) -> str:
         unit_name = unit.card if unit else f"unit #{idx}"
         return f"Move {unit_name} from {from_label} → {to_label}"
 
+    if action == "play:pay_deflect":
+        pd = getattr(gs, "pending_deflect", None)
+        if pd and pd.queue:
+            _ref, stacks, card = pd.queue[0]
+            return f"Pay {stacks} Power to target {card} ([Deflect])"
+        return "Pay [Deflect] tax"
+    if action == "play:decline_deflect":
+        pd = getattr(gs, "pending_deflect", None)
+        if pd and pd.queue:
+            return f"Don't pay — drop {pd.queue[0][2]} as a target"
+        return "Decline [Deflect] — drop target"
+
     if action == "play:choose_repeat:yes":
         rep = getattr(gs, "pending_spell_repeat", None)
         card = rep.card if rep else None
@@ -281,5 +293,48 @@ def label_for_action(game_state: Any, actor: Any, action: str) -> str:
             cname = hand[hi] if 0 <= hi < len(hand) else f"card #{hi}"
             return f"{src}: discard {cname}"
         return f"{src}: {token}"
+
+    # Optional spell targeting: the empty pick is the "No targets" / skip option.
+    if action == "play:choose_spell_targets:":
+        return "No targets"
+
+    # Setup choices (recorded as branch nodes by reset_engine) have no "play:"
+    # prefix, so they'd otherwise fall through to the raw action string on the
+    # branch tree. Give them readable labels.
+    if action.startswith("choose_deck:"):
+        return f"Deck: {action.split(':', 1)[1].replace('_', ' ').title()}"
+    if action.startswith("choose_first_turn:"):
+        who = action.split(":", 1)[1]
+        return f"First turn: {'P1' if who == 'player_1' else 'P2' if who == 'player_2' else who}"
+    if action.startswith("choose_battlefield_1:"):
+        return f"Battlefield 1: {action.split(':', 1)[1]}"
+    if action.startswith("choose_battlefield_2:"):
+        return f"Battlefield 2: {action.split(':', 1)[1]}"
+    if action.startswith("mulligan_bottom:"):
+        # One-card-at-a-time mulligan: show the card being sent to the bottom.
+        parts = action.split(":")
+        who = parts[1] if len(parts) > 1 else ""
+        try:
+            idx = int(parts[2]) if len(parts) > 2 else -1
+        except ValueError:
+            idx = -1
+        mh = (
+            gs.player_1_mulligan_hand
+            if who == "player_1"
+            else gs.player_2_mulligan_hand
+            if who == "player_2"
+            else None
+        )
+        if mh and 0 <= idx < len(mh):
+            return f"Mulligan {mh[idx]}"
+        return "Mulligan card"
+    if action.startswith("mulligan_done:"):
+        return "No mulligan"
+    if action.startswith("mulligan_resolve:"):
+        parts = action.split(":")
+        who = parts[1] if len(parts) > 1 else ""
+        who = "P1" if who == "player_1" else "P2" if who == "player_2" else who
+        bottomed = parts[2].strip() if len(parts) > 2 else ""
+        return f"Mulligan: {who} (bottom {bottomed})" if bottomed else f"Mulligan: {who} (keep)"
 
     return action

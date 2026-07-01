@@ -279,9 +279,19 @@ def _drive_to_action_turn() -> tuple[GameEngine, object]:
     fifth = engine.apply_action(action=f"choose_battlefield_1:{fourth.player_1_options[0]}", actor=RequiredTo.PLAYER_1)
     engine.apply_action(action=f"choose_battlefield_2:{fifth.player_2_options[0]}", actor=RequiredTo.PLAYER_2)
     engine.apply_action(action=f"mulligan_resolve:{RequiredTo.PLAYER_1.value}:", actor=RequiredTo.PLAYER_1)
-    ready = engine.apply_action(
+    engine.apply_action(
         action=f"mulligan_resolve:{RequiredTo.PLAYER_2.value}:", actor=RequiredTo.PLAYER_2
     )
+    # Deterministic, explicit hand so trigger tests never depend on the random
+    # deal: two non-[Accelerate] Units (Accelerate units defer their on-play
+    # trigger), a directly-castable Spell, and a Gear.
+    engine._game_state.player_1_hand = [
+        "Scuttle Crab",       # Unit, non-Accelerate
+        "Determined Sentry",  # Unit, non-Accelerate
+        "Acceptable Losses",  # Spell, no Choice Requirement
+        "Orb of Regret",      # Gear
+    ]
+    ready = engine.start()
     return engine, ready
 
 
