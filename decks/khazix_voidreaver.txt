@@ -1,0 +1,43 @@
+# Body / Chaos Kha'Zix — "Mos Bug" by I LOVE TREN
+# Pulled from riftdecks.com (deck-mos-bug-180979).
+
+Legend:
+1 Khazix, Voidreaver
+
+Champion:
+1 Kha'Zix, Mutating Horror
+
+MainDeck:
+2 Demacian Diplomat
+2 Irresistible Faefolk
+2 Mister Root
+2 Traveling Merchant
+2 Fizz, Trickster
+3 Lucian, Merciless
+2 Nidalee, Cat Form
+2 Nilah, Joyful Ascetic
+1 Vex, Apathetic
+3 Rengar, Trophy Hunter
+2 Gust
+3 Punch First
+2 Stacked Deck
+3 Grim Resolve
+2 Ride the Wind
+3 Void Assault
+3 Star-Crossed
+
+Battlefields:
+1 Forbidding Waste
+1 Monastery of Hirana
+1 The Arena's Greatest
+
+Runes:
+6 Body Rune
+6 Chaos Rune
+
+Sideboard:
+1 Gust
+2 Repulse
+2 Abandon
+1 Bone Skewer
+2 Confront

@@ -1,0 +1,47 @@
+# Fury / Mind Rumble — by Macsif
+# Pulled from riftdecks.com (deck-rumble-mechanized-menace-180600).
+
+Legend:
+1 Rumble, Mechanized Menace
+
+Champion:
+1 Rumble, Hotheaded
+
+MainDeck:
+3 Forecaster
+2 Gem Jammer
+3 Plundering Poro
+3 Bubble Bot
+2 Chakram Dancer
+2 Rumble, Hotheaded
+3 Ferrous Forerunner
+2 Thousand-Tailed Watcher
+1 Breakneck Mech
+1 Blood Rush
+2 Retreat
+3 Stupefy
+3 Falling Star
+1 Lotus Trap
+2 Eclipse
+2 Wages of Pain
+1 Rocket Barrage
+1 Singularity
+1 Unchecked Power
+1 Time Warp
+
+Battlefields:
+1 Ravenbloom Conservatory
+1 Star Spring
+1 Trifarian War Camp
+
+Runes:
+6 Fury Rune
+6 Mind Rune
+
+Sideboard:
+1 Turn to Dust
+1 Rumble, Scrapper
+2 Thermo Beam
+1 Brynhir Thundersong
+1 Unchecked Power
+1 Time Warp

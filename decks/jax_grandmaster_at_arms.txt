@@ -1,0 +1,46 @@
+# Body / Calm Jax — by Jacob
+# Pulled from riftdecks.com (deck-jax-grandmaster-at-arms-180958).
+
+Legend:
+1 Jax, Grandmaster at Arms
+
+Champion:
+1 Jax, Unmatched
+
+MainDeck:
+3 Irresistible Faefolk
+2 Lonely Poro
+3 Scuttle Crab
+2 Nidalee, Cat Form
+2 Qiyana, Victorious
+3 Stellacorn Herder
+2 Irelia, Fervent
+3 Brutalizer
+2 Doran's Blade
+2 Guardian Angel
+1 Boneshiver
+2 Trinity Force
+1 Charm
+1 Defy
+1 Punch First
+2 Challenge
+3 Counter Strike
+2 Discipline
+1 Emperor's Divide
+1 Not So Fast
+
+Battlefields:
+1 Amateur Recital
+1 Ornn's Forge
+1 Sunken Temple
+
+Runes:
+6 Body Rune
+6 Calm Rune
+
+Sideboard:
+1 Charm
+1 Defy
+1 Emperor's Divide
+3 Akshan, Mischievous
+2 Rengar, Trophy Hunter

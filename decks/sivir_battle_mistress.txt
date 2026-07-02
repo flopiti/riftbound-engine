@@ -1,0 +1,43 @@
+# Body / Chaos Sivir — "Sivir Aurora" by Zachary
+# Pulled from riftdecks.com (deck-sivir-aurora-180954).
+
+Legend:
+1 Sivir, Battle Mistress
+
+Champion:
+1 Sivir, Mercenary
+
+MainDeck:
+1 Mindsplitter
+3 Elder Dragon
+3 Scryer's Bloom
+1 Pack of Wonders
+3 Treasure Trove
+2 Last Rites
+3 Dazzling Aurora
+3 Flurry of Blades
+3 Gust
+3 Sabotage
+3 Stacked Deck
+3 Mobilize
+3 Lunar Boon
+3 Catalyst of Aeons
+1 Fading Memories
+1 The Harrowing
+
+Battlefields:
+1 Aspirant's Climb
+1 Forgotten Monument
+1 Sigil of the Storm
+
+Runes:
+6 Body Rune
+6 Chaos Rune
+
+Sideboard:
+2 Challenge
+1 Heedless Resurrection
+1 Pack of Wonders
+2 Akshan, Mischievous
+1 Annie, Stubborn
+1 Mindsplitter

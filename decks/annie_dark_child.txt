@@ -1,0 +1,46 @@
+# Chaos / Fury Annie — by Elikya
+# Pulled from riftdecks.com (deck-annie-dark-child-180578).
+
+Legend:
+1 Annie, Dark Child
+
+Champion:
+1 Annie, Stubborn
+
+MainDeck:
+3 Inferna
+2 Overzealous Fan
+3 Traveling Merchant
+3 Rengar, Pouncing
+3 Kai'Sa, Survivor
+1 Kha'Zix, Mutating Horror
+3 Noxus Hopeful
+2 Vex, Apathetic
+3 Ferrous Forerunner
+2 Long Sword
+2 Cleave
+2 Gust
+3 Stacked Deck
+1 Abandon
+3 Flash
+1 Hard Bargain
+2 Star-Crossed
+
+Battlefields:
+1 Seat of Power
+1 The Arena's Greatest
+1 Zaun Warrens
+
+Runes:
+5 Chaos Rune
+7 Fury Rune
+
+Sideboard:
+1 Factory Recall
+1 Abandon
+1 Against the Odds
+1 Falling Star
+1 Rebuke
+1 Switcheroo
+1 Star-Crossed
+1 Thermo Beam

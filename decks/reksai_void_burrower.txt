@@ -1,0 +1,42 @@
+# Fury / Order Rek'Sai — 先攻别忘加分 by ☂
+# Pulled from riftdecks.com (deck-xian-gong-bie-wang-jia-fen-179234).
+
+Legend:
+1 Reksai, Void Burrower
+
+Champion:
+1 Rek'Sai, Breacher
+
+MainDeck:
+3 Honest Broker
+2 Unsung Hero
+1 Vi, Destructive
+3 Void Hatchling
+3 Immortal Phoenix
+3 Noxus Hopeful
+1 Battering Ram
+1 Darius, Trifarian
+3 Undertitan
+3 Seal of Rage
+3 Cleave
+2 Sacrifice
+2 Cull the Weak
+3 Falling Star
+3 Hidden Blade
+3 Void Rush
+
+Battlefields:
+1 Aspirant's Climb
+1 The Arena's Greatest
+1 Zaun Warrens
+
+Runes:
+7 Fury Rune
+5 Order Rune
+
+Sideboard:
+1 Cull the Weak
+2 Piercing Light
+2 Salvage
+1 Vi, Peacekeeper
+2 Ferrous Forerunner

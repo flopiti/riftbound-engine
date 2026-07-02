@@ -1,0 +1,44 @@
+# Chaos / Mind Ezreal — 魅惑EZ by 未知 (riftdecks meta list)
+# Pulled from riftdecks.com (deck-mei-huoez-180895).
+# Saved as *_meta to avoid overwriting the curated ezreal_prodigal_explorer.txt.
+
+Legend:
+1 Ezreal, Prodigal Explorer
+
+Champion:
+1 Ezreal, Prodigy
+
+MainDeck:
+3 Bewitching Spirit
+2 Fizz, Trickster
+2 Thousand-Tailed Watcher
+1 Seal of Discord
+3 Pack of Wonders
+2 Treasure Trove
+1 Last Rites
+2 Acceptable Losses
+2 Bellows Breath
+3 Gust
+3 Stacked Deck
+3 Stupefy
+2 Arcane Shift
+2 Eclipse
+2 Star-Crossed
+2 Wages of Pain
+2 Deadly Flourish
+2 Singularity
+
+Battlefields:
+1 Aspirant's Climb
+1 Frozen Fortress
+1 Void Gate
+
+Runes:
+7 Chaos Rune
+5 Mind Rune
+
+Sideboard:
+2 Sprite Fountain
+2 Turn to Dust
+2 Vex, Apathetic
+2 Unchecked Power

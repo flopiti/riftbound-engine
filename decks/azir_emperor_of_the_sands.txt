@@ -1,0 +1,43 @@
+# Calm / Order Azir — by FUNFOXGAMES
+# Pulled from riftdecks.com (deck-azir-emperor-of-the-sands-180613).
+
+Legend:
+1 Azir, Emperor of the Sands
+
+Champion:
+1 Azir, Sovereign
+
+MainDeck:
+2 Scuttle Crab
+3 Doran's Shield
+3 Eye of the Herald
+2 Soul Sword
+3 Brutalizer
+3 B.F. Sword
+2 Charm
+2 Defy
+2 Cull the Weak
+3 Deathgrip
+3 Discipline
+3 Hidden Blade
+2 Meditation
+1 Salvage
+2 Back Off
+3 Arise!
+
+Battlefields:
+1 Emperor's Dais
+1 Rockfall Path
+1 Trifarian War Camp
+
+Runes:
+6 Calm Rune
+6 Order Rune
+
+Sideboard:
+1 Charm
+1 Defy
+1 Cull the Weak
+2 Not So Fast
+2 Salvage
+1 Flurry of Feathers

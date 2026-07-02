@@ -1,0 +1,44 @@
+# Body / Fury Lucian — 死亡在敲门 by 3+X丨冰箫茶丶
+# Pulled from riftdecks.com (deck-si-wang-zai-qiao-men-179187).
+
+Legend:
+1 Lucian, Purifier
+
+Champion:
+1 Lucian, Merciless
+
+MainDeck:
+3 Irresistible Faefolk
+2 First Mate
+1 Grim Apothecary
+2 Jhin, Murderous Artist
+3 Kai'Sa, Survivor
+2 Noxus Hopeful
+1 Darius, Trifarian
+2 Ferrous Forerunner
+3 Long Sword
+1 Boneshiver
+3 Skyfall of Areion
+3 Trinity Force
+3 Punch First
+1 Repulse
+2 Sabotage
+2 Challenge
+2 Grim Resolve
+3 Relentless Pursuit
+
+Battlefields:
+1 Forbidding Waste
+1 Forge of the Fluft
+1 Sunken Temple
+
+Runes:
+6 Body Rune
+6 Fury Rune
+
+Sideboard:
+1 Blood Rush
+1 Repulse
+3 Akshan, Mischievous
+1 Brynhir Thundersong
+2 Ruin Runner

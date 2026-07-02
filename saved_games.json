@@ -1,0 +1,2860 @@
+{
+  "version": 1,
+  "games": [
+    {
+      "id": "early",
+      "name": "Early",
+      "description": "Fresh shuffle; auto-pilots setup and hands control back at the action turn.",
+      "created_at": 1780178467.345218,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42
+      },
+      "moves": []
+    },
+    {
+      "id": "advanced",
+      "name": "Advanced",
+      "description": "Seeded shuffle + hardcoded moves until a battlefield is contested by both players.",
+      "created_at": 1780178467.3452241,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "advanced",
+        "advanced_seed": 42
+      },
+      "moves": []
+    },
+    {
+      "id": "existential-dread",
+      "name": "Existential Dread",
+      "description": "testing attacking",
+      "created_at": 1780179358.2746081,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "advanced",
+        "advanced_seed": 42
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:0",
+          "label": "Play Ravenbloom Student (1 Chaos, 1 Mind)"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Ravenbloom Student on Base"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn"
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:4:Chaos\u00d72",
+          "label": "Play Lonely Poro (2 Chaos)"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Lonely Poro on Base"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:move_unit:0:battlefield_1",
+          "label": "Move Ravenbloom Student from Base \u2192 Abandoned Hall"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)"
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:move_unit:0:battlefield_1",
+          "label": "Move Lonely Poro from Base \u2192 Abandoned Hall"
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_spell:1:Calm\u00d71",
+          "label": "Cast En Garde (1 Calm)"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_spell_targets:p2-0",
+          "label": "En Garde \u2192 Lonely Poro"
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)"
+        }
+      ]
+    },
+    {
+      "id": "ravenbo",
+      "name": "ravenbo",
+      "description": "",
+      "created_at": 1780792118.883486,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 1403825914
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:2",
+          "label": "Play Ravenbloom Student (2 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:2"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Ravenbloom Student on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:1:Calm\u00d71#Chaos\u00d71",
+          "label": "Play Lonely Poro (1 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:1"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Lonely Poro on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1780793266.931536
+    },
+    {
+      "id": "gust-test",
+      "name": "gust_test",
+      "description": "",
+      "created_at": 1780792346.238945,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 366422693
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:3",
+          "label": "Play Plundering Poro (2 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:3"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Plundering Poro on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:2:Calm\u00d71#Chaos\u00d71",
+          "label": "Play Scuttle Crab (1 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:2"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Scuttle Crab on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:play_spell:0:Chaos\u00d71",
+          "label": "Cast Gust (1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_spell:0"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_spell_targets:p2-0",
+          "label": "Gust \u2192 Scuttle Crab",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_spell_targets:p2-0"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1780793183.848053
+    },
+    {
+      "id": "gust-test-2",
+      "name": "gust_test_2",
+      "description": "",
+      "created_at": 1780846495.719785,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 3776359463
+      },
+      "moves": []
+    },
+    {
+      "id": "poros",
+      "name": "Poros",
+      "description": "",
+      "created_at": 1780846859.421679,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 86082311
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:4",
+          "label": "Play Plundering Poro (1 Chaos, 1 Mind)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:4"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Plundering Poro on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:9:Calm\u00d71#Chaos\u00d73",
+          "label": "Play Stellacorn Herder (1 Calm, 3 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:5"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:9"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Stellacorn Herder on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:play_spell:9:Chaos\u00d71",
+          "label": "Cast Gust (1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_spell:9"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_spell_targets:p2-0",
+          "label": "Gust \u2192 Stellacorn Herder",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_spell_targets:p2-0"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1780870132.070795
+    },
+    {
+      "id": "star-crossed",
+      "name": "star-crossed",
+      "description": "",
+      "created_at": 1780928271.507361,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 3404876101
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Ravenbloom Student",
+          "label": "Ravenbloom Student",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:4"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:choose_location:base",
+          "label": "player_1:play:choose_location:base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Ezreal, Prodigy",
+          "label": "Ezreal, Prodigy",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_and_recycle_rune:3"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:5"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_champion:10000"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:choose_location:base",
+          "label": "player_1:play:choose_location:base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:move_unit:1:battlefield_1",
+          "label": "player_1:play:move_unit:1:battlefield_1",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:1:battlefield_1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "Lonely Poro",
+          "label": "Lonely Poro",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:0"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:choose_location:base",
+          "label": "player_2:play:choose_location:base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_champion:10000:Calm\u00d74#Chaos\u00d71",
+          "label": "Play Irelia, Fervent (4 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:4"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:5"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:7"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_champion:10000"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Irelia, Fervent on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:1:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:1:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "getting-gold",
+      "name": "getting_gold",
+      "description": "",
+      "created_at": 1780954477.998949,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 508958543
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "intent:1",
+          "label": "Play Plundering Poro (1 Chaos, 1 Mind)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Plundering Poro on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Abandoned Hall",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_showdown",
+          "label": "Pass (showdown)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1780954487.892138
+    },
+    {
+      "id": "heart-of-dark-ice",
+      "name": "Heart of Dark Ice",
+      "description": "",
+      "created_at": 1781036291.532303,
+      "setup": {
+        "player_1_deck": "ezreal_prodigal_explorer",
+        "player_2_deck": "irelia_nates",
+        "player_1_battlefield": "Abandoned Hall",
+        "player_2_battlefield": "Sunken Temple",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 4206449629
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "player_2:play:end_turn",
+          "label": "player_2:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "player_1:play:end_turn",
+          "label": "player_1:play:end_turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_gear:13:Calm\u00d73",
+          "label": "Play Heart of Dark Ice (3 Calm)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:3"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:7"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_gear:13"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:7:Calm\u00d71#Chaos\u00d71",
+          "label": "Play Lonely Poro (1 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:8"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:7"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Lonely Poro on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:activate:gear:player_2:0",
+          "label": "Activate (exhaust)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:activate:gear:player_2:0"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_spell_targets:p2-0",
+          "label": "Heart of Dark Ice \u2192 Lonely Poro",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_spell_targets:p2-0"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1781094360.4384818
+    },
+    {
+      "id": "ahri-test",
+      "name": "Ahri test",
+      "description": "",
+      "created_at": 1782236671.782899,
+      "setup": {
+        "player_1_deck": "test_ahri_inquisitive",
+        "player_2_deck": "master_yi_wuju_bladesman",
+        "player_1_battlefield": "Grove of the God-Willow",
+        "player_2_battlefield": "Emperor's Dais",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 867159698
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Ahri, Inquisitive",
+          "label": "Ahri, Inquisitive",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_and_recycle_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:11"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Place Ahri, Inquisitive on Base",
+          "label": "Place Ahri, Inquisitive on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "End turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "Move Ahri, Inquisitive from Base \u2192 Grove of the God-Willow",
+          "label": "Move Ahri, Inquisitive from Base \u2192 Grove of the God-Willow",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:move_unit:0:battlefield_1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:pass_showdown"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:pass_showdown"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "shortcut:play_unit:1:Calm\u00d72#Mind\u00d71",
+          "label": "Play Chakram Dancer (2 Calm, 1 Mind)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_1",
+              "action": "play:play_unit:1"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:choose_location:base",
+          "label": "Place Chakram Dancer on Base",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_unit:5:Body\u00d72#Calm\u00d72",
+          "label": "Play Akshan, Mischievous (2 Body, 2 Calm)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:6"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_unit:5"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Akshan, Mischievous on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:pass_priority",
+          "label": "Pass (priority)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:pass_priority"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:move:0:battlefield_1",
+          "label": "To Grove of the God-Willow",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:move_unit:0:battlefield_1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "vex-3-1-vs-irelia",
+      "name": "Vex 3-1 vs. Irelia",
+      "description": "",
+      "created_at": 1782935682.987187,
+      "setup": {
+        "player_1_deck": "vex_3-1",
+        "player_2_deck": "irelia_blade_dancer",
+        "player_1_battlefield": "Bandle Tree",
+        "player_2_battlefield": "Abandoned Hall",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 239049061
+      },
+      "moves": [],
+      "updated_at": 1782936222.6765928
+    },
+    {
+      "id": "autosave",
+      "name": "Autosave",
+      "description": "Automatically saved after each move.",
+      "created_at": 1782936231.7232,
+      "setup": {
+        "player_1_deck": "vex_3-1",
+        "player_2_deck": "irelia_blade_dancer",
+        "player_1_battlefield": "Bandle Tree",
+        "player_2_battlefield": "Abandoned Hall",
+        "first_turn": "player_1",
+        "mulligan_bottom": "",
+        "mode": "early",
+        "advanced_seed": 42,
+        "shuffle_seed": 2344050139
+      },
+      "moves": [
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "shortcut:play_gear:3:Calm\u00d71#Chaos\u00d71",
+          "label": "Play Guardian Angel (1 Calm, 1 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_gear:3"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_1",
+          "action": "play:end_turn",
+          "label": "End turn",
+          "chain": [
+            {
+              "actor": "player_1",
+              "action": "play:end_turn"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "intent:10000",
+          "label": "Play Irelia, Fervent (3 Calm, 2 Chaos)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:3"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:4"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_champion:10000"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Irelia, Fervent on Base",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:choose_location:base"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "intent:equip:0",
+          "label": "Equip Guardian Angel \u2192 Irelia, Fervent (1 Calm)",
+          "chain": [
+            {
+              "actor": "player_2",
+              "action": "play:recycle_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:equip:0:player_2:0"
+            }
+          ]
+        }
+      ],
+      "updated_at": 1782937477.38627
+    }
+  ]
+}

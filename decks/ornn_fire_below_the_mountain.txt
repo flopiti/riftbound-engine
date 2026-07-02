@@ -1,0 +1,46 @@
+# Calm / Mind Ornn — by Turbi
+# Pulled from riftdecks.com (deck-ornn-fire-below-the-mountain-180585).
+
+Legend:
+1 Ornn, Fire Below the Mountain
+
+Champion:
+1 Ornn, Forge God
+
+MainDeck:
+3 Lonely Poro
+3 Lillia, Fae Fawn
+3 Pit Crew
+3 Dropboarder
+1 Poro Snax
+1 Brutalizer
+1 Forgotten Signpost
+3 Sprite Fountain
+2 Heart of Dark Ice
+1 Sterak's Gage
+1 Shurelya's Requiem
+2 Defy
+3 Stupefy
+2 Desert's Call
+3 Discipline
+1 Meditation
+1 Not So Fast
+1 Smoke and Mirrors
+1 Back Off
+3 Sprite Burst
+
+Battlefields:
+1 Dusk Rose Lab
+1 Ornn's Forge
+1 Targon's Peak
+
+Runes:
+6 Calm Rune
+6 Mind Rune
+
+Sideboard:
+1 Defy
+1 Not So Fast
+2 Turn to Dust
+3 Disarming Rake
+1 Forgefire Cape

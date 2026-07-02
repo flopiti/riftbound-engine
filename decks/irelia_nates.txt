@@ -1,0 +1,42 @@
+Legend:
+1 Irelia, Blade Dancer
+
+Champion:
+1 Irelia, Fervent
+
+MainDeck:
+3 Boots of Swiftness
+3 Charm
+3 Defiant Dance
+3 Defy
+3 Discipline
+2 En Garde
+1 Evelynn, Entrancing
+2 Guardian Angel
+1 Irelia, Fervent
+3 Lonely Poro
+2 Not So Fast
+1 Rebuke
+2 Ride the Wind
+3 Scuttle Crab
+2 Stacked Deck
+2 Stellacorn Herder
+1 The Syren
+1 Vex, Apathetic
+1 Heart of Dark Ice
+
+Battlefields:
+1 Sunken Temple
+1 Sunken Temple
+1 Targon's Peak
+
+Runes:
+6 Calm Rune
+6 Chaos Rune
+
+Sideboard:
+2 Disarming Rake
+2 Gust
+2 Heart of Dark Ice
+1 Mindsplitter
+1 Star-Crossed

@@ -1,0 +1,47 @@
+# Calm / Chaos Vex — "Dookie Vexie" by Weather Report
+# Pulled from riftdecks.com (deck-dookie-vexie-181210).
+
+Legend:
+1 Vex, Gloomist
+
+Champion:
+1 Vex, Apathetic
+
+MainDeck:
+3 Evelynn, Entrancing
+3 Mutated Mouser
+2 Teemo, Scout
+2 Treasure Hunter
+2 Pyke, Returned
+2 Ember Monk
+3 Kha'Zix, Mutating Horror
+2 Sona, Harmonious
+2 Guardian Angel
+2 Boots of Swiftness
+1 Edge of Night
+2 Defy
+2 Existential Dread
+2 Gust
+3 Discipline
+2 Emperor's Divide
+1 Switcheroo
+2 Back Off
+1 Star-Crossed
+
+Battlefields:
+1 Bandle Tree
+1 Star Spring
+1 Startipped Peak
+
+Runes:
+5 Calm Rune
+7 Chaos Rune
+
+Sideboard:
+1 Defy
+1 Abandon
+1 Rebuke
+2 Disarming Rake
+1 Fizz, Trickster
+1 Pyke, Returned
+1 Star-Crossed

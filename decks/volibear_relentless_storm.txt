@@ -1,0 +1,40 @@
+# Body / Fury Volibear — 奇迹熊 by DQYT.轮空大王
+# Pulled from riftdecks.com (deck-qi-ji-xiong-179316).
+
+Legend:
+1 Volibear, Relentless Storm
+
+Champion:
+1 Volibear, Furious
+
+MainDeck:
+3 Herald of Scales
+3 Battering Ram
+3 Blazing Scorcher
+3 Dune Drake
+2 Ferrous Forerunner
+3 Gentle Gemdragon
+3 Kadregrin the Infernal
+3 Elder Dragon
+2 Challenge
+3 Confront
+2 Falling Star
+3 Mobilize
+3 Show of Strength
+1 Stormbringer
+2 Sky Splitter
+
+Battlefields:
+1 Aspirant's Climb
+1 Forbidding Waste
+1 Sigil of the Storm
+
+Runes:
+7 Body Rune
+5 Fury Rune
+
+Sideboard:
+2 Unyielding Spirit
+3 Akshan, Mischievous
+1 Ferrous Forerunner
+2 Dazzling Aurora

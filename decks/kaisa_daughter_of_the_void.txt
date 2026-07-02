@@ -1,0 +1,52 @@
+# Fury / Mind Kai'sa — 卡卡 by 云中城·云中飘
+# Pulled from riftdecks.com (deck-ka-ka-180879).
+
+Legend:
+1 Kai'sa, Daughter of the Void
+
+Champion:
+1 Kai'Sa, Survivor
+
+MainDeck:
+2 Plundering Poro
+1 Watchful Sentry
+2 Immortal Phoenix
+2 Lecturing Yordle
+2 Blue Sentinel
+1 Noxus Hopeful
+2 Darius, Trifarian
+2 Ferrous Forerunner
+2 Thousand-Tailed Watcher
+1 Dr. Mundo, Expert
+3 Sprite Fountain
+1 Blood Rush
+3 Hextech Ray
+2 Retreat
+2 Stupefy
+3 Falling Star
+1 Lotus Trap
+1 Shakedown
+1 Void Seeker
+1 Thermo Beam
+1 Progress Day
+2 Singularity
+1 Time Warp
+
+Battlefields:
+1 Targon's Peak
+1 Void Gate
+1 Zaun Warrens
+
+Runes:
+7 Fury Rune
+5 Mind Rune
+
+Sideboard:
+1 Bellows Breath
+1 Smoke Screen
+1 Immortal Phoenix
+1 Blighted Battleaxe
+1 Rocket Barrage
+1 Ekko, Recurrent
+1 Thermo Beam
+1 Brynhir Thundersong

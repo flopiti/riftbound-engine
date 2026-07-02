@@ -1,0 +1,48 @@
+# Chaos / Mind Diana — by ScarletBV
+# Pulled from riftdecks.com (deck 180973).
+
+Legend:
+1 Diana, Scorn of the Moon
+
+Champion:
+1 Diana, Lunari
+
+MainDeck:
+3 Ravenbloom Student
+2 Tideturner
+2 Treasure Hunter
+2 Fizz, Trickster
+1 Vex, Apathetic
+3 Hwei, Brooding Painter
+1 Vex, Cheerless
+2 Thousand-Tailed Watcher
+1 Baron Nashor
+3 Gust
+1 Retreat
+3 Stacked Deck
+3 Stupefy
+2 Flash
+1 Ride the Wind
+2 Crescent Strike
+2 Eclipse
+1 Moonfall
+2 Star-Crossed
+1 Wages of Pain
+1 Singularity
+
+Battlefields:
+1 Abandoned Hall
+1 Ravenbloom Conservatory
+1 Star Spring
+
+Runes:
+6 Chaos Rune
+6 Mind Rune
+
+Sideboard:
+1 Abandon
+2 Turn to Dust
+1 Vex, Apathetic
+2 Angler Beast
+1 Vex, Cheerless
+1 Moonlight Affliction

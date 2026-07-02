@@ -1,0 +1,41 @@
+# Mind / Order Viktor — by MTZ Labryx
+# Pulled from riftdecks.com (deck-viktor-herald-of-the-arcane-180598).
+
+Legend:
+1 Viktor, Herald of the Arcane
+
+Champion:
+1 Viktor, Leader
+
+MainDeck:
+3 Honest Broker
+3 Plundering Poro
+3 Xin Zhao, Vigilant
+3 Safety Inspector
+1 Thousand-Tailed Watcher
+3 Sprite Fountain
+2 B.F. Sword
+2 Bellows Breath
+3 Stupefy
+3 Cull the Weak
+3 Hidden Blade
+2 Shadow's Call
+3 Deadly Flourish
+3 Imperial Decree
+2 Sprite Burst
+
+Battlefields:
+1 Forbidding Waste
+1 Rockfall Path
+1 The Arena's Greatest
+
+Runes:
+5 Mind Rune
+7 Order Rune
+
+Sideboard:
+1 Bellows Breath
+3 Salvage
+2 Chakram Dancer
+1 B.F. Sword
+1 Thousand-Tailed Watcher

@@ -1,0 +1,48 @@
+# Fury / Order Vi — 蔚 by 棂
+# Pulled from riftdecks.com (deck-wei-179581).
+
+Legend:
+1 Vi, Piltover Enforcer
+
+Champion:
+1 Vi, Peacekeeper
+
+MainDeck:
+3 Carrion Dredger
+3 Inferna
+2 Faithful Manufactor
+2 Rengar, Pouncing
+1 Azir, Sovereign
+3 Soraka, Wanderer
+1 Ashe, Focused
+1 Brynhir Thundersong
+2 Undertitan
+3 Eye of the Herald
+1 Long Sword
+3 Hextech Gauntlets
+3 Cleave
+1 Angle Shot
+3 Cull the Weak
+1 Deathgrip
+2 Falling Star
+1 Salvage
+1 Shadow's Call
+1 Tactical Retreat
+1 Upstage Comedy
+
+Battlefields:
+1 Forbidding Waste
+1 Star Spring
+1 Trifarian War Camp
+
+Runes:
+5 Fury Rune
+7 Order Rune
+
+Sideboard:
+1 Deathgrip
+2 Salvage
+1 Tactical Retreat
+1 Upstage Comedy
+2 Ashe, Focused
+1 Grand Strategem

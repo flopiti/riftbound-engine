@@ -1,0 +1,50 @@
+# Chaos / Fury Draven — 德4 by 旋木时光的大蠢若鱼
+# Pulled from riftdecks.com (deck-de4-180833).
+
+Legend:
+1 Draven, Glorious Executioner
+
+Champion:
+1 Draven, Showboat
+
+MainDeck:
+1 Evelynn, Entrancing
+3 Overzealous Fan
+2 Tideturner
+2 Traveling Merchant
+1 Pyke, Returned
+3 Jhin, Murderous Artist
+2 Kai'Sa, Survivor
+2 Noxus Hopeful
+2 Vex, Apathetic
+2 Darius, Trifarian
+1 Ferrous Forerunner
+3 Spinning Axe
+1 Edge of Night
+2 Cleave
+1 Existential Dread
+1 Gust
+2 Stacked Deck
+1 Abandon
+1 Falling Star
+2 Rebuke
+2 Ride the Wind
+1 Switcheroo
+1 Star-Crossed
+
+Battlefields:
+1 The Arena's Greatest
+1 Treasure Hoard
+1 Zaun Warrens
+
+Runes:
+5 Chaos Rune
+7 Fury Rune
+
+Sideboard:
+1 Gust
+1 Against the Odds
+1 Falling Star
+2 Brynhir Thundersong
+1 Ferrous Forerunner
+2 Mindsplitter

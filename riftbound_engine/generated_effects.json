@@ -1,0 +1,28 @@
+[
+  {
+    "code": "GIVE_UNIT_HERE_-2M_MIN_1",
+    "kind": "might_delta",
+    "amount": -2,
+    "min_might": 1,
+    "target": "enemy",
+    "location": "here",
+    "select": "one",
+    "card": "Ahri Inquisitive"
+  },
+  {
+    "code": "OPPONENT_REVEAL_HAND_DISCARD_1",
+    "kind": "opponent_discard",
+    "amount": 1,
+    "target": "enemy",
+    "location": "any",
+    "select": "all"
+  },
+  {
+    "code": "SPEND_BUFF",
+    "kind": "spend_buff_draw",
+    "amount": 1,
+    "target": "any",
+    "location": "any",
+    "select": "all"
+  }
+]

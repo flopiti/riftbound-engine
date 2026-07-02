@@ -1,0 +1,47 @@
+# Calm / Chaos Yasuo — 凡王之血 必以剑终 by 纸传.凯风
+# Pulled from riftdecks.com (deck-fan-wang-zhi-xue-bi-yi-jian-zhong-179637).
+
+Legend:
+1 Yasuo, Unforgiven
+
+Champion:
+1 Yasuo, Windrider
+
+MainDeck:
+3 Lonely Poro
+2 Scuttle Crab
+1 Sinister Poro
+3 Treasure Hunter
+1 Disarming Rake
+1 Kha'Zix, Mutating Horror
+3 Stellacorn Herder
+1 Vex, Apathetic
+2 Irelia, Fervent
+1 Vex, Cheerless
+1 Guardian Angel
+3 Mask of Foresight
+3 Zhonya's Hourglass
+1 Boots of Swiftness
+2 Edge of Night
+3 Defy
+2 En Garde
+3 Discipline
+2 Ride the Wind
+1 Star-Crossed
+
+Battlefields:
+1 Altar to Unity
+1 Star Spring
+1 Treasure Hoard
+
+Runes:
+5 Calm Rune
+7 Chaos Rune
+
+Sideboard:
+1 Abandon
+1 Forgotten Signpost
+1 Not So Fast
+2 Disarming Rake
+1 Last Stand
+2 Downwell

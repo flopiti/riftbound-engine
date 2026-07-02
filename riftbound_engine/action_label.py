@@ -1,0 +1,340 @@
+"""Human-readable labels for raw engine action strings.
+
+This is a server-side port of the client labeler in
+``riftbound/src/utils/actionLabel.ts``. It exists so engine-generated moves
+(specifically the ADVANCED fake-fill fast-forward in ``http_api.py``) can be
+recorded into the branch tree with the SAME clean labels the interactive
+client produces, instead of the raw ``play:move_unit:0:battlefield_1`` strings.
+
+Keep this in sync with ``actionLabel.ts``: the two must format identically so a
+fast-forwarded node and a hand-played node read the same in the branch view.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from .csv_data import card_domains_of, card_energy_of, card_power_of
+
+_LOCATION_NAME = {
+    "base": "Base",
+    "battlefield_1": "Battlefield 1",
+    "battlefield_2": "Battlefield 2",
+}
+
+
+def _location_display(loc: str, bf1: str | None, bf2: str | None) -> str:
+    if loc == "battlefield_1" and bf1:
+        return bf1
+    if loc == "battlefield_2" and bf2:
+        return bf2
+    return _LOCATION_NAME.get(loc, loc)
+
+
+def _destination_display(loc: str, bf1: str | None, bf2: str | None) -> str:
+    """Like ``_location_display`` but appends a slot marker ("(BF1)"/"(BF2)")
+    when both battlefields share the same card name, so a move target is
+    unambiguous. Mirrors ``destinationDisplay`` in actionLabel.ts."""
+    base = _location_display(loc, bf1, bf2)
+    if loc not in ("battlefield_1", "battlefield_2"):
+        return base
+    if bf1 and bf2 and bf1 == bf2:
+        slot = "BF1" if loc == "battlefield_1" else "BF2"
+        return f"{base} ({slot})"
+    return base
+
+
+def _format_cost(card: str | None) -> str:
+    if not card:
+        return ""
+    energy = card_energy_of(card) or 0
+    power = card_power_of(card) or 0
+    parts: list[str] = []
+    if energy > 0:
+        parts.append(f"{energy} Energy")
+    if power > 0:
+        domains = card_domains_of(card)
+        domain_label = "/".join(domains) if domains else "Power"
+        parts.append(f"{power} {domain_label} Power")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _actor_value(actor: Any) -> str:
+    """Accept a ``RequiredTo`` enum or its string value."""
+    return getattr(actor, "value", actor)
+
+
+def _describe_ability_cost(costs: tuple[str, ...]) -> str:
+    """A short imperative phrase for an ability's costs, e.g. "Pay 1 Energy",
+    "Exhaust", or "Exhaust + pay 1 Energy". Mirrors csv_data.parse_pay_cost."""
+    pay: list[str] = []
+    for c in costs:
+        m = re.fullmatch(r"PAY_(\d+)_ENERGY", c)
+        if m:
+            pay.append(f"{m.group(1)} Energy")
+            continue
+        m = re.fullmatch(r"PAY_(\d+)P", c) or re.fullmatch(r"PAY_(\d+)[A-Z]", c)
+        if m:
+            pay.append(f"{m.group(1)} Power")
+    pay_phrase = " + ".join(pay)
+    if "EXHAUST_THIS" in costs:
+        return f"Exhaust + pay {pay_phrase}" if pay_phrase else "Exhaust"
+    return f"Pay {pay_phrase}" if pay_phrase else "Use"
+
+
+def label_for_action(game_state: Any, actor: Any, action: str) -> str:
+    """Translate one raw engine action string into the label the Control /
+    branch UI shows. ``game_state`` is the state the action is an option in
+    (i.e. BEFORE it is applied), matching how the client labels a live option.
+
+    Unrecognised actions fall through to the raw string, exactly like the
+    client's ``actionLabel``.
+    """
+    gs = game_state
+    side = _actor_value(actor)
+    is_p1 = side == "player_1"
+
+    hand: list[str] = (gs.player_1_hand if is_p1 else gs.player_2_hand) or []
+    runes = (gs.player_1_runes if is_p1 else gs.player_2_runes) or []
+    units = (gs.player_1_units if is_p1 else gs.player_2_units) or []
+    bf1 = gs.battlefield_1
+    bf2 = gs.battlefield_2
+    pending_card = gs.pending_play.card if gs.pending_play is not None else None
+
+    if action == "play:end_turn":
+        return "End turn"
+    if action == "play:pass_showdown":
+        return "Pass (showdown)"
+    if action == "play:pass_priority":
+        return "Pass (priority)"
+
+    m = re.fullmatch(r"play:play_unit:(\d+)", action)
+    if m:
+        idx = int(m.group(1))
+        card = hand[idx] if idx < len(hand) else None
+        cost = _format_cost(card)
+        return f"Play {card}{cost}" if card else f"Play hand[{idx}]{cost}"
+
+    m = re.fullmatch(r"play:play_spell:(\d+)", action)
+    if m:
+        idx = int(m.group(1))
+        card = hand[idx] if idx < len(hand) else None
+        cost = _format_cost(card)
+        return f"Cast {card}{cost}" if card else f"Cast hand[{idx}]{cost}"
+
+    m = re.fullmatch(r"play:choose_location:(.+)", action)
+    if m:
+        loc = m.group(1)
+        specific = "on Base" if loc == "base" else f"on {_destination_display(loc, bf1, bf2)}"
+        return f"Place {pending_card} {specific}" if pending_card else f"Place {specific}"
+
+    m = re.fullmatch(r"play:choose_spell_destination:(.+)", action)
+    if m:
+        loc = m.group(1)
+        where = "Base" if loc == "base" else _destination_display(loc, bf1, bf2)
+        return f"Move to {where}"
+
+    m = re.fullmatch(r"play:choose_spell_battlefield:(.+)", action)
+    if m:
+        return f"Target {_destination_display(m.group(1), bf1, bf2)}"
+
+    m = re.fullmatch(r"play:choose_spell_gear:(g[12])-(\d+)", action)
+    if m:
+        gears = gs.player_1_gears if m.group(1) == "g1" else gs.player_2_gears
+        gi = int(m.group(2))
+        name = gears[gi].card if 0 <= gi < len(gears) else f"gear #{gi}"
+        return f"Target {name}"
+
+    m = re.fullmatch(r"play:choose_spell_trash:(t[12])-(\d+)", action)
+    if m:
+        pile = gs.player_1_trash if m.group(1) == "t1" else gs.player_2_trash
+        ti = int(m.group(2))
+        name = pile[ti] if 0 <= ti < len(pile) else f"trash #{ti}"
+        return f"Recover {name}"
+
+    m = re.fullmatch(r"play:choose_spell_chain:c-(\d+)", action)
+    if m:
+        ci = int(m.group(1))
+        items = gs.pending_chain.items if gs.pending_chain is not None else []
+        name = items[ci].card if 0 <= ci < len(items) else f"spell #{ci}"
+        return f"Counter {name}"
+
+    m = re.fullmatch(r"play:choose_spell_location:(.+)", action)
+    if m:
+        loc = m.group(1)
+        where = "Base" if loc == "base" else _destination_display(loc, bf1, bf2)
+        return f"Target {where}"
+
+    m = re.fullmatch(r"play:exhaust_rune:(\d+)", action)
+    if m:
+        idx = int(m.group(1))
+        domain = runes[idx].domain if idx < len(runes) else None
+        return f"Exhaust {domain} rune (+1 Energy)" if domain else f"Exhaust rune #{idx}"
+
+    m = re.fullmatch(r"play:recycle_rune:(\d+)", action)
+    if m:
+        idx = int(m.group(1))
+        domain = runes[idx].domain if idx < len(runes) else None
+        return f"Recycle {domain} rune (+1 {domain} Power)" if domain else f"Recycle rune #{idx}"
+
+    m = re.fullmatch(r"play:exhaust_and_recycle_rune:(\d+)", action)
+    if m:
+        idx = int(m.group(1))
+        domain = runes[idx].domain if idx < len(runes) else None
+        return (
+            f"Exhaust & Recycle {domain} rune (+1 Energy, +1 {domain} Power)"
+            if domain
+            else f"Exhaust & Recycle rune #{idx}"
+        )
+
+    m = re.fullmatch(r"play:use_gold:(\d+):(\w+)", action)
+    if m:
+        return f"Gold token → +1 {m.group(2)} Power (kill)"
+
+    m = re.fullmatch(r"play:equip:(\d+):(player_[12]):(\d+)", action)
+    if m:
+        gi, ctrl, ui = int(m.group(1)), m.group(2), int(m.group(3))
+        gears = gs.player_1_gears if is_p1 else gs.player_2_gears
+        tunits = gs.player_1_units if ctrl == "player_1" else gs.player_2_units
+        gname = gears[gi].card if 0 <= gi < len(gears) else f"gear #{gi}"
+        uname = tunits[ui].card if 0 <= ui < len(tunits) else f"unit #{ui}"
+        return f"Equip {gname} to {uname}"
+
+    m = re.fullmatch(r"play:move_unit:(\d+):(.+)", action)
+    if m:
+        idx = int(m.group(1))
+        dest = m.group(2)
+        unit = units[idx] if idx < len(units) else None
+        from_label = _location_display(unit.location, bf1, bf2) if unit else f"unit #{idx}"
+        to_label = _destination_display(dest, bf1, bf2)
+        unit_name = unit.card if unit else f"unit #{idx}"
+        return f"Move {unit_name} from {from_label} → {to_label}"
+
+    if action == "play:pay_deflect":
+        pd = getattr(gs, "pending_deflect", None)
+        if pd and pd.queue:
+            _ref, stacks, card = pd.queue[0]
+            return f"Pay {stacks} Power to target {card} ([Deflect])"
+        return "Pay [Deflect] tax"
+    if action == "play:decline_deflect":
+        pd = getattr(gs, "pending_deflect", None)
+        if pd and pd.queue:
+            return f"Don't pay — drop {pd.queue[0][2]} as a target"
+        return "Decline [Deflect] — drop target"
+
+    if action == "play:choose_repeat:yes":
+        rep = getattr(gs, "pending_spell_repeat", None)
+        card = rep.card if rep else None
+        return f"Repeat {card}" if card else "Repeat spell"
+    if action == "play:choose_repeat:no":
+        return "Don't repeat"
+
+    if action == "play:choose_accelerate:yes":
+        acc = getattr(gs, "pending_accelerate", None)
+        card = acc.card if acc else None
+        return f"Accelerate {card}" if card else "Accelerate"
+    if action == "play:choose_accelerate:no":
+        return "Don't accelerate"
+
+    m = re.fullmatch(r"play:activate:(.+)", action)
+    if m:
+        ref = m.group(1)
+        gm = re.fullmatch(r"gear:(player_[12]):(\d+)", ref)
+        um = re.fullmatch(r"(player_[12]):(\d+)", ref)
+        name = None
+        if gm:
+            gears = gs.player_1_gears if gm.group(1) == "player_1" else gs.player_2_gears
+            gi = int(gm.group(2))
+            name = gears[gi].card if 0 <= gi < len(gears) else None
+        elif um:
+            us = gs.player_1_units if um.group(1) == "player_1" else gs.player_2_units
+            ui = int(um.group(2))
+            name = us[ui].card if 0 <= ui < len(us) else None
+        return f"Activate {name} (exhaust)" if name else "Activate (exhaust)"
+
+    if action == "play:choose_ability_cost:yes":
+        acc = getattr(gs, "pending_ability_cost", None)
+        costs = tuple(getattr(acc, "costs", ()) or ())
+        return f"{_describe_ability_cost(costs)} → use ability"
+    if action == "play:choose_ability_cost:no":
+        return "Don't pay"
+
+    m = re.fullmatch(r"play:pay_ability_power:(.+)", action)
+    if m:
+        return f"Pay 1 {m.group(1)} Power"
+
+    m = re.fullmatch(r"play:choose_effect_target:(.+)", action)
+    if m:
+        token = m.group(1)
+        choice = getattr(gs, "pending_effect_choice", None)
+        src = (choice.source_card if choice else None) or "Effect"
+        if token == "pass":
+            return f"{src}: decline"
+        tm = re.fullmatch(r"p([12])-(\d+)", token)
+        if tm:
+            tunits = gs.player_1_units if tm.group(1) == "1" else gs.player_2_units
+            ui = int(tm.group(2))
+            uname = tunits[ui].card if 0 <= ui < len(tunits) else f"unit #{ui}"
+            # Per-code phrasing; fall back to a neutral "choose" for codes
+            # this labeler doesn't know yet.
+            if choice is not None and choice.code == "MAY_GIVE_UNIT_HERE_+1M":
+                return f"{src}: +1 Might → {uname}"
+            return f"{src}: choose {uname}"
+        # Hand-card token (discard) — resolve against the chooser's hand.
+        hm = re.fullmatch(r"h-(\d+)", token)
+        if hm and choice is not None:
+            hand = (
+                gs.player_1_hand
+                if choice.actor.value == "player_1"
+                else gs.player_2_hand
+            ) or []
+            hi = int(hm.group(1))
+            cname = hand[hi] if 0 <= hi < len(hand) else f"card #{hi}"
+            return f"{src}: discard {cname}"
+        return f"{src}: {token}"
+
+    # Optional spell targeting: the empty pick is the "No targets" / skip option.
+    if action == "play:choose_spell_targets:":
+        return "No targets"
+
+    # Setup choices (recorded as branch nodes by reset_engine) have no "play:"
+    # prefix, so they'd otherwise fall through to the raw action string on the
+    # branch tree. Give them readable labels.
+    if action.startswith("choose_deck:"):
+        return f"Deck: {action.split(':', 1)[1].replace('_', ' ').title()}"
+    if action.startswith("choose_first_turn:"):
+        who = action.split(":", 1)[1]
+        return f"First turn: {'P1' if who == 'player_1' else 'P2' if who == 'player_2' else who}"
+    if action.startswith("choose_battlefield_1:"):
+        return f"Battlefield 1: {action.split(':', 1)[1]}"
+    if action.startswith("choose_battlefield_2:"):
+        return f"Battlefield 2: {action.split(':', 1)[1]}"
+    if action.startswith("mulligan_bottom:"):
+        # One-card-at-a-time mulligan: show the card being sent to the bottom.
+        parts = action.split(":")
+        who = parts[1] if len(parts) > 1 else ""
+        try:
+            idx = int(parts[2]) if len(parts) > 2 else -1
+        except ValueError:
+            idx = -1
+        mh = (
+            gs.player_1_mulligan_hand
+            if who == "player_1"
+            else gs.player_2_mulligan_hand
+            if who == "player_2"
+            else None
+        )
+        if mh and 0 <= idx < len(mh):
+            return f"Mulligan {mh[idx]}"
+        return "Mulligan card"
+    if action.startswith("mulligan_done:"):
+        return "No mulligan"
+    if action.startswith("mulligan_resolve:"):
+        parts = action.split(":")
+        who = parts[1] if len(parts) > 1 else ""
+        who = "P1" if who == "player_1" else "P2" if who == "player_2" else who
+        bottomed = parts[2].strip() if len(parts) > 2 else ""
+        return f"Mulligan: {who} (bottom {bottomed})" if bottomed else f"Mulligan: {who} (keep)"
+
+    return action

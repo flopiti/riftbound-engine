@@ -1,0 +1,45 @@
+# Mind / Order Renata Glasc — 烈 by 风暴之翼
+# Pulled from riftdecks.com (deck-lie-179517).
+
+Legend:
+1 Renata Glasc, Chem-Baroness
+
+Champion:
+1 Renata Glasc, Industrialist
+
+MainDeck:
+3 Carrion Dredger
+3 Plundering Poro
+3 Lillia, Fae Fawn
+1 Sprite Queen
+1 Thousand-Tailed Watcher
+2 Bellows Breath
+3 Cull the Weak
+2 Hidden Blade
+1 Salvage
+2 Wages of Pain
+3 Consult the Past
+2 Drag Under
+1 Hostile Takeover
+2 Imperial Decree
+3 Sprite Burst
+3 Recruit the Vanguard
+2 Singularity
+1 Unchecked Power
+1 Time Warp
+
+Battlefields:
+1 Forbidding Waste
+1 Ravenbloom Conservatory
+1 Rockfall Path
+
+Runes:
+6 Mind Rune
+6 Order Rune
+
+Sideboard:
+2 Facebreaker
+2 Salvage
+2 Ashe, Focused
+1 Hostile Takeover
+1 Unchecked Power

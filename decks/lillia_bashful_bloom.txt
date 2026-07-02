@@ -1,0 +1,42 @@
+# Calm / Mind Lillia — "Lil Lillia" by I LOVE FEET
+# Pulled from riftdecks.com (deck-lil-lillia-180968).
+
+Legend:
+1 Lillia, Bashful Bloom
+
+Champion:
+1 Lillia, Fae Fawn
+
+MainDeck:
+3 Ravenbloom Student
+2 Stalwart Poro
+1 Janna, Savior
+2 Riptide Rex
+1 Thousand-Tailed Watcher
+3 Mask of Foresight
+3 Sprite Fountain
+2 Heart of Dark Ice
+2 Charm
+3 Defy
+3 En Garde
+3 Stupefy
+3 Discipline
+2 Smoke and Mirrors
+2 Smoke Screen
+3 Sprite Burst
+1 Unchecked Power
+
+Battlefields:
+1 Dusk Rose Lab
+1 Seat of Power
+1 The Arena's Greatest
+
+Runes:
+6 Calm Rune
+6 Mind Rune
+
+Sideboard:
+2 Lilting Lullaby
+3 Crescent Strike
+2 Disarming Rake
+1 Janna, Savior

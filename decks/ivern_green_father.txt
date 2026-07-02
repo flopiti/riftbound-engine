@@ -1,0 +1,45 @@
+# Calm / Order Ivern — 小菊！ by 貝
+# Pulled from riftdecks.com (deck-xiao-ju-179544).
+
+Legend:
+1 Ivern, Green Father
+
+Champion:
+1 Ivern, Nurturer
+
+MainDeck:
+3 Mutated Mouser
+2 Scuttle Crab
+2 Stalwart Poro
+3 Trusty Ramhound
+2 Loyal Poro
+3 Frisky Hunter
+2 Ivern, Nurturer
+2 Vi, Peacekeeper
+1 Ivern, Friend to All
+1 Vilemaw
+2 Daisy!
+2 Charm
+2 Defy
+2 Friendship
+2 Discipline
+2 Emperor's Divide
+2 Hidden Blade
+2 Meditation
+2 Back Off
+
+Battlefields:
+1 Rockfall Path
+1 Vaults of Helia
+1 Vilemaw's Lair
+
+Runes:
+8 Calm Rune
+4 Order Rune
+
+Sideboard:
+2 Not So Fast
+2 Disarming Rake
+2 Flurry of Feathers
+1 Alpha Wildclaw
+1 Grand Strategem

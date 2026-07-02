@@ -1,0 +1,42 @@
+# Chaos / Mind Teemo — 王朝建在废墟之上 by 新光一番.迷路的麋鹿
+# Pulled from riftdecks.com (deck-wang-chao-jian-zai-fei-xu-zhi-shang-179728).
+
+Legend:
+1 Teemo, Swift Scout
+
+Champion:
+1 Teemo, Scout
+
+MainDeck:
+1 Keeper of Masks
+2 Teemo, Scout
+3 Watchful Sentry
+2 Bewitching Spirit
+2 Vex, Apathetic
+3 Sprite Fountain
+3 Gutter Palace
+2 Existential Dread
+2 Gust
+3 Stacked Deck
+3 Switcheroo
+2 Eclipse
+2 Invert Timelines
+3 Sprite Call
+2 Star-Crossed
+3 Consult the Past
+1 Unchecked Power
+
+Battlefields:
+1 Bandle Tree
+1 Hallowed Tomb
+1 Ravenbloom Conservatory
+
+Runes:
+6 Chaos Rune
+6 Mind Rune
+
+Sideboard:
+3 Acceptable Losses
+2 Hard Bargain
+1 Windsinger
+2 Sneaky Deckhand
