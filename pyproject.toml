@@ -15,6 +15,16 @@ api = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.32.0",
 ]
+db = [
+  "SQLAlchemy>=2.0",
+  # Postgres driver (SQLite needs none). Install on the server for Postgres.
+  "psycopg[binary]>=3.1",
+]
+
+[tool.setuptools.packages.find]
+# Only package the Python package; without this, flat-layout auto-discovery
+# also picks up the sibling `decks/` data folder and refuses to build.
+include = ["riftbound_engine*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

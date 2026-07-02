@@ -977,7 +977,12 @@ def compute_equip_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInt
             if not plans:
                 continue  # can't pay even by tapping/recycling runes
         # One tier-1 chip per equipment ("Equip <gear>"); tier-2 combos are the
-        # target units × payment plans ("To <unit> (<cost>)").
+        # target units × payment plans ("To <unit> (<cost>)"). Skip the unit
+        # the gear is ALREADY attached to — re-equipping onto the same host is
+        # a no-op, and offering it means the "Equip <gear>" chip never goes
+        # away after you equip (e.g. onto your only unit) even though there's
+        # nothing left to do. Re-equipping onto a DIFFERENT unit is still
+        # offered (that's a real move).
         combos = tuple(
             _build_equip_shortcut(
                 actor, gi, gear.card, units[ui].card, controller, ui,
@@ -985,10 +990,11 @@ def compute_equip_intents(engine: GameEngine, actor: RequiredTo) -> list[PlayInt
             )
             for controller, units in board_units
             for ui in range(len(units))
+            if gear.attached_uid is None or units[ui].uid != gear.attached_uid
             for plan in plans
         )
         if not combos:
-            continue  # no target units → nothing to equip
+            continue  # no target units (or already on its only host) → skip
         out.append(
             PlayIntent(
                 actor=actor,

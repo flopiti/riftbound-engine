@@ -2733,7 +2733,7 @@
       "description": "Automatically saved after each move.",
       "created_at": 1782936231.7232,
       "setup": {
-        "player_1_deck": "vex_gloomist",
+        "player_1_deck": "vex_3-1",
         "player_2_deck": "irelia_blade_dancer",
         "player_1_battlefield": "Bandle Tree",
         "player_2_battlefield": "Abandoned Hall",
@@ -2741,28 +2741,9 @@
         "mulligan_bottom": "",
         "mode": "early",
         "advanced_seed": 42,
-        "shuffle_seed": 3813786240
+        "shuffle_seed": 2344050139
       },
       "moves": [
-        {
-          "actor": "player_1",
-          "action": "intent:1",
-          "label": "Play Guardian Angel (1 Calm, 1 Chaos)",
-          "chain": [
-            {
-              "actor": "player_1",
-              "action": "play:exhaust_rune:1"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:exhaust_rune:0"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:play_gear:1"
-            }
-          ]
-        },
         {
           "actor": "player_1",
           "action": "play:end_turn",
@@ -2776,16 +2757,16 @@
         },
         {
           "actor": "player_2",
-          "action": "shortcut:play_gear:3:Calm\u00d72",
-          "label": "Play Guardian Angel (2 Calm)",
+          "action": "shortcut:play_gear:3:Calm\u00d71#Chaos\u00d71",
+          "label": "Play Guardian Angel (1 Calm, 1 Chaos)",
           "chain": [
             {
               "actor": "player_2",
-              "action": "play:exhaust_rune:1"
+              "action": "play:exhaust_rune:2"
             },
             {
               "actor": "player_2",
-              "action": "play:exhaust_rune:2"
+              "action": "play:exhaust_rune:0"
             },
             {
               "actor": "player_2",
@@ -2806,51 +2787,74 @@
         },
         {
           "actor": "player_1",
-          "action": "shortcut:play_unit:1:Calm\u00d71#Chaos\u00d71",
-          "label": "Play Teemo, Scout (1 Calm, 1 Chaos)",
+          "action": "play:end_turn",
+          "label": "End turn",
           "chain": [
             {
               "actor": "player_1",
-              "action": "play:exhaust_rune:0"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:exhaust_rune:1"
-            },
-            {
-              "actor": "player_1",
-              "action": "play:play_unit:1"
+              "action": "play:end_turn"
             }
           ]
         },
         {
-          "actor": "player_1",
-          "action": "play:choose_location:base",
-          "label": "Place Teemo, Scout on Base",
+          "actor": "player_2",
+          "action": "intent:10000",
+          "label": "Play Irelia, Fervent (3 Calm, 2 Chaos)",
           "chain": [
             {
-              "actor": "player_1",
+              "actor": "player_2",
+              "action": "play:exhaust_rune:2"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:3"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:4"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:0"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:exhaust_rune:1"
+            },
+            {
+              "actor": "player_2",
+              "action": "play:play_champion:10000"
+            }
+          ]
+        },
+        {
+          "actor": "player_2",
+          "action": "play:choose_location:base",
+          "label": "Place Irelia, Fervent on Base",
+          "chain": [
+            {
+              "actor": "player_2",
               "action": "play:choose_location:base"
             }
           ]
         },
         {
-          "actor": "player_1",
+          "actor": "player_2",
           "action": "intent:equip:0",
-          "label": "To Teemo, Scout (1 Calm)",
+          "label": "Equip Guardian Angel \u2192 Irelia, Fervent (1 Calm)",
           "chain": [
             {
-              "actor": "player_1",
-              "action": "play:recycle_rune:1"
+              "actor": "player_2",
+              "action": "play:recycle_rune:2"
             },
             {
-              "actor": "player_1",
-              "action": "play:equip:0:player_1:0"
+              "actor": "player_2",
+              "action": "play:equip:0:player_2:0"
             }
           ]
         }
       ],
-      "updated_at": 1782936558.789696
+      "updated_at": 1782937477.38627
     }
   ]
 }

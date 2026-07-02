@@ -1652,8 +1652,13 @@ def create_app() -> FastAPI:
         reset_engine()
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, Any]:
+        """Liveness + database connectivity. ``db.connected`` is the quick way to
+        tell whether the app actually reached the configured database (runs
+        SELECT 1); it never fails the request even when the DB is down."""
+        from .db import check_connection
+
+        return {"status": "ok", "db": check_connection()}
 
     @app.get("/state")
     def state() -> dict[str, Any]:
