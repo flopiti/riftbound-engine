@@ -19,6 +19,8 @@ db = [
   "SQLAlchemy>=2.0",
   # Postgres driver (SQLite needs none). Install on the server for Postgres.
   "psycopg[binary]>=3.1",
+  # Versioned, file-based schema migrations.
+  "alembic>=1.13",
 ]
 
 [tool.setuptools.packages.find]

@@ -6,6 +6,8 @@ riftbound_engine/abilities.py
 riftbound_engine/action_label.py
 riftbound_engine/csv_data.py
 riftbound_engine/db.py
+riftbound_engine/db_migrate.py
+riftbound_engine/db_models.py
 riftbound_engine/deck_files.py
 riftbound_engine/decks.py
 riftbound_engine/effects.py
@@ -45,6 +47,7 @@ tests/test_conquer_hold_split.py
 tests/test_counter_spell.py
 tests/test_damage_model.py
 tests/test_db.py
+tests/test_db_migrate.py
 tests/test_deck_change_search.py
 tests/test_deck_files.py
 tests/test_defend_here.py
